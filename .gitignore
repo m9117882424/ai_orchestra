@@ -3,6 +3,9 @@ runtime/opencode.json
 data/
 repos/*
 !repos/.gitkeep
+worktrees/
+backups/
 *.log
 __pycache__/
 *.py[cod]
+.pytest_cache/

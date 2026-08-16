@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Orchestra — кабинет руководителя</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='/app.css') }}">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">AO</span>
+        <div>
+          <strong>AI Orchestra</strong>
+          <span>операционный контур</span>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <span class="live"><i></i>система на связи</span>
+        <a class="button button-secondary" href="{{ opencode_url }}" target="_blank" rel="noreferrer">Открыть OpenCode ↗</a>
+      </div>
+    </header>
+
+    <main>
+      <section class="intro">
+        <div>
+          <p class="eyebrow">Кабинет руководителя</p>
+          <h1>От задач до решений — в одном окне</h1>
+          <p>Контроль загрузки отдела, согласований, расходов и торговых ограничений.</p>
+        </div>
+        <button class="button button-primary" id="show-task-form">+ Новая задача</button>
+      </section>
+
+      <section class="task-form panel hidden" id="task-form-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Постановка</p>
+            <h2>Новая задача</h2>
+          </div>
+          <button class="icon-button" id="hide-task-form" aria-label="Закрыть">×</button>
+        </div>
+        <form id="task-form">
+          <label class="wide">Название<input name="title" minlength="3" maxlength="200" required placeholder="Что должен сделать отдел"></label>
+          <label>Проект<input name="project" value="general" maxlength="120" required></label>
+          <label>Направление<select name="domain"><option value="development">Разработка</option><option value="analytics">Аналитика</option><option value="trading">Торговля</option></select></label>
+          <label>Приоритет<select name="priority"><option value="normal">Обычный</option><option value="high">Высокий</option><option value="critical">Критический</option><option value="low">Низкий</option></select></label>
+          <label>Риск<select name="risk_level"><option value="low">Низкий</option><option value="medium">Средний</option><option value="high">Высокий</option><option value="critical">Критический</option></select></label>
+          <label class="wide">Описание<textarea name="description" maxlength="10000" rows="4" placeholder="Результат, ограничения и критерии приемки"></textarea></label>
+          <div class="wide form-actions"><span class="form-status" id="task-form-status"></span><button class="button button-primary" type="submit">Поставить в бэклог</button></div>
+        </form>
+      </section>
+
+      <section class="metrics" aria-label="Сводка">
+        <article><span>В работе</span><strong id="metric-progress">—</strong><small>активных задач</small></article>
+        <article><span>Ждут решения</span><strong id="metric-approvals">—</strong><small>согласований</small></article>
+        <article><span>Расход за месяц</span><strong id="metric-cost">—</strong><small>условных единиц</small></article>
+        <article><span>Завершено</span><strong id="metric-done">—</strong><small>задач в журнале</small></article>
+      </section>
+
+      <div class="layout">
+        <section class="panel span-two">
+          <div class="panel-heading">
+            <div><p class="eyebrow">Портфель</p><h2>Задачи отдела</h2></div>
+            <button class="text-button" data-refresh>Обновить</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Задача</th><th>Направление</th><th>Риск</th><th>Статус</th></tr></thead>
+              <tbody id="tasks-body"><tr><td colspan="4" class="empty">Загрузка…</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+
+        <aside class="panel guard-panel">
+          <div class="panel-heading"><div><p class="eyebrow">Risk control</p><h2>Торговый контур</h2></div><span class="lock">LOCKED</span></div>
+          <div class="guard-status"><span id="guard-mode">—</span><small>текущий режим</small></div>
+          <dl class="guard-grid">
+            <div><dt>Аварийный стоп</dt><dd id="guard-stop">—</dd></div>
+            <div><dt>Реальные ордера</dt><dd id="guard-live">—</dd></div>
+            <div><dt>Автопродажа</dt><dd id="guard-sell">—</dd></div>
+            <div><dt>Мин. отклонение</dt><dd id="guard-deviation">—</dd></div>
+            <div><dt>Резерв денег</dt><dd id="guard-reserve">—</dd></div>
+            <div><dt>Дневной лимит</dt><dd id="guard-limit">—</dd></div>
+          </dl>
+          <p class="guard-note">Из кабинета нельзя включить live-торговлю. Для перехода между этапами требуется отдельное изменение конфигурации, проверка и явное решение владельца.</p>
+        </aside>
+
+        <section class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">Human in the loop</p><h2>Согласования</h2></div></div>
+          <div class="stack" id="approvals-list"><p class="empty">Загрузка…</p></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">FinOps</p><h2>Контрольные бюджеты</h2></div></div>
+          <div class="stack" id="budgets-list"><p class="empty">Загрузка…</p></div>
+          <p class="panel-note">Фактический hard stop задавайте также у AITunnel или провайдера: кабинет пока ведет учет и политику лимитов.</p>
+        </section>
+
+        <section class="panel span-two">
+          <div class="panel-heading"><div><p class="eyebrow">Traceability</p><h2>Журнал действий</h2></div></div>
+          <div class="audit-list" id="audit-list"><p class="empty">Загрузка…</p></div>
+        </section>
+      </div>
+    </main>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="{{ url_for('static', path='/app.js') }}" defer></script>
+</body>
+</html>

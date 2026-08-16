@@ -60,6 +60,20 @@ if [[ -f .env ]]; then
   else
     fail "Замените OPENCODE_SERVER_PASSWORD"
   fi
+
+  control_plane_password="${CONTROL_PLANE_SERVER_PASSWORD:-}"
+  if [[ "${#control_plane_password}" -ge 20 && "$control_plane_password" != "CHANGE_ME_MANAGER_PASSWORD" ]]; then
+    pass "Пароль кабинета руководителя задан"
+  else
+    fail "CONTROL_PLANE_SERVER_PASSWORD должен содержать не менее 20 символов; для обновления можно повторить make init"
+  fi
+
+  control_plane_db_password="${CONTROL_PLANE_DB_PASSWORD:-}"
+  if [[ "${#control_plane_db_password}" -ge 20 && "$control_plane_db_password" != "CHANGE_ME_DATABASE_PASSWORD" ]]; then
+    pass "Пароль PostgreSQL кабинета задан"
+  else
+    fail "CONTROL_PLANE_DB_PASSWORD должен содержать не менее 20 символов; для обновления можно повторить make init"
+  fi
 fi
 
 if docker compose config --quiet >/dev/null 2>&1; then
@@ -76,4 +90,3 @@ fi
 
 echo
 echo "Preflight: контур готов к сборке."
-

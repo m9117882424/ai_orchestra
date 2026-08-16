@@ -1,0 +1,49 @@
+name: ai-development-department
+
+services:
+  opencode:
+    build:
+      context: .
+      args:
+        OPENCODE_VERSION: ${OPENCODE_VERSION:-latest}
+    image: ai-development-department/opencode:${OPENCODE_VERSION:-latest}
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      OPENCODE_CONFIG: /root/.config/opencode/opencode.json
+    command:
+      - opencode
+      - web
+      - --hostname
+      - 0.0.0.0
+      - --port
+      - "4096"
+    ports:
+      - "127.0.0.1:${OPENCODE_PORT:-4096}:4096"
+    volumes:
+      - ./runtime/opencode.json:/root/.config/opencode/opencode.json:ro
+      - ./prompts:/root/.config/opencode/prompts:ro
+      - ./policy/AGENTS.md:/workspace/repos/AGENTS.md:ro
+      - ./repos:/workspace/repos/projects
+      - ./data/opencode:/root/.local/share/opencode
+      - ./data/state:/root/.local/state/opencode
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "curl -fsS -u \"$${OPENCODE_SERVER_USERNAME}:$${OPENCODE_SERVER_PASSWORD}\" http://127.0.0.1:4096/global/health >/dev/null || exit 1"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
+

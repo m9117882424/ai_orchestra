@@ -1,0 +1,37 @@
+name: Проверка конфигурации
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Получить код
+        uses: actions/checkout@v4
+
+      - name: Подготовить безопасную тестовую конфигурацию
+        run: |
+          cp .env.example .env
+          cp config/opencode.shared.json runtime/opencode.json
+
+      - name: Проверить JSON
+        run: |
+          python3 -m json.tool config/opencode.shared.json >/dev/null
+          python3 -m json.tool config/opencode.separate.json >/dev/null
+          python3 -m json.tool runtime/opencode.json >/dev/null
+
+      - name: Проверить Docker Compose
+        run: docker compose config --quiet
+
+      - name: Проверить shell-скрипты
+        run: |
+          bash -n scripts/bootstrap.sh
+          bash -n scripts/switch-key-mode.sh
+          bash -n scripts/preflight.sh
+          bash -n scripts/smoke.sh
+

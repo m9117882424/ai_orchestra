@@ -28,10 +28,18 @@ jobs:
       - name: Проверить Docker Compose
         run: docker compose config --quiet
 
+      - name: Установить зависимости кабинета
+        run: python3 -m pip install --requirement control_plane/requirements-dev.txt
+
+      - name: Проверить кабинет руководителя
+        run: python3 -m pytest control_plane/tests
+
       - name: Проверить shell-скрипты
         run: |
           bash -n scripts/bootstrap.sh
           bash -n scripts/switch-key-mode.sh
           bash -n scripts/preflight.sh
           bash -n scripts/smoke.sh
-
+          bash -n scripts/backup.sh
+          bash -n scripts/worktree-create.sh
+          bash -n scripts/worktree-remove.sh

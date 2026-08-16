@@ -1,6 +1,69 @@
 name: ai-development-department
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ai_orchestra
+      POSTGRES_USER: ai_orchestra
+      POSTGRES_PASSWORD: ${CONTROL_PLANE_DB_PASSWORD}
+    volumes:
+      - control-plane-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ai_orchestra -d ai_orchestra"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
+
+  control-plane:
+    build:
+      context: ./control_plane
+    image: ai-development-department/control-plane:0.2.0
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    environment:
+      CONTROL_PLANE_ENVIRONMENT: production
+      CONTROL_PLANE_DB_HOST: postgres
+      CONTROL_PLANE_DB_PORT: 5432
+      CONTROL_PLANE_DB_NAME: ai_orchestra
+      CONTROL_PLANE_DB_USER: ai_orchestra
+      CONTROL_PLANE_DB_PASSWORD: ${CONTROL_PLANE_DB_PASSWORD}
+      CONTROL_PLANE_SERVER_USERNAME: ${CONTROL_PLANE_SERVER_USERNAME}
+      CONTROL_PLANE_SERVER_PASSWORD: ${CONTROL_PLANE_SERVER_PASSWORD}
+      CONTROL_PLANE_OPENCODE_URL: ${OPENCODE_PUBLIC_URL:-http://127.0.0.1:4096}
+      CONTROL_PLANE_DEFAULT_MONTHLY_BUDGET: ${CONTROL_PLANE_DEFAULT_MONTHLY_BUDGET:-25000}
+    ports:
+      - "127.0.0.1:${CONTROL_PLANE_PORT:-8088}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
+
   opencode:
     build:
       context: .
@@ -26,7 +89,9 @@ services:
       - ./runtime/opencode.json:/root/.config/opencode/opencode.json:ro
       - ./prompts:/root/.config/opencode/prompts:ro
       - ./policy/AGENTS.md:/workspace/repos/AGENTS.md:ro
+      - ./policy/AGENTS.md:/workspace/worktrees/AGENTS.md:ro
       - ./repos:/workspace/repos/projects
+      - ./worktrees:/workspace/worktrees
       - ./data/opencode:/root/.local/share/opencode
       - ./data/state:/root/.local/state/opencode
     security_opt:
@@ -47,3 +112,5 @@ services:
         max-size: 20m
         max-file: "5"
 
+volumes:
+  control-plane-postgres:

@@ -55,7 +55,13 @@
           "qa-engineer": "allow",
           "code-reviewer": "allow",
           "devops-engineer": "allow",
-          "data-analyst": "allow"
+          "data-analyst": "allow",
+          "quant-researcher": "allow",
+          "market-data-engineer": "allow",
+          "portfolio-analyst": "allow",
+          "risk-officer": "allow",
+          "execution-engineer": "allow",
+          "trade-reviewer": "allow"
         }
       }
     },
@@ -194,7 +200,115 @@
           "git push*": "deny"
         }
       }
+    },
+    "quant-researcher": {
+      "description": "Проверяет торговые гипотезы воспроизводимым backtest и учитывает costs, bias и tail-risk; ордера не размещает.",
+      "mode": "subagent",
+      "model": "openai/gpt-5.2-pro",
+      "prompt": "{file:./prompts/quant-researcher.txt}",
+      "steps": 28,
+      "permission": {
+        "edit": "deny",
+        "bash": {
+          "*": "ask",
+          "python3 *": "allow",
+          "pytest *": "allow",
+          "git diff*": "allow",
+          "rm *": "deny",
+          "sudo *": "deny",
+          "git push*": "deny"
+        }
+      }
+    },
+    "market-data-engineer": {
+      "description": "Проектирует загрузку и контроль качества рыночных данных крипты и стандартных активов.",
+      "mode": "subagent",
+      "model": "openai/gpt-5.1-codex-max",
+      "prompt": "{file:./prompts/market-data-engineer.txt}",
+      "steps": 30,
+      "permission": {
+        "edit": "ask",
+        "bash": {
+          "*": "ask",
+          "python3 *": "allow",
+          "pytest *": "allow",
+          "git status*": "allow",
+          "git diff*": "allow",
+          "rm *": "deny",
+          "sudo *": "deny",
+          "git push*": "deny"
+        }
+      }
+    },
+    "portfolio-analyst": {
+      "description": "Считает экспозиции, P&L, концентрацию и риск единого портфеля по разным классам активов.",
+      "mode": "subagent",
+      "model": "google/gemini-2.5-pro",
+      "prompt": "{file:./prompts/portfolio-analyst.txt}",
+      "steps": 24,
+      "permission": {
+        "edit": "deny",
+        "bash": {
+          "*": "ask",
+          "python3 *": "allow",
+          "git diff*": "allow",
+          "rm *": "deny",
+          "sudo *": "deny",
+          "git push*": "deny"
+        }
+      }
+    },
+    "risk-officer": {
+      "description": "Независимо проверяет лимиты и fail-safe условия; при недостатке доказательств блокирует переход.",
+      "mode": "subagent",
+      "model": "anthropic/claude-sonnet-4-5",
+      "prompt": "{file:./prompts/risk-officer.txt}",
+      "steps": 18,
+      "permission": {
+        "edit": "deny",
+        "bash": "deny"
+      }
+    },
+    "execution-engineer": {
+      "description": "Разрабатывает безопасные broker/exchange adapters только на mocks и sandbox, без live-ключей и ордеров.",
+      "mode": "subagent",
+      "model": "openai/gpt-5.1-codex-max",
+      "prompt": "{file:./prompts/execution-engineer.txt}",
+      "steps": 32,
+      "permission": {
+        "edit": "allow",
+        "bash": {
+          "*": "ask",
+          "python3 -m pytest *": "allow",
+          "pytest *": "allow",
+          "git status*": "allow",
+          "git diff*": "allow",
+          "curl *": "deny",
+          "wget *": "deny",
+          "rm *": "deny",
+          "sudo *": "deny",
+          "git push*": "deny",
+          "docker compose up*": "deny",
+          "docker compose down*": "deny"
+        }
+      }
+    },
+    "trade-reviewer": {
+      "description": "Независимо проверяет исследование, риск, исполнение и эксплуатационные защиты торгового кода.",
+      "mode": "subagent",
+      "model": "anthropic/claude-sonnet-4-5",
+      "prompt": "{file:./prompts/trade-reviewer.txt}",
+      "steps": 22,
+      "permission": {
+        "edit": "deny",
+        "bash": {
+          "*": "deny",
+          "git status*": "allow",
+          "git log*": "allow",
+          "git diff*": "allow",
+          "rg *": "allow"
+        }
+      }
     }
   }
 }
-

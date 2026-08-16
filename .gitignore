@@ -1,0 +1,8 @@
+.env
+runtime/opencode.json
+data/
+repos/*
+!repos/.gitkeep
+*.log
+__pycache__/
+*.py[cod]

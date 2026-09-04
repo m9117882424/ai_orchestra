@@ -51,6 +51,7 @@ services:
       - "127.0.0.1:${CONTROL_PLANE_PORT:-8088}:8080"
     networks:
       - control-db
+      - control-access
     depends_on:
       postgres:
         condition: service_healthy
@@ -210,6 +211,7 @@ services:
 networks:
   control-db:
     internal: true
+  control-access:
   model-net:
   router-backend:
     internal: true

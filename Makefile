@@ -1,4 +1,4 @@
-.PHONY: init shared separate build up down restart logs manager-logs router-logs status preflight smoke validate test backup migrate schema-check
+.PHONY: init shared separate build up down restart logs manager-logs router-logs status preflight smoke validate test backup migrate schema-check dependency-check
 
 init:
 	./scripts/bootstrap.sh
@@ -51,8 +51,11 @@ migrate:
 schema-check:
 	docker compose run --rm --no-deps control-plane python -m app.schema_cli check
 
-validate:
+dependency-check:
+	python3 scripts/verify_dependency_locks.py
+
+validate: dependency-check
 	python3 -m json.tool config/opencode.gateway.json >/dev/null
-	python3 -m compileall -q control_plane/app control_plane/migrations control_plane/tests scripts/model_router_smoke.py scripts/static_security_check.py
+	python3 -m compileall -q control_plane/app control_plane/migrations control_plane/tests scripts/model_router_smoke.py scripts/static_security_check.py scripts/verify_dependency_locks.py
 	docker compose config --quiet
 	python3 scripts/static_security_check.py

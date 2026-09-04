@@ -8,8 +8,10 @@ RUN groupadd --system orchestra \
 
 WORKDIR /app
 
-COPY requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir --requirement requirements.txt
+COPY requirements.in requirements-dev.in requirements.lock requirements-dev.lock dependency-locks.sha256 ./
+RUN sha256sum --check dependency-locks.sha256 \
+    && pip install --no-cache-dir --require-hashes --requirement requirements.lock \
+    && sha256sum requirements.lock > runtime-lock.sha256
 
 COPY alembic.ini ./alembic.ini
 COPY migrations ./migrations

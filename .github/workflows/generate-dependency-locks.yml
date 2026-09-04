@@ -1,0 +1,193 @@
+name: Generate dependency locks
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - control_plane/requirements.in
+      - control_plane/requirements-dev.in
+      - control_plane/requirements.lock
+      - control_plane/requirements-dev.lock
+      - control_plane/dependency-locks.sha256
+      - scripts/verify_dependency_locks.py
+      - .github/workflows/generate-dependency-locks.yml
+  pull_request:
+    paths:
+      - control_plane/requirements.in
+      - control_plane/requirements-dev.in
+      - control_plane/requirements.lock
+      - control_plane/requirements-dev.lock
+      - control_plane/dependency-locks.sha256
+      - scripts/verify_dependency_locks.py
+      - .github/workflows/generate-dependency-locks.yml
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # The exact patch release is part of dependency-lock provenance.
+      - name: Configure Python 3.12.14
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.14'
+
+      - name: Install pinned lock generator in sanitized environment
+        run: |
+          set -Eeuo pipefail
+          clean_env=(
+            env -i
+            "PATH=$PATH"
+            "HOME=$HOME"
+            "LANG=C.UTF-8"
+            "PIP_CONFIG_FILE=/dev/null"
+          )
+
+          "${clean_env[@]}" python - <<'PY'
+          import sys
+
+          expected = (3, 12, 14)
+          actual = sys.version_info[:3]
+          print(f"lock-generator Python={'.'.join(map(str, actual))}")
+          if actual != expected:
+              raise SystemExit(f"ERROR: expected Python {expected}, got {actual}")
+          PY
+
+          "${clean_env[@]}" python -m pip install \
+            --disable-pip-version-check \
+            --index-url=https://pypi.org/simple \
+            'pip-tools==7.6.1'
+
+      - name: Generate fresh hashed runtime and development locks
+        working-directory: control_plane
+        run: |
+          set -Eeuo pipefail
+
+          # Resolve in a minimal environment so runner-level PIP_* policy cannot
+          # silently alter package-source or resolver semantics. The lock source
+          # is explicit and pip/pip-tools configuration discovery is disabled.
+          clean_env=(
+            env -i
+            "PATH=$PATH"
+            "HOME=$HOME"
+            "LANG=C.UTF-8"
+            "PIP_CONFIG_FILE=/dev/null"
+          )
+
+          "${clean_env[@]}" python - <<'PY'
+          from click.core import ParameterSource
+          from piptools.scripts.compile import cli
+
+          ctx = cli.make_context(
+              "pip-compile",
+              ["--no-config", "--index-url", "https://pypi.org/simple", "requirements.in"],
+              resilient_parsing=True,
+          )
+          try:
+              value = ctx.params["no_index"]
+              source = ctx.get_parameter_source("no_index")
+              print(f"pip-tools no_index={value!r}; source={source.name if source else 'unknown'}")
+              if value is not False or source is not ParameterSource.DEFAULT:
+                  raise SystemExit("ERROR: pip-tools no_index must remain the CLI default (False)")
+          finally:
+              ctx.close()
+          PY
+
+          # Never seed regeneration from committed output. This forces a full
+          # resolution and hash refresh from the declared input files.
+          rm -f requirements.lock requirements-dev.lock dependency-locks.sha256
+
+          "${clean_env[@]}" pip-compile \
+            --no-config \
+            --index-url=https://pypi.org/simple \
+            --generate-hashes \
+            --resolver=backtracking \
+            --strip-extras \
+            --upgrade \
+            --rebuild \
+            --no-reuse-hashes \
+            --no-header \
+            --no-emit-index-url \
+            --no-emit-trusted-host \
+            --output-file=requirements.lock \
+            requirements.in
+          "${clean_env[@]}" pip-compile \
+            --no-config \
+            --index-url=https://pypi.org/simple \
+            --generate-hashes \
+            --resolver=backtracking \
+            --strip-extras \
+            --upgrade \
+            --rebuild \
+            --no-reuse-hashes \
+            --no-header \
+            --no-emit-index-url \
+            --no-emit-trusted-host \
+            --output-file=requirements-dev.lock \
+            requirements-dev.in
+
+          # Use a deterministic, audited header with no time, runner identity,
+          # or commit-specific data. The exact generator runtime is part of the
+          # lock provenance contract.
+          "${clean_env[@]}" python - <<'PY'
+          from pathlib import Path
+
+          headers = {
+              "requirements.lock": "requirements.in",
+              "requirements-dev.lock": "requirements-dev.in",
+          }
+          for output, source in headers.items():
+              path = Path(output)
+              body = path.read_text(encoding="utf-8")
+              header = (
+                  "# AI Orchestra deterministic dependency lock\n"
+                  "# generator: pip-tools==7.6.1; python: 3.12.14; resolver: backtracking\n"
+                  "# package-source policy: https://pypi.org/simple (resolution only; not embedded)\n"
+                  f"# input: {source}\n"
+                  "# install policy: exact pins + SHA-256 hashes required\n\n"
+              )
+              path.write_text(header + body.lstrip("\n"), encoding="utf-8")
+          PY
+
+          # Only effective requirement directives count here; comments are not
+          # executable pip configuration. Any source directive in the lock body
+          # is forbidden because package source selection belongs to the caller.
+          if grep -Eq '^[[:space:]]*--(no-index|index-url|extra-index-url|trusted-host|find-links)([=[:space:]]|$)' requirements.lock requirements-dev.lock; then
+            echo 'ERROR: lock files embed forbidden package-source directives' >&2
+            exit 1
+          fi
+
+          "${clean_env[@]}" python -m pip install \
+            --dry-run \
+            --require-hashes \
+            --index-url=https://pypi.org/simple \
+            -r requirements.lock
+          "${clean_env[@]}" python -m pip install \
+            --dry-run \
+            --require-hashes \
+            --index-url=https://pypi.org/simple \
+            -r requirements-dev.lock
+
+          sha256sum requirements.in requirements-dev.in requirements.lock requirements-dev.lock > dependency-locks.sha256
+
+      - name: Upload generated lock candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: control-plane-lock-candidate-${{ github.sha }}
+          path: |
+            control_plane/requirements.lock
+            control_plane/requirements-dev.lock
+            control_plane/dependency-locks.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Verify committed locks match generator output
+        working-directory: control_plane
+        run: |
+          set -Eeuo pipefail
+          git diff --exit-code -- requirements.lock requirements-dev.lock dependency-locks.sha256

@@ -9,16 +9,16 @@ permissions:
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Получить код
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Подготовить инструменты проверки
         run: |
           sudo apt-get update
           sudo apt-get install -y shellcheck
-          python3 -m pip install pyyaml
+          python3 -m pip install 'pyyaml==6.0.3'
 
       - name: Подготовить безопасную тестовую конфигурацию
         run: |
@@ -40,7 +40,7 @@ jobs:
               assert isinstance(data, dict) and isinstance(data.get('model_list'), list) and data['model_list'], path
           print('[OK] router YAML parsed')
           PY
-          python3 -m compileall -q control_plane/app control_plane/migrations control_plane/tests scripts/model_router_smoke.py scripts/static_security_check.py
+          python3 -m compileall -q control_plane/app control_plane/migrations control_plane/tests scripts/model_router_smoke.py scripts/static_security_check.py scripts/verify_dependency_locks.py
           node --check control_plane/app/static/app.js
 
       - name: Проверить shell-скрипты
@@ -56,18 +56,24 @@ jobs:
           bash -n scripts/postgres-schema-smoke.sh
           shellcheck scripts/*.sh
 
+      - name: Проверить dependency locks
+        run: |
+          python3 scripts/verify_dependency_locks.py
+          python3 -m pip install --dry-run --require-hashes --requirement control_plane/requirements.lock
+          python3 -m pip install --dry-run --require-hashes --requirement control_plane/requirements-dev.lock
+
       - name: Проверить Docker Compose и границы безопасности
         run: |
           docker compose config --quiet
           python3 scripts/static_security_check.py
 
-      - name: Установить зависимости кабинета
-        run: python3 -m pip install --requirement control_plane/requirements-dev.txt
+      - name: Установить зависимости кабинета из dev lock
+        run: python3 -m pip install --require-hashes --requirement control_plane/requirements-dev.lock
 
       - name: Проверить API и migration safety
         run: python3 -m pytest control_plane/tests
 
-      - name: Проверить Docker build
+      - name: Проверить Docker buildability with current upstream bases
         run: docker compose build --pull
 
       - name: Проверить PostgreSQL migration semantics

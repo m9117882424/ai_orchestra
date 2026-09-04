@@ -1,7 +1,4 @@
-alembic>=1.16,<2
-fastapi>=0.116,<1
-jinja2>=3.1,<4
-psycopg[binary]>=3.2,<4
-pydantic-settings>=2.10,<3
-sqlalchemy>=2.0,<3
-uvicorn[standard]>=0.35,<1
+# Compatibility entry point. Dependency intent lives in requirements.in.
+# Production resolution is committed in requirements.lock.
+--require-hashes
+-r requirements.lock

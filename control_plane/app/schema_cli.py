@@ -20,28 +20,29 @@ def _current_revision(connection) -> str | None:
 
 
 def _run_under_lock(action) -> None:
+    # engine.begin commits only after action returns. PostgreSQL transaction-level
+    # advisory lock therefore remains held until the migration transaction is durably
+    # committed or rolled back; another migrator cannot observe an intermediate state.
     with engine.begin() as connection:
-        is_postgres = engine.dialect.name == "postgresql"
-        if is_postgres:
-            connection.execute(text("SELECT pg_advisory_lock(hashtext(:key))"), {"key": LOCK_KEY})
-        try:
-            cfg = alembic_config()
-            cfg.attributes["connection"] = connection
-            action(connection, cfg)
-        finally:
-            if is_postgres:
-                connection.execute(text("SELECT pg_advisory_unlock(hashtext(:key))"), {"key": LOCK_KEY})
+        if engine.dialect.name == "postgresql":
+            connection.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+                {"key": LOCK_KEY},
+            )
+        cfg = alembic_config()
+        cfg.attributes["connection"] = connection
+        action(connection, cfg)
 
 
 def check_schema() -> None:
     expected = head_revision()
     with engine.connect() as connection:
         current = _current_revision(connection)
-    if current != expected:
-        raise RuntimeError(
-            f"schema mismatch: current={current or 'unversioned'}, expected={expected}"
-        )
-    differences = legacy_schema_diff(engine)
+        if current != expected:
+            raise RuntimeError(
+                f"schema mismatch: current={current or 'unversioned'}, expected={expected}"
+            )
+        differences = legacy_schema_diff(connection)
     if differences:
         joined = "\n - ".join(differences)
         raise RuntimeError("schema shape mismatch despite valid revision:\n - " + joined)
@@ -54,7 +55,7 @@ def migrate_schema() -> None:
     def migrate(connection, cfg) -> None:
         current = _current_revision(connection)
         if current == expected:
-            differences = legacy_schema_diff(engine)
+            differences = legacy_schema_diff(connection)
             if differences:
                 joined = "\n - ".join(differences)
                 raise RuntimeError("schema drift at current head:\n - " + joined)
@@ -63,7 +64,7 @@ def migrate_schema() -> None:
 
         table_names = set(connection.dialect.get_table_names(connection)) - {"alembic_version"}
         if current is None and table_names:
-            differences = legacy_schema_diff(engine)
+            differences = legacy_schema_diff(connection)
             if differences:
                 joined = "\n - ".join(differences)
                 raise RuntimeError(
@@ -71,6 +72,9 @@ def migrate_schema() -> None:
                     + joined
                 )
             command.stamp(cfg, expected)
+            final = _current_revision(connection)
+            if final != expected:
+                raise RuntimeError(f"stamp finished at {final}, expected {expected}")
             print(f"[OK] Existing schema verified and stamped at {expected}; data unchanged")
             return
 
@@ -78,7 +82,7 @@ def migrate_schema() -> None:
         final = _current_revision(connection)
         if final != expected:
             raise RuntimeError(f"migration finished at {final}, expected {expected}")
-        differences = legacy_schema_diff(engine)
+        differences = legacy_schema_diff(connection)
         if differences:
             joined = "\n - ".join(differences)
             raise RuntimeError("migration reached head but schema shape differs:\n - " + joined)

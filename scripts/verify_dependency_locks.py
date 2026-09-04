@@ -15,7 +15,27 @@ TRACKED = (
     "requirements-dev.lock",
 )
 PACKAGE_RE = re.compile(r"^([A-Za-z0-9_.-]+)==([^\\\s]+)\s*\\?$")
+SOURCE_DIRECTIVE_RE = re.compile(
+    r"^\s*--(?:no-index|index-url|extra-index-url|trusted-host|find-links)(?:[=\s]|$)",
+    re.IGNORECASE,
+)
 FORBIDDEN = ("git+", "hg+", "svn+", "bzr+", "-e ", "@ http://", "@ https://")
+EXPECTED_HEADERS = {
+    "requirements.lock": (
+        "# AI Orchestra deterministic dependency lock",
+        "# generator: pip-tools==7.6.1; python: 3.12; resolver: backtracking",
+        "# package-source policy: https://pypi.org/simple (resolution only; not embedded)",
+        "# input: requirements.in",
+        "# install policy: exact pins + SHA-256 hashes required",
+    ),
+    "requirements-dev.lock": (
+        "# AI Orchestra deterministic dependency lock",
+        "# generator: pip-tools==7.6.1; python: 3.12; resolver: backtracking",
+        "# package-source policy: https://pypi.org/simple (resolution only; not embedded)",
+        "# input: requirements-dev.in",
+        "# install policy: exact pins + SHA-256 hashes required",
+    ),
+}
 
 
 def sha256(path: Path) -> str:
@@ -45,8 +65,25 @@ def parse_manifest() -> dict[str, str]:
     return entries
 
 
+def verify_lock_policy(path: Path, text: str) -> None:
+    lines = text.splitlines()
+    expected = EXPECTED_HEADERS[path.name]
+    actual = tuple(lines[: len(expected)])
+    assert actual == expected, (
+        f"Unexpected provenance header in {path.name}: actual={actual!r}, expected={expected!r}"
+    )
+
+    for line_number, line in enumerate(lines, start=1):
+        if line.lstrip().startswith("#"):
+            continue
+        assert not SOURCE_DIRECTIVE_RE.match(line), (
+            f"Forbidden package-source directive in {path.name}:{line_number}: {line!r}"
+        )
+
+
 def package_blocks(path: Path) -> dict[str, tuple[str, list[str]]]:
     text = path.read_text(encoding="utf-8")
+    verify_lock_policy(path, text)
     lowered = text.lower()
     for marker in FORBIDDEN:
         assert marker not in lowered, f"Forbidden dependency source {marker!r} in {path.name}"

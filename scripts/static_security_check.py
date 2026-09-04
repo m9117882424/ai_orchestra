@@ -49,7 +49,7 @@ def main() -> int:
     assert "MODEL_ROUTER_CLIENT_KEY" in opencode_env
 
     assert network_set(services["postgres"]) == {"control-db"}
-    assert network_set(services["control-plane"]) == {"control-db"}
+    assert network_set(services["control-plane"]) == {"control-db", "control-access"}
     assert network_set(services["model-router"]) == {"router-backend", "provider-egress"}
     assert network_set(services["model-gateway"]) == {"model-net", "router-backend"}
     assert network_set(services["opencode"]) == {"model-net"}

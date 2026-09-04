@@ -15,15 +15,19 @@ if [[ ! -f .env ]]; then
   sed -i "s|CHANGE_ME_LONG_RANDOM_PASSWORD|$(random_secret)|" .env
   sed -i "s|CHANGE_ME_MANAGER_PASSWORD|$(random_secret)|" .env
   sed -i "s|CHANGE_ME_DATABASE_PASSWORD|$(random_secret)|" .env
-  sed -i "s|CHANGE_ME_MODEL_ROUTER_KEY|sk-orch-$(random_secret)|" .env
-  echo "Создан .env с отдельными паролями интерфейсов, БД и внутреннего Model Router."
+  sed -i "s|CHANGE_ME_MODEL_ROUTER_MASTER_KEY|sk-admin-$(random_secret)|" .env
+  sed -i "s|CHANGE_ME_MODEL_ROUTER_CLIENT_KEY|sk-client-$(random_secret)|" .env
+  echo "Создан .env с отдельными паролями интерфейсов, БД и router credentials."
 else
   echo ".env уже существует — файл сохранен без перезаписи."
   if ! grep -q '^MODEL_ROUTER_MASTER_KEY=' .env; then
-    printf '\nMODEL_ROUTER_MASTER_KEY=sk-orch-%s\n' "$(random_secret)" >> .env
+    printf '\nMODEL_ROUTER_MASTER_KEY=sk-admin-%s\n' "$(random_secret)" >> .env
   fi
-  if ! grep -q '^MODEL_ROUTER_PORT=' .env; then
-    echo 'MODEL_ROUTER_PORT=18089' >> .env
+  if ! grep -q '^MODEL_ROUTER_CLIENT_KEY=' .env; then
+    printf 'MODEL_ROUTER_CLIENT_KEY=sk-client-%s\n' "$(random_secret)" >> .env
+  fi
+  if ! grep -q '^MODEL_GATEWAY_PORT=' .env; then
+    echo 'MODEL_GATEWAY_PORT=18089' >> .env
   fi
   if ! grep -q '^LITELLM_VERSION=' .env; then
     echo 'LITELLM_VERSION=1.99.0' >> .env

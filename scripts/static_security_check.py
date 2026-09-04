@@ -13,6 +13,7 @@ FORBIDDEN_OPENCODE_ENV = {
     "GOOGLE_GENERATIVE_AI_API_KEY",
     "CONTROL_PLANE_DB_PASSWORD",
     "CONTROL_PLANE_SERVER_PASSWORD",
+    "MODEL_ROUTER_MASTER_KEY",
 }
 PRODUCT_POLICY_MARKERS = {
     "min_deviation_pct",
@@ -45,24 +46,32 @@ def main() -> int:
     opencode_env = set((services["opencode"].get("environment") or {}).keys())
     leaked = sorted(opencode_env & FORBIDDEN_OPENCODE_ENV)
     assert not leaked, f"OpenCode receives forbidden secrets: {leaked}"
+    assert "MODEL_ROUTER_CLIENT_KEY" in opencode_env
 
     assert network_set(services["postgres"]) == {"control-db"}
     assert network_set(services["control-plane"]) == {"control-db"}
-    assert network_set(services["model-router"]) == {"model-net"}
+    assert network_set(services["model-router"]) == {"router-backend", "provider-egress"}
+    assert network_set(services["model-gateway"]) == {"model-net", "router-backend"}
     assert network_set(services["opencode"]) == {"model-net"}
 
+    # OpenCode must talk only to the inference gateway with a non-admin client credential.
     gateway = json.loads((ROOT / "config/opencode.gateway.json").read_text(encoding="utf-8"))
     assert set(gateway["provider"]) == {"orchestra"}
-    api_key = gateway["provider"]["orchestra"]["options"]["apiKey"]
-    assert api_key == "{env:MODEL_ROUTER_MASTER_KEY}"
+    options = gateway["provider"]["orchestra"]["options"]
+    assert options["baseURL"] == "http://model-gateway:8080/v1"
+    assert options["apiKey"] == "{env:MODEL_ROUTER_CLIENT_KEY}"
 
     env_text = (ROOT / ".env.example").read_text(encoding="utf-8")
     for key in ("AITUNNEL_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"):
         assert f"{key}=" not in env_text, f"{key} must live only in .env.providers"
+    assert "MODEL_ROUTER_MASTER_KEY=" in env_text
+    assert "MODEL_ROUTER_CLIENT_KEY=" in env_text
 
     provider_example = (ROOT / ".env.providers.example").read_text(encoding="utf-8")
     for key in ("AITUNNEL_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"):
         assert f"{key}=" in provider_example
+    assert "MODEL_ROUTER_MASTER_KEY=" not in provider_example
+    assert "MODEL_ROUTER_CLIENT_KEY=" not in provider_example
 
     models_text = (ROOT / "control_plane/app/models.py").read_text(encoding="utf-8")
     for marker in PRODUCT_POLICY_MARKERS:

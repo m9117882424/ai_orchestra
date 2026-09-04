@@ -46,7 +46,7 @@ backup:
 	./scripts/backup.sh
 
 migrate:
-	./scripts/migrate-control-plane.sh
+	bash ./scripts/migrate-control-plane.sh
 
 schema-check:
 	docker compose run --rm --no-deps control-plane python -m app.schema_cli check

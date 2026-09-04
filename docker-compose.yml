@@ -30,7 +30,7 @@ services:
   control-plane:
     build:
       context: ./control_plane
-    image: ai-development-department/control-plane:0.4.1
+    image: ai-development-department/control-plane:0.5.0
     restart: unless-stopped
     init: true
     read_only: true
@@ -157,7 +157,7 @@ services:
       context: .
       args:
         OPENCODE_VERSION: ${OPENCODE_VERSION:-1.18.27}
-    image: ai-development-department/opencode:${OPENCODE_VERSION:-1.18.27}
+    image: ai-development-department/opencode:${OPENCODE_VERSION:-1.18.27}-toolchain1
     restart: unless-stopped
     init: true
     environment:

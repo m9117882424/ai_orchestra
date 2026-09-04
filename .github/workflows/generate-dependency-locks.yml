@@ -27,41 +27,65 @@ jobs:
           cache: 'pip'
 
       - name: Install pinned lock generator
-        run: python -m pip install --disable-pip-version-check 'pip-tools==7.6.1'
+        run: |
+          set -Eeuo pipefail
+          unset PIP_NO_INDEX PIP_EXTRA_INDEX_URL PIP_FIND_LINKS
+          export PIP_CONFIG_FILE=/dev/null
+          python -m pip install --disable-pip-version-check 'pip-tools==7.6.1'
 
       - name: Generate hashed runtime and development locks
         working-directory: control_plane
         run: |
           set -Eeuo pipefail
+
+          # GitHub-hosted/containerized runners may inject pip policy variables.
+          # They must not silently change dependency-resolution semantics.
+          unset PIP_NO_INDEX PIP_EXTRA_INDEX_URL PIP_FIND_LINKS
+          export PIP_CONFIG_FILE=/dev/null
+
           pip-compile \
             --generate-hashes \
             --resolver=backtracking \
             --strip-extras \
+            --no-emit-index-url \
+            --no-emit-trusted-host \
             --output-file=requirements.lock \
             requirements.in
           pip-compile \
             --generate-hashes \
             --resolver=backtracking \
             --strip-extras \
+            --no-emit-index-url \
+            --no-emit-trusted-host \
             --output-file=requirements-dev.lock \
             requirements-dev.in
+
+          if grep -Eq -- '--no-index|--extra-index-url|--find-links' requirements.lock requirements-dev.lock; then
+            echo 'ERROR: lock generator inherited forbidden pip source semantics' >&2
+            exit 1
+          fi
+          if grep -Eq '^(--index-url|--extra-index-url|--trusted-host|--find-links)' requirements.lock requirements-dev.lock; then
+            echo 'ERROR: lock files must not embed runner-specific package source configuration' >&2
+            exit 1
+          fi
+
           python -m pip install --dry-run --require-hashes -r requirements.lock
           python -m pip install --dry-run --require-hashes -r requirements-dev.lock
           sha256sum requirements.in requirements-dev.in requirements.lock requirements-dev.lock > dependency-locks.sha256
 
-      - name: Verify committed locks match generator output
-        working-directory: control_plane
-        run: |
-          set -Eeuo pipefail
-          git diff --exit-code -- requirements.lock requirements-dev.lock dependency-locks.sha256
-
-      - name: Upload verified lock set
+      - name: Upload generated lock candidate
         uses: actions/upload-artifact@v4
         with:
-          name: control-plane-lock-verified-${{ github.sha }}
+          name: control-plane-lock-candidate-${{ github.sha }}
           path: |
             control_plane/requirements.lock
             control_plane/requirements-dev.lock
             control_plane/dependency-locks.sha256
           if-no-files-found: error
           retention-days: 7
+
+      - name: Verify committed locks match generator output
+        working-directory: control_plane
+        run: |
+          set -Eeuo pipefail
+          git diff --exit-code -- requirements.lock requirements-dev.lock dependency-locks.sha256

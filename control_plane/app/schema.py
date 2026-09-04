@@ -8,7 +8,7 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import Engine, inspect
 
 from .db import Base
-import app.models  # noqa: F401
+from . import models as _models  # noqa: F401
 
 
 CONTROL_PLANE_ROOT = Path(__file__).resolve().parents[1]

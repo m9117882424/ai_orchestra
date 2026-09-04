@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from .auth import require_control_request, require_manager
 from .db import Base, engine, get_db
-from .models import Approval, AuditEvent, Budget, CapabilityGuard, Task, UsageEvent
+from .models import Approval, AuditEvent, Budget, CapabilityGuard, ExecutionRun, Task, UsageEvent
 from .schemas import (
     ApprovalCreate,
     ApprovalDecisionRequest,
@@ -21,6 +21,7 @@ from .schemas import (
     BudgetRead,
     BudgetUpdate,
     CapabilityGuardRead,
+    ExecutionRead,
     TaskCreate,
     TaskRead,
     TaskStatusUpdate,
@@ -28,6 +29,7 @@ from .schemas import (
     UsageRead,
 )
 from .services import current_month_cost, seed_defaults, write_audit
+from .opencode_client import OpenCodeClient, OpenCodeError, extract_last_assistant_text
 from .settings import get_settings
 
 
@@ -54,7 +56,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="AI Orchestra Control Plane",
-    version="0.3.0",
+    version="0.4.0",
     docs_url=None,
     redoc_url=None,
     lifespan=lifespan,
@@ -67,6 +69,16 @@ app.mount("/static", StaticFiles(directory=str(base_dir / "static")), name="stat
 DbSession = Annotated[Session, Depends(get_db)]
 Manager = Annotated[str, Depends(require_manager)]
 Mutation = Annotated[None, Depends(require_control_request)]
+
+def get_opencode_client() -> OpenCodeClient:
+    settings = get_settings()
+    return OpenCodeClient(
+        settings.opencode_internal_url,
+        settings.opencode_username,
+        settings.opencode_password,
+    )
+
+OpenCode = Annotated[OpenCodeClient, Depends(get_opencode_client)]
 
 
 @app.get("/health")
@@ -312,3 +324,174 @@ def get_capability_guard(db: DbSession, _: Manager) -> CapabilityGuard:
     if guard is None:
         raise HTTPException(status_code=503, detail="Предохранитель возможностей не инициализирован")
     return guard
+
+
+def execution_prompt(task: Task) -> str:
+    return f"""Ты руководитель виртуального отдела разработки AI Orchestra.
+
+Выполни задачу как руководитель отдела: декомпозируй, при необходимости делегируй профильным агентам, организуй независимую QA-проверку и верни руководителю итог.
+
+Задача: {task.title}
+Проект: {task.project}
+Направление: {task.domain}
+Приоритет: {task.priority}
+Риск: {task.risk_level}
+
+Описание и критерии приемки:
+{task.description or "Дополнительное описание не задано."}
+
+Ограничения:
+- не выполняй production deploy;
+- не делай git push;
+- не запрашивай и не раскрывай секреты;
+- не выполняй внешнюю запись или финансовые операции;
+- если действие требует такого разрешения, остановись и явно укажи требуемое согласование;
+- в финале дай краткое резюме, выполненные проверки, измененные файлы/артефакты и открытые риски.
+"""
+
+
+@app.get("/api/executions", response_model=list[ExecutionRead])
+def list_executions(
+    db: DbSession,
+    _: Manager,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+) -> list[ExecutionRun]:
+    return list(
+        db.scalars(select(ExecutionRun).order_by(ExecutionRun.created_at.desc()).limit(limit))
+    )
+
+
+@app.post("/api/tasks/{task_id}/execute", response_model=ExecutionRead, status_code=status.HTTP_201_CREATED)
+def start_execution(
+    task_id: str,
+    db: DbSession,
+    manager: Manager,
+    _: Mutation,
+    opencode: OpenCode,
+) -> ExecutionRun:
+    task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
+    if task is None:
+        raise HTTPException(status_code=404, detail="Задача не найдена")
+    if task.domain != "development":
+        raise HTTPException(status_code=409, detail="Execution V1 пока поддерживает только development-задачи")
+    if task.status == "done":
+        raise HTTPException(status_code=409, detail="Завершенную задачу нельзя запустить повторно")
+    active = db.scalar(
+        select(ExecutionRun).where(
+            ExecutionRun.task_id == task.id,
+            ExecutionRun.status == "running",
+        )
+    )
+    if active is not None:
+        raise HTTPException(status_code=409, detail="Для задачи уже есть активный запуск")
+    try:
+        session = opencode.create_session(f"AI Orchestra · {task.title[:80]}")
+        session_id = str(session.get("id") or session.get("sessionID") or "")
+        if not session_id:
+            raise OpenCodeError("OpenCode не вернул session id")
+        opencode.prompt_async(session_id, execution_prompt(task))
+    except OpenCodeError as exc:
+        raise HTTPException(status_code=502, detail=f"OpenCode недоступен: {exc}") from exc
+
+    run = ExecutionRun(
+        task_id=task.id,
+        status="running",
+        stage="department_lead",
+        opencode_session_id=session_id,
+        assigned_roles=["department-lead"],
+    )
+    db.add(run)
+    if task.status in {"backlog", "planned", "failed"}:
+        task.status = "in_progress"
+    task.updated_at = datetime.now(timezone.utc)
+    db.flush()
+    write_audit(
+        db,
+        actor=manager,
+        action="execution.started",
+        entity_type="execution",
+        entity_id=run.id,
+        details={"task_id": task.id, "session_id": session_id},
+    )
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+@app.post("/api/executions/{execution_id}/refresh", response_model=ExecutionRead)
+def refresh_execution(
+    execution_id: str,
+    db: DbSession,
+    manager: Manager,
+    _: Mutation,
+    opencode: OpenCode,
+) -> ExecutionRun:
+    run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == execution_id).with_for_update())
+    if run is None:
+        raise HTTPException(status_code=404, detail="Запуск не найден")
+    if run.status != "running":
+        return run
+    try:
+        statuses = opencode.session_statuses()
+        messages = opencode.messages(run.opencode_session_id)
+    except OpenCodeError as exc:
+        raise HTTPException(status_code=502, detail=f"Не удалось получить статус OpenCode: {exc}") from exc
+
+    state = statuses.get(run.opencode_session_id) or {}
+    state_type = state.get("type") if isinstance(state, dict) else str(state)
+    result = extract_last_assistant_text(messages)
+    if state_type == "idle" and result:
+        run.status = "completed"
+        run.stage = "manager_review"
+        run.result = result
+        run.finished_at = datetime.now(timezone.utc)
+        task = db.get(Task, run.task_id)
+        if task and task.status in {"in_progress", "waiting_approval"}:
+            task.status = "qa"
+            task.updated_at = datetime.now(timezone.utc)
+        write_audit(
+            db,
+            actor=manager,
+            action="execution.completed",
+            entity_type="execution",
+            entity_id=run.id,
+            details={"task_id": run.task_id},
+        )
+    run.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+@app.post("/api/executions/{execution_id}/abort", response_model=ExecutionRead)
+def abort_execution(
+    execution_id: str,
+    db: DbSession,
+    manager: Manager,
+    _: Mutation,
+    opencode: OpenCode,
+) -> ExecutionRun:
+    run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == execution_id).with_for_update())
+    if run is None:
+        raise HTTPException(status_code=404, detail="Запуск не найден")
+    if run.status != "running":
+        return run
+    try:
+        opencode.abort(run.opencode_session_id)
+    except OpenCodeError as exc:
+        raise HTTPException(status_code=502, detail=f"Не удалось остановить OpenCode: {exc}") from exc
+    run.status = "cancelled"
+    run.stage = "stopped"
+    run.finished_at = datetime.now(timezone.utc)
+    run.updated_at = datetime.now(timezone.utc)
+    write_audit(
+        db,
+        actor=manager,
+        action="execution.cancelled",
+        entity_type="execution",
+        entity_id=run.id,
+        details={"task_id": run.task_id},
+    )
+    db.commit()
+    db.refresh(run)
+    return run

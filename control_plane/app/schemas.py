@@ -123,3 +123,23 @@ class CapabilityGuardRead(BaseModel):
     financial_execution_allowed: bool
     secret_access_allowed: bool
     updated_at: datetime
+
+
+ExecutionStatus = Literal["running", "completed", "failed", "cancelled"]
+
+
+class ExecutionRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    task_id: str
+    status: ExecutionStatus
+    stage: str
+    opencode_session_id: str
+    lead_role: str
+    assigned_roles: list[str]
+    result: str
+    error: str
+    created_at: datetime
+    updated_at: datetime
+    finished_at: datetime | None

@@ -127,3 +127,22 @@ input:focus, textarea:focus, select:focus { border-color: #66794d; box-shadow: 0
   .guard-grid { grid-template-columns: 1fr; }
   .budget-row { grid-template-columns: 1fr; }
 }
+
+
+.result-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 14, 24, .72);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  z-index: 1000;
+}
+.result-modal.hidden { display: none; }
+.result-card { width: min(960px, 96vw); max-height: 86vh; overflow: auto; }
+.result-card pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  line-height: 1.55;
+}

@@ -30,7 +30,7 @@ services:
   control-plane:
     build:
       context: ./control_plane
-    image: ai-development-department/control-plane:0.3.0
+    image: ai-development-department/control-plane:0.4.0
     restart: unless-stopped
     init: true
     read_only: true
@@ -46,12 +46,16 @@ services:
       CONTROL_PLANE_SERVER_USERNAME: ${CONTROL_PLANE_SERVER_USERNAME}
       CONTROL_PLANE_SERVER_PASSWORD: ${CONTROL_PLANE_SERVER_PASSWORD}
       CONTROL_PLANE_OPENCODE_URL: ${OPENCODE_PUBLIC_URL:-http://127.0.0.1:4096}
+      CONTROL_PLANE_OPENCODE_INTERNAL_URL: http://opencode:4096
+      CONTROL_PLANE_OPENCODE_USERNAME: ${OPENCODE_SERVER_USERNAME}
+      CONTROL_PLANE_OPENCODE_PASSWORD: ${OPENCODE_SERVER_PASSWORD}
       CONTROL_PLANE_DEFAULT_MONTHLY_BUDGET: ${CONTROL_PLANE_DEFAULT_MONTHLY_BUDGET:-25000}
     ports:
       - "127.0.0.1:${CONTROL_PLANE_PORT:-8088}:8080"
     networks:
       - control-db
       - control-access
+      - model-net
     depends_on:
       postgres:
         condition: service_healthy

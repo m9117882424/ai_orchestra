@@ -109,3 +109,24 @@ class CapabilityGuard(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
     )
+
+
+class ExecutionRun(Base):
+    __tablename__ = "execution_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(24), default="running")
+    stage: Mapped[str] = mapped_column(String(40), default="department_lead")
+    opencode_session_id: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    lead_role: Mapped[str] = mapped_column(String(80), default="department-lead")
+    assigned_roles: Mapped[list] = mapped_column(JSON, default=list)
+    result: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

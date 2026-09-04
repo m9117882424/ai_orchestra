@@ -1,4 +1,4 @@
-.PHONY: init shared separate build up down restart logs manager-logs status preflight smoke validate test backup
+.PHONY: init shared separate build up down restart logs manager-logs router-logs status preflight smoke validate test backup
 
 init:
 	./scripts/bootstrap.sh
@@ -19,13 +19,16 @@ down:
 	docker compose down
 
 restart:
-	docker compose up -d --force-recreate opencode control-plane
+	docker compose up -d --force-recreate model-router opencode control-plane
 
 logs:
-	docker compose logs -f --tail=200 opencode control-plane postgres
+	docker compose logs -f --tail=200 model-router opencode control-plane postgres
 
 manager-logs:
 	docker compose logs -f --tail=200 control-plane
+
+router-logs:
+	docker compose logs -f --tail=200 model-router
 
 status:
 	docker compose ps
@@ -43,7 +46,7 @@ backup:
 	./scripts/backup.sh
 
 validate:
-	python3 -m json.tool config/opencode.shared.json >/dev/null
-	python3 -m json.tool config/opencode.separate.json >/dev/null
-	python3 -m compileall -q control_plane/app control_plane/tests
+	python3 -m json.tool config/opencode.gateway.json >/dev/null
+	python3 -m compileall -q control_plane/app control_plane/tests scripts/model_router_smoke.py scripts/static_security_check.py
 	docker compose config --quiet
+	python3 scripts/static_security_check.py

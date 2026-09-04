@@ -32,6 +32,13 @@ fi
 [[ -s runtime/model-router.yaml ]] && pass "Конфигурация Model Router существует" || fail "runtime/model-router.yaml отсутствует"
 
 if [[ -f .env && -f .env.providers ]]; then
+  # Provider credentials must never remain in the operational environment file.
+  if grep -Eq '^(AITUNNEL_API_KEY|AITUNNEL_BASE_URL|OPENAI_API_KEY|ANTHROPIC_API_KEY|GOOGLE_GENERATIVE_AI_API_KEY)=' .env; then
+    fail "Provider credentials/config обнаружены в .env; перенесите строки в .env.providers и удалите их из .env"
+  else
+    pass "Provider credentials изолированы от .env"
+  fi
+
   set -a
   # shellcheck disable=SC1091
   source .env
@@ -58,6 +65,17 @@ if [[ -f .env && -f .env.providers ]]; then
       fail "KEY_MODE должен быть shared или separate"
       ;;
   esac
+
+  if [[ "${KEY_MODE:-}" == "shared" || "${KEY_MODE:-}" == "separate" ]]; then
+    if cmp -s runtime/model-router.yaml "config/model-router.${KEY_MODE}.yaml"; then
+      pass "runtime/model-router.yaml соответствует KEY_MODE=${KEY_MODE}"
+    else
+      fail "runtime/model-router.yaml не соответствует KEY_MODE=${KEY_MODE}; выполните make ${KEY_MODE} --no-restart или make init"
+    fi
+  fi
+  cmp -s runtime/opencode.json config/opencode.gateway.json \
+    && pass "runtime/opencode.json соответствует gateway-конфигурации" \
+    || fail "runtime/opencode.json устарел; выполните make init"
 
   [[ "${#OPENCODE_SERVER_PASSWORD}" -ge 20 && "$OPENCODE_SERVER_PASSWORD" != "CHANGE_ME_LONG_RANDOM_PASSWORD" ]] \
     && pass "Пароль OpenCode задан" || fail "OPENCODE_SERVER_PASSWORD должен содержать не менее 20 символов"

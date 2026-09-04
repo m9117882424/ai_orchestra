@@ -6,43 +6,65 @@ cd "$project_root"
 
 mkdir -p runtime repos worktrees backups data/opencode data/state
 
+random_secret() {
+  python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+}
+
 if [[ ! -f .env ]]; then
   cp .env.example .env
-  generated_opencode_password="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-  generated_manager_password="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-  generated_database_password="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-  sed -i "s|CHANGE_ME_LONG_RANDOM_PASSWORD|${generated_opencode_password}|" .env
-  sed -i "s|CHANGE_ME_MANAGER_PASSWORD|${generated_manager_password}|" .env
-  sed -i "s|CHANGE_ME_DATABASE_PASSWORD|${generated_database_password}|" .env
-  chmod 600 .env
-  echo "Создан .env с отдельными паролями OpenCode, кабинета и БД."
+  sed -i "s|CHANGE_ME_LONG_RANDOM_PASSWORD|$(random_secret)|" .env
+  sed -i "s|CHANGE_ME_MANAGER_PASSWORD|$(random_secret)|" .env
+  sed -i "s|CHANGE_ME_DATABASE_PASSWORD|$(random_secret)|" .env
+  sed -i "s|CHANGE_ME_MODEL_ROUTER_KEY|sk-orch-$(random_secret)|" .env
+  echo "Создан .env с отдельными паролями интерфейсов, БД и внутреннего Model Router."
 else
-  chmod 600 .env
   echo ".env уже существует — файл сохранен без перезаписи."
-  if ! grep -q '^CONTROL_PLANE_SERVER_USERNAME=' .env; then
-    {
-      echo
-      echo '# Кабинет руководителя (добавлено при обновлении)'
-      echo 'CONTROL_PLANE_SERVER_USERNAME=manager'
-      printf 'CONTROL_PLANE_SERVER_PASSWORD=%s\n' "$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-      echo 'CONTROL_PLANE_PORT=8088'
-      printf 'CONTROL_PLANE_DB_PASSWORD=%s\n' "$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-      echo 'CONTROL_PLANE_DEFAULT_MONTHLY_BUDGET=25000'
-      echo 'OPENCODE_PUBLIC_URL=http://127.0.0.1:4096'
-      echo 'BACKUP_RETENTION_DAYS=14'
-    } >> .env
-    echo "Добавлены недостающие настройки кабинета руководителя."
+  if ! grep -q '^MODEL_ROUTER_MASTER_KEY=' .env; then
+    printf '\nMODEL_ROUTER_MASTER_KEY=sk-orch-%s\n' "$(random_secret)" >> .env
+  fi
+  if ! grep -q '^MODEL_ROUTER_PORT=' .env; then
+    echo 'MODEL_ROUTER_PORT=18089' >> .env
+  fi
+  if ! grep -q '^LITELLM_VERSION=' .env; then
+    echo 'LITELLM_VERSION=1.99.0' >> .env
   fi
 fi
+chmod 600 .env
 
-if [[ ! -f runtime/opencode.json ]]; then
-  cp config/opencode.shared.json runtime/opencode.json
+if [[ ! -f .env.providers ]]; then
+  cp .env.providers.example .env.providers
+  echo "Создан .env.providers. В него помещаются только ключи AI-провайдеров."
+else
+  echo ".env.providers уже существует — файл сохранен без перезаписи."
 fi
+chmod 600 .env.providers
+
+if grep -Eq '^(AITUNNEL_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|GOOGLE_GENERATIVE_AI_API_KEY)=' .env; then
+  echo "[WARN] В старом .env обнаружены provider-переменные."
+  echo "[WARN] Перенесите их значения в .env.providers; OpenCode их больше не получает."
+fi
+
+key_mode="$(grep -E '^KEY_MODE=' .env | tail -1 | cut -d= -f2- || true)"
+case "${key_mode:-shared}" in
+  shared|separate) ;;
+  *)
+    echo "[WARN] Некорректный KEY_MODE=${key_mode:-}; установлен shared."
+    if grep -q '^KEY_MODE=' .env; then
+      sed -i 's/^KEY_MODE=.*/KEY_MODE=shared/' .env
+    else
+      echo 'KEY_MODE=shared' >> .env
+    fi
+    key_mode=shared
+    ;;
+esac
+
+cp config/opencode.gateway.json runtime/opencode.json
+cp "config/model-router.${key_mode:-shared}.yaml" runtime/model-router.yaml
 
 python3 -m json.tool runtime/opencode.json >/dev/null
 
 echo
 echo "Инициализация завершена."
-echo "1. Заполните ключи в .env"
+echo "1. Заполните только нужные provider-ключи в .env.providers"
 echo "2. Выполните: make preflight"
-echo "3. Выполните: make build && make up"
+echo "3. Выполните: make build && make up && make smoke"

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Smoke test for the internal AI Orchestra Model Router.
+"""Smoke test for AI Orchestra's inference-only Model Gateway.
 
-Uses only the router's internal credential. Provider credentials are never read or printed.
+The script uses only MODEL_ROUTER_CLIENT_KEY. Provider and router-admin credentials
+are never read or printed.
 """
 from __future__ import annotations
 
@@ -53,14 +54,14 @@ def request_json(base_url: str, api_key: str, method: str, path: str, payload: d
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--base-url", default=os.getenv("MODEL_ROUTER_BASE_URL", DEFAULT_BASE_URL))
+    parser.add_argument("--base-url", default=os.getenv("MODEL_GATEWAY_BASE_URL", DEFAULT_BASE_URL))
     parser.add_argument("--mode", choices=sorted(MODE_MODELS), default=os.getenv("KEY_MODE", "shared"))
     parser.add_argument("--all", action="store_true", help="test every logical alias, not only provider representatives")
     args = parser.parse_args()
 
-    key = os.getenv("MODEL_ROUTER_MASTER_KEY", "").strip()
+    key = os.getenv("MODEL_ROUTER_CLIENT_KEY", "").strip()
     if not key:
-        print("FAIL: MODEL_ROUTER_MASTER_KEY is empty", file=sys.stderr)
+        print("FAIL: MODEL_ROUTER_CLIENT_KEY is empty", file=sys.stderr)
         return 2
 
     catalog = request_json(args.base_url, key, "GET", "/models")
@@ -68,9 +69,9 @@ def main() -> int:
     required = set(MODE_MODELS[args.mode])
     missing = sorted(required - ids)
     if missing:
-        print("FAIL: router catalog misses: " + ", ".join(missing), file=sys.stderr)
+        print("FAIL: gateway catalog misses: " + ", ".join(missing), file=sys.stderr)
         return 1
-    print(f"[OK] Model Router catalog: {len(ids)} aliases; required aliases present")
+    print(f"[OK] Model Gateway catalog: {len(ids)} aliases; required aliases present")
 
     models = sorted(ids) if args.all else MODE_MODELS[args.mode]
     failures = 0
@@ -99,9 +100,9 @@ def main() -> int:
             print(f"[FAIL] {model}: {exc}", file=sys.stderr)
 
     if failures:
-        print(f"Model Router smoke: {failures} failure(s)", file=sys.stderr)
+        print(f"Model Gateway smoke: {failures} failure(s)", file=sys.stderr)
         return 1
-    print(f"Model Router smoke: {len(models)}/{len(models)} passed")
+    print(f"Model Gateway smoke: {len(models)}/{len(models)} passed")
     return 0
 
 

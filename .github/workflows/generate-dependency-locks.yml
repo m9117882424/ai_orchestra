@@ -1,0 +1,61 @@
+name: Generate dependency locks
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/g1-reproducible-dependencies
+    paths:
+      - control_plane/requirements.in
+      - control_plane/requirements-dev.in
+      - .github/workflows/generate-dependency-locks.yml
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@v6
+
+      - name: Configure Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install pinned lock generator
+        run: python -m pip install --disable-pip-version-check 'pip-tools==7.6.1'
+
+      - name: Generate hashed runtime and development locks
+        working-directory: control_plane
+        run: |
+          set -Eeuo pipefail
+          pip-compile \
+            --generate-hashes \
+            --resolver=backtracking \
+            --strip-extras \
+            --output-file=requirements.lock \
+            requirements.in
+          pip-compile \
+            --generate-hashes \
+            --resolver=backtracking \
+            --strip-extras \
+            --output-file=requirements-dev.lock \
+            requirements-dev.in
+          python -m pip install --dry-run --require-hashes -r requirements.lock
+          python -m pip install --dry-run --require-hashes -r requirements-dev.lock
+          sha256sum requirements.in requirements-dev.in requirements.lock requirements-dev.lock > dependency-locks.sha256
+
+      - name: Upload lock candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: control-plane-lock-candidate-${{ github.sha }}
+          path: |
+            control_plane/requirements.lock
+            control_plane/requirements-dev.lock
+            control_plane/dependency-locks.sha256
+          if-no-files-found: error
+          retention-days: 7

@@ -188,3 +188,19 @@ def test_production_application_never_repairs_schema_drift(tmp_path):
     started = _run_production_startup(database_url)
     assert started.returncode != 0
     assert "Runtime DDL" in started.stderr
+
+
+def test_production_application_detects_index_drift_with_valid_revision(tmp_path):
+    database_path = tmp_path / "index-drift.db"
+    database_url = f"sqlite+pysqlite:///{database_path}"
+    migrated = _run_schema_cli(database_url, "migrate")
+    assert migrated.returncode == 0, migrated.stderr
+
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DROP INDEX ix_execution_runs_task_id")
+
+    started = _run_production_startup(database_url)
+    assert started.returncode != 0
+    assert "schema drift detected" in started.stderr
+    assert "indexes" in started.stderr

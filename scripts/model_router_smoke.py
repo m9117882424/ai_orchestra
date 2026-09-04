@@ -110,7 +110,6 @@ def main() -> int:
                     "model": model,
                     "messages": [{"role": "user", "content": "Reply with exactly OK."}],
                     "max_tokens": 64,
-                    "temperature": 0,
                 },
             )
             choices = result.get("choices") or []

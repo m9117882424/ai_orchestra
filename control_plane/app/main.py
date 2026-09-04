@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from .auth import require_control_request, require_manager
 from .db import Base, engine, get_db
-from .models import Approval, AuditEvent, Budget, Task, TradingGuard, UsageEvent
+from .models import Approval, AuditEvent, Budget, CapabilityGuard, Task, UsageEvent
 from .schemas import (
     ApprovalCreate,
     ApprovalDecisionRequest,
@@ -20,10 +20,10 @@ from .schemas import (
     AuditRead,
     BudgetRead,
     BudgetUpdate,
+    CapabilityGuardRead,
     TaskCreate,
     TaskRead,
     TaskStatusUpdate,
-    TradingGuardRead,
     UsageCreate,
     UsageRead,
 )
@@ -54,7 +54,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="AI Orchestra Control Plane",
-    version="0.2.0",
+    version="0.3.0",
     docs_url=None,
     redoc_url=None,
     lifespan=lifespan,
@@ -306,9 +306,9 @@ def list_audit(
     )
 
 
-@app.get("/api/trading/guard", response_model=TradingGuardRead)
-def get_trading_guard(db: DbSession, _: Manager) -> TradingGuard:
-    guard = db.get(TradingGuard, 1)
+@app.get("/api/capabilities/guard", response_model=CapabilityGuardRead)
+def get_capability_guard(db: DbSession, _: Manager) -> CapabilityGuard:
+    guard = db.get(CapabilityGuard, 1)
     if guard is None:
-        raise HTTPException(status_code=503, detail="Торговый предохранитель не инициализирован")
+        raise HTTPException(status_code=503, detail="Предохранитель возможностей не инициализирован")
     return guard

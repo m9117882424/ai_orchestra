@@ -93,7 +93,7 @@ def main() -> int:
         assert f"model_name: {alias}" in direct
     assert "anthropic/claude-sonnet-5" in direct
     assert "openai/gpt-5.6-sol" in direct
-    assert "gemini/gemini-3.7-flash" in direct
+    assert "gemini/gemini-3.5-flash" in direct
     assert "gemini/gemini-3.5-flash-lite" in direct
 
     print("[OK] static security boundaries")

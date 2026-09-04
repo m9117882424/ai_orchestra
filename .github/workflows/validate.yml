@@ -14,6 +14,12 @@ jobs:
       - name: Получить код
         uses: actions/checkout@v4
 
+      - name: Подготовить инструменты проверки
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          python3 -m pip install pyyaml
+
       - name: Подготовить безопасную тестовую конфигурацию
         run: |
           cp .env.example .env
@@ -22,11 +28,20 @@ jobs:
           cp config/opencode.gateway.json runtime/opencode.json
           cp config/model-router.shared.yaml runtime/model-router.yaml
 
-      - name: Проверить JSON и Python
+      - name: Проверить JSON, YAML, Python и JavaScript
         run: |
           python3 -m json.tool config/opencode.gateway.json >/dev/null
           python3 -m json.tool runtime/opencode.json >/dev/null
+          python3 - <<'PY'
+          from pathlib import Path
+          import yaml
+          for path in [Path('config/model-router.shared.yaml'), Path('config/model-router.separate.yaml')]:
+              data = yaml.safe_load(path.read_text(encoding='utf-8'))
+              assert isinstance(data, dict) and isinstance(data.get('model_list'), list) and data['model_list'], path
+          print('[OK] router YAML parsed')
+          PY
           python3 -m compileall -q control_plane/app control_plane/tests scripts/model_router_smoke.py scripts/static_security_check.py
+          node --check control_plane/app/static/app.js
 
       - name: Проверить shell-скрипты
         run: |
@@ -37,6 +52,7 @@ jobs:
           bash -n scripts/backup.sh
           bash -n scripts/worktree-create.sh
           bash -n scripts/worktree-remove.sh
+          shellcheck scripts/*.sh
 
       - name: Проверить Docker Compose и границы безопасности
         run: |

@@ -118,9 +118,9 @@ Trading Platform — отдельный проект. Допустимо име�
 
 - OpenCode: `1.18.27`;
 - LiteLLM Proxy: `1.98.0` stable;
-- direct roles: Claude Sonnet 5, GPT-5.6 Sol, Gemini 3.7 Flash / Gemini 3.5 Flash-Lite.
+- direct roles: Claude Sonnet 5, GPT-5.6 Sol, Gemini 3.5 Flash / Gemini 3.5 Flash-Lite.
 
-Новые runtime/model versions проходят отдельный build + compatibility/provider smoke. Gemini 3.8 Flash рассматривается как следующий upgrade после подтверждения совместимости stable router runtime.
+Новые runtime/model versions проходят отдельный build + compatibility/provider smoke. Gemini 3.7 Flash и Gemini 3.8 Flash рассматриваются как следующие upgrade-кандидаты после подтверждения полного agent-workflow compatibility со stable router runtime.
 
 ## 9. Проверяемые инварианты
 

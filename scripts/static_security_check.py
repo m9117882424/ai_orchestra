@@ -82,10 +82,32 @@ def main() -> int:
 
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     router_dockerfile = (ROOT / "model_router/Dockerfile").read_text(encoding="utf-8")
+    control_dockerfile = (ROOT / "control_plane/Dockerfile").read_text(encoding="utf-8")
     assert "ARG OPENCODE_VERSION=1.18.27" in dockerfile
     assert "ARG LITELLM_VERSION=1.98.0" in router_dockerfile
     assert "=latest" not in dockerfile
     assert "ripgrep" in dockerfile
+    assert "sha256sum --check dependency-locks.sha256" in control_dockerfile
+    assert "--require-hashes --requirement requirements.lock" in control_dockerfile
+    assert "runtime-lock.sha256" in control_dockerfile
+
+    runtime_wrapper = (ROOT / "control_plane/requirements.txt").read_text(encoding="utf-8")
+    dev_wrapper = (ROOT / "control_plane/requirements-dev.txt").read_text(encoding="utf-8")
+    assert "--require-hashes" in runtime_wrapper and "-r requirements.lock" in runtime_wrapper
+    assert "--require-hashes" in dev_wrapper and "-r requirements-dev.lock" in dev_wrapper
+
+    lock_workflow = (ROOT / ".github/workflows/generate-dependency-locks.yml").read_text(encoding="utf-8")
+    assert "contents: read" in lock_workflow
+    assert "contents: write" not in lock_workflow
+    assert "git push" not in lock_workflow
+    assert "pip-tools==7.6.1" in lock_workflow
+    assert "--generate-hashes" in lock_workflow
+    assert "git diff --exit-code -- requirements.lock requirements-dev.lock dependency-locks.sha256" in lock_workflow
+
+    validate_workflow = (ROOT / ".github/workflows/validate.yml").read_text(encoding="utf-8")
+    assert "runs-on: ubuntu-24.04" in validate_workflow
+    assert "scripts/verify_dependency_locks.py" in validate_workflow
+    assert "--require-hashes --requirement control_plane/requirements-dev.lock" in validate_workflow
 
     db_text = (ROOT / "control_plane/app/db.py").read_text(encoding="utf-8")
     schema_cli_text = (ROOT / "control_plane/app/schema_cli.py").read_text(encoding="utf-8")

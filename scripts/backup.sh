@@ -25,9 +25,11 @@ mkdir -p "$backup_root"
 timestamp="$(date -u +'%Y%m%dT%H%M%SZ')"
 archive="$backup_root/ai-orchestra-$timestamp.tar.gz"
 staging_dir="$(mktemp -d /tmp/ai-orchestra-backup.XXXXXX)"
+checksum_tmp="$(mktemp /tmp/ai-orchestra-checksums.XXXXXX)"
 
 cleanup() {
   find "$staging_dir" -depth -delete 2>/dev/null || true
+  rm -f "$checksum_tmp"
 }
 trap cleanup EXIT
 
@@ -80,10 +82,11 @@ done < <(find "$project_root/repos" -mindepth 2 -maxdepth 2 -type d -name .git -
 
 (
   cd "$staging_dir"
-  find . -type f ! -name SHA256SUMS -print0 \
+  find . -type f -print0 \
     | sort -z \
-    | xargs -0 sha256sum > SHA256SUMS
+    | xargs -0 sha256sum > "$checksum_tmp"
 )
+mv "$checksum_tmp" "$staging_dir/SHA256SUMS"
 
 tar -czf "$archive.tmp" -C "$staging_dir" .
 chmod 600 "$archive.tmp"

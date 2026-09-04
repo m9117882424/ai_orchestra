@@ -55,7 +55,7 @@
       <div class="layout">
         <section class="panel span-two">
           <div class="panel-heading"><div><p class="eyebrow">Портфель</p><h2>Задачи отдела</h2></div><button class="text-button" data-refresh>Обновить</button></div>
-          <div class="table-wrap"><table><thead><tr><th>Задача</th><th>Направление</th><th>Риск</th><th>Статус</th></tr></thead><tbody id="tasks-body"><tr><td colspan="4" class="empty">Загрузка…</td></tr></tbody></table></div>
+          <div class="table-wrap"><table><thead><tr><th>Задача</th><th>Направление</th><th>Риск</th><th>Статус</th><th>Исполнение</th></tr></thead><tbody id="tasks-body"><tr><td colspan="5" class="empty">Загрузка…</td></tr></tbody></table></div>
         </section>
 
         <aside class="panel guard-panel">
@@ -86,6 +86,12 @@
         </section>
       </div>
     </main>
+  </div>
+  <div class="result-modal hidden" id="result-modal">
+    <div class="result-card panel">
+      <div class="panel-heading"><div><p class="eyebrow">Execution result</p><h2>Результат отдела</h2></div><button class="icon-button" id="close-result" aria-label="Закрыть">×</button></div>
+      <pre id="execution-result"></pre>
+    </div>
   </div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script src="{{ url_for('static', path='/app.js') }}" defer></script>

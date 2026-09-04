@@ -1,346 +1,294 @@
-# AI Orchestra — Execution Platform V2 Roadmap
+# AI Orchestra — Execution Platform V2.1 Roadmap
 
 ## Цель
 
-Превратить AI Orchestra из Control Plane с одиночным OpenCode execution в полноценный виртуальный отдел разработки, способный безопасно работать с произвольными Git-репозиториями, выполнять задачи в изолированных workspace, делегировать работу независимым ролям, запускать тесты и отдавать руководителю проверяемый пакет результата.
+Построить полноценный виртуальный отдел разработки, способный надёжно вести проекты разного масштаба — от обычных внутренних сервисов до дорогих business-critical систем — без привязки к конкретному репозиторию, стеку или отрасли.
 
-## Базовые принципы
+Авиация, атомная энергетика, космос и другие safety-critical отрасли используются как **стресс-тест архитектуры надёжности**, а не как обязательный процесс для каждого проекта. Специальные нормативные требования включаются только через отдельный Domain Assurance Profile.
 
-1. **Repository-agnostic** — ни один проект не зашивается в конфигурацию. Любой поддерживаемый Git URL регистрируется через Repository Registry.
-2. **Secrets never reach agents** — Git credentials, provider admin credentials и production secrets не передаются OpenCode/агентам.
-3. **One task = one worktree + one execution sandbox** — параллельные задачи не должны портить общий checkout.
-4. **Fail closed** — push, PR creation, merge, deploy, secret access, external write и financial execution требуют policy/approval.
-5. **Observable execution** — состояние определяется реальными событиями worker/OpenCode/tool calls, а не браузерным polling или искусственным процентом прогресса.
-6. **Independent QA** — Coder не принимает собственную работу. Для важных изменений Reviewer/QA используют отдельную роль, при необходимости отдельную модель.
-7. **Recoverable** — рестарт браузера, Control Plane или worker не должен терять задачу.
-8. **Auditable** — все действия, approvals, git refs, tests, artifacts и расходы привязаны к task/execution.
+## Универсальный уровень надёжности ядра
 
----
+Эти свойства обязательны для AI Orchestra независимо от проекта:
 
-## Milestone 1 — Repository Workspace Foundation
+1. **Repository-agnostic** — подключается любой разрешённый Git repository.
+2. **Durable execution** — закрытие браузера, restart worker/Control Plane и кратковременный outage не теряют задачу.
+3. **Fail closed on ambiguity** — неизвестное состояние не считается успехом.
+4. **One task = isolated workspace/sandbox** — параллельные задачи не портят друг друга.
+5. **Secrets never reach agents** — Git/provider/production credentials отделены от AI execution plane.
+6. **Content-addressed actions** — approvals и результаты привязаны к точным SHA/digest, а не только к mutable task/branch names.
+7. **Idempotent external effects** — retry/duplicate delivery не создают два push, два релиза или две противоречивые истины.
+8. **Observable execution** — фактические стадии, tool calls, tests, errors, retries, cost.
+9. **Independent QA proportional to risk** — автор изменения не является единственным принимающим его результат.
+10. **Recoverable and reconcilable** — после сбоя состояние можно восстановить и сверить с Git/artifacts/evidence.
+11. **Supply-chain isolation** — код из repository и dependency scripts считаются недоверенными.
+12. **Auditable material actions** — можно доказать что, кем/чем, когда и над каким immutable объектом было сделано.
 
-### Repository Registry
+## Assurance tiers
 
-Храним для каждого репозитория:
-- id / name;
-- remote URL;
-- provider type: github / gitlab / bitbucket / generic_git;
-- auth profile reference без самого секрета;
-- default branch;
-- mirror path;
-- enabled/disabled;
-- last fetch status/time;
-- last known commit;
-- project execution profile.
+### `general-standard`
+Обычная продуктовая/внутренняя разработка. Минимум бюрократии, но все базовые свойства надёжности ядра сохраняются.
 
-### Repo Manager
+### `general-high-assurance`
+Целевой режим для дорогих, долгоживущих и business-critical проектов. Более строгие review, release, provenance, DR и failure-injection gates.
 
-Отдельный сервис с минимальным API:
-- register/validate repository;
-- clone mirror;
-- fetch/prune;
-- detect default branch;
-- create task worktree;
-- inspect status/diff;
-- commit;
-- cleanup worktree;
-- push только после scoped approval.
-
-Repo Manager владеет Git credentials. OpenCode их не получает.
-
-### Worktree lifecycle
-
-Для каждой задачи:
-
-`repository mirror -> task branch -> /workspace/worktrees/<task-id>`
-
-Именование веток по умолчанию:
-
-`orchestra/<task-id>-<slug>`
-
-Acceptance criteria:
-- можно зарегистрировать новый публичный Git URL без правки compose;
-- можно создать worktree от default branch;
-- две задачи одного repo получают разные worktree;
-- OpenCode видит только рабочие файлы задачи;
-- main/default branch не модифицируется.
+### `regulated-critical`
+Опциональный режим для авиации, атомной энергетики, космоса, rail, medical и т.п. Подключает отдельные отраслевые профили и дополнительные evidence/independence requirements.
 
 ---
 
-## Milestone 2 — Worker / Job Queue
+# G0 — Current Lab
 
-Execution lifecycle больше не зависит от открытого браузера.
+Существуют Control Plane, Model Gateway/Router, OpenCode, execution V1 и базовые approvals/audit.
 
-Состояния:
-
-`queued -> provisioning -> planning -> architecture -> coding -> review -> tests -> qa -> waiting_approval -> ready -> completed/failed/cancelled`
-
-Требования:
-- durable queue на PostgreSQL либо Redis;
-- heartbeat;
-- max execution timeout;
-- max tool timeout;
-- retries с ограничением;
-- stale execution watchdog;
-- graceful restart/recovery;
-- idempotent job handlers.
+Ограничения:
+- browser polling всё ещё участвует в lifecycle;
+- нет общего durable workflow engine;
+- нет полноценного repository lifecycle;
+- execution workspace не гарантируется preflight;
+- DB migration process ещё не production-grade;
+- build/dependency reproducibility ограничена;
+- Git write/release autonomy отключена.
 
 ---
 
-## Milestone 3 — Real Multi-Agent Orchestration
+# G1 — Durable Core
 
-Orchestration Engine, а не prompt-only delegation.
+Это следующий обязательный этап.
 
-Минимальный development workflow:
+### Database / state
+- Alembic baseline;
+- production startup не использует `create_all()` как migration mechanism;
+- schema-version preflight;
+- backup перед опасными migrations.
 
-`Lead -> Architect -> Coder -> Reviewer -> QA -> Lead synthesis`
+### Durable workflow
+- Temporal или эквивалентный durable engine;
+- worker lifecycle не зависит от браузера;
+- heartbeat, timeout, retry, cancellation;
+- recovery после worker/Control Plane restart;
+- idempotency keys;
+- fencing/generation semantics;
+- reconciliation после uncertain external effects.
 
-Для простых задач policy может сокращать workflow.
-
-Для security/high-risk задач добавляется Risk/Security Reviewer.
-
-Каждый child-run хранит:
-- role;
-- model alias;
-- start/end;
-- status;
-- input/output tokens;
-- tool calls;
-- result;
-- error;
-- artifacts.
-
----
-
-## Milestone 4 — Execution Sandbox / Toolchain
-
-OpenCode base image содержит как минимум:
-- git;
-- ripgrep;
-- fd/findutils;
-- jq;
-- curl;
-- bash;
-- Python;
-- Node.js/npm/corepack;
-- build-essential.
-
-Проектные зависимости запускаются в disposable sandbox по execution profile.
-
-Поддерживаемые профили на первом этапе:
-- python;
-- node;
-- generic-shell.
-
-Далее: Go, Java, .NET и специализированные профили.
-
-Security:
-- без Docker socket;
-- без `/root` и host `.env`;
-- ограниченный egress;
-- CPU/RAM/PID/time quotas;
-- отдельная файловая область задачи;
-- недоверенные install/test scripts исполняются только в sandbox.
-
----
-
-## Milestone 5 — Observability / Live Progress
-
-В кабинете показываем только реальные события:
-- current stage;
-- current role;
-- elapsed time;
-- OpenCode/session state;
-- model;
-- tool calls;
-- последние сообщения;
-- test/build activity;
-- heartbeat;
-- tokens/cost.
-
-Не показываем фиктивный `% готовности`.
-
-Браузер только читает состояние. Worker определяет lifecycle.
-
----
-
-## Milestone 6 — Result Package / Artifacts
-
-Пакет приемки задачи:
-- исходное задание;
-- план;
-- branch / base commit / head commit;
-- changed files;
-- unified diff;
-- commits;
-- lint/test/build results;
-- coverage при наличии;
-- reviewer verdict;
-- QA verdict;
-- security/risk verdict при необходимости;
-- generated artifacts;
-- известные ограничения/риски;
-- фактическая стоимость.
-
----
-
-## Milestone 7 — Approval-bound Git actions
-
-Approval должен быть привязан к конкретному действию:
-- task id;
-- repository id;
-- action;
-- branch;
-- commit SHA;
-- destination;
-- requester;
-- approver;
-- expiration;
-- consumed_at.
-
-Разрешение одноразовое.
-
-Policy:
-- прямой push в protected default branch запрещен;
-- обычный путь: feature branch -> push -> PR -> CI -> review -> merge;
-- merge и deploy — отдельные approvals/policies.
-
----
-
-## Milestone 8 — Provider / CI integrations
-
-Webhooks вместо постоянного polling для событий:
-- PR created/updated;
-- CI passed/failed;
-- review comment;
-- merge;
-- issue/task event.
-
-Поддержка поэтапно:
-1. GitHub;
-2. GitLab;
-3. generic Git без PR API.
-
----
-
-## Milestone 9 — FinOps
-
-Автоматически собираем:
-- input/output/cache tokens;
-- provider/model alias;
-- role;
-- execution/task/project;
-- duration;
-- calculated/provider cost.
-
-Guardrails:
-- task budget;
-- project monthly budget;
-- global monthly budget;
-- warning thresholds;
-- hard stop на Model Router/worker уровне.
-
----
-
-## Milestone 10 — Project Context / Memory
-
-При регистрации/refresh repo индексируем безопасные метаданные:
-- README;
-- AGENTS.md;
-- architecture/docs;
-- package manifests;
-- CI workflows;
-- test commands;
-- build commands;
-- migrations;
-- API contracts;
-- coding conventions.
-
-Project memory хранит подтвержденные conventions и команды, но не секреты.
-
----
-
-## Milestone 11 — Database migrations
-
-Перейти с одного `Base.metadata.create_all()` на Alembic:
-- versioned schema;
-- upgrade/downgrade policy;
-- production migration preflight;
-- backup before destructive migration.
-
----
-
-## Milestone 12 — Notifications / RBAC / DR
-
-### Notifications
-- waiting approval;
-- ready for review;
-- QA failed;
-- CI failed;
-- budget threshold;
-- execution stalled.
-
-### RBAC
-- Admin;
-- Manager;
-- Operator/Developer;
-- Observer;
-- Auditor.
+### Build/dependencies
+- lock/exact dependency strategy;
+- честное разделение `build succeeds` и `reproducible build`;
+- pinned base/runtime versions для production images;
+- toolchain smoke (`read/glob/grep/git/tests`).
 
 ### Backup / DR
-- Control Plane PostgreSQL;
-- audit trail;
-- repository registry;
-- approvals;
-- execution metadata;
-- artifact metadata;
-- configuration without provider secrets.
+- off-host backup contract;
+- restore command/runbook;
+- periodic clean-environment restore drill.
+
+### Acceptance
+- закрываем браузер во время execution — задача продолжается;
+- рестартуем worker/Control Plane — задача восстанавливается;
+- duplicate delivery не удваивает external effect;
+- восстановленная БД не возрождает уже использованное approval/action;
+- failure injection оставляет систему в понятном recoverable/fail-closed состоянии.
 
 ---
 
-## Domain isolation
+# G2 — Repository & Workspace Platform
 
-Development, Analytics и Trading используют общий Control Plane, но разные execution policies/capabilities.
+### Repository Registry
+Для любого Git repository:
+- id/name/remote/provider;
+- auth profile reference без секрета;
+- default branch;
+- enabled/status;
+- last known commit/fetch;
+- execution profile;
+- assurance tier/profile.
+
+### Repo Manager
+Отдельный trusted service:
+- register/validate;
+- clone/fetch/prune;
+- default branch detection;
+- task branch/worktree;
+- status/diff/tree identity;
+- cleanup;
+- prepare commit;
+- push только через scoped policy/approval.
+
+AI/OpenCode не получает Git credentials.
+
+### Workspace preflight
+До первого LLM inference:
+- repo доступен;
+- base SHA существует;
+- worktree создан;
+- expected files доступны;
+- toolchain готов;
+- workspace writable/read-only policy соответствует роли.
+
+Если preflight не пройден — inference не запускается.
+
+---
+
+# G3 — Isolated Execution & Multi-Agent Department
+
+### Execution sandbox
+- disposable runner;
+- no Docker socket;
+- no host `/root`/`.env`;
+- no management DB/control-plane network;
+- CPU/RAM/PID/time limits;
+- egress policy;
+- explicit writable workspace;
+- untrusted install/build/test scripts только здесь.
+
+### Real orchestration
+Не prompt-only delegation.
+
+Базовый development workflow:
+
+`Lead -> Architect (as needed) -> Coder -> Reviewer -> QA -> Lead synthesis`
+
+Policy сокращает workflow для простых задач и усиливает для high-risk.
+
+Каждый child-run имеет:
+- role/model;
+- status/start/end;
+- input/output identity;
+- tool calls;
+- tests/artifacts;
+- cost;
+- error/retry lineage.
+
+---
+
+# G4 — Evidence, Result Package & Observability
+
+### Live progress
+- stage/role;
+- elapsed time;
+- heartbeat;
+- actual tool calls;
+- build/test status;
+- retry/error state;
+- token/cost metrics;
+- никаких выдуманных `% готовности`.
+
+### Result package
+- original task;
+- plan;
+- base/head SHA;
+- changed files/diff;
+- commits/proposed commits;
+- lint/test/build outputs;
+- reviewer/QA verdicts;
+- generated artifacts;
+- known risks/limitations;
+- actual cost.
+
+### High-assurance projects
+При выбранном профиле добавляются stronger provenance/evidence/traceability requirements. Они не навязываются обычному проекту.
+
+---
+
+# G5 — Controlled Git & External Actions
+
+Approval связан с точным действием:
+- task/repository;
+- action;
+- source/base/head SHA;
+- destination;
+- requester/approver;
+- expiry;
+- one-time consumption.
+
+Правила:
+- direct push в protected default branch запрещён;
+- обычный путь: feature branch -> PR -> CI -> review -> merge;
+- merge/deploy — отдельные policies;
+- retry безопасен и не создаёт duplicate effect;
+- external state reconciliation обязательна после uncertain response.
+
+---
+
+# G6 — High-Assurance Operations
+
+Для самого AI Orchestra и проектов `general-high-assurance`:
+- SBOM/provenance;
+- immutable release manifest;
+- failure-injection/chaos suite;
+- backup/restore/reconciliation drills;
+- incident/CAPA process;
+- model/tool configuration baseline and drift detection;
+- stronger RBAC/MFA/session security;
+- branch/ruleset enforcement;
+- operational SLOs and alerting;
+- capacity/backpressure controls.
+
+Это инженерная надёжность, а не отраслевой certification process.
+
+---
+
+# Optional Domain Assurance Profiles
+
+Только `regulated-critical` проекты подключают дополнительные профили из `docs/DOMAIN_ASSURANCE_PROFILES.md`.
+
+Примеры:
+- aviation;
+- nuclear digital I&C;
+- space;
+- rail;
+- medical;
+- customer-specific regulated profile.
+
+Core не содержит DAL/MC/DC/FHA/PSSA/nuclear licensing logic по умолчанию.
+
+---
+
+# Domain isolation
+
+Development, Analytics и Trading используют общий Control Plane, но разные capabilities/policies.
 
 ### Development
-Может менять файлы в task worktree, запускать тесты и готовить Git changes.
+Работает с task worktree, code/build/test и контролируемыми Git changes.
 
 ### Analytics
-Может читать разрешенные data sources и создавать отчеты/artifacts. Не получает возможности изменения production code автоматически.
+Читает разрешённые data sources и создаёт reports/artifacts; не получает автоматически права менять production code/data.
 
 ### Trading
-Research/modeling контур физически отделен от financial execution. AI Orchestra не получает прямой capability на проведение сделок.
+Research/modeling физически и политически отделён от financial execution. Автоматическое проведение сделок не наследуется из development capabilities.
 
 ---
 
-## Ближайший порядок реализации
+# Ближайший порядок реализации
 
 1. Закрыть Execution Progress V1.1.
-2. Добавить `ripgrep` в OpenCode image и toolchain smoke.
-3. Repository Registry schema/API.
-4. Repo Manager service skeleton.
-5. Shared repository/worktree storage.
-6. Register/clone/fetch public repository.
-7. Create/remove task worktree.
-8. Связать Task с repository_id вместо свободного project string.
-9. Workspace preflight перед LLM inference.
-10. Перенести lifecycle в worker/job queue.
-11. Multi-agent child executions.
-12. Result package + diff/tests.
-13. Scoped approval для push/PR.
-14. Automatic FinOps.
+2. Alembic baseline + migration preflight.
+3. Dependency/build reproducibility hardening.
+4. OpenCode toolchain (`ripgrep` и smoke).
+5. Backup/restore drill.
+6. Temporal durable-workflow PoC.
+7. Idempotency/fencing/reconciliation foundation.
+8. Repository Registry.
+9. Repo Manager.
+10. Task worktrees + workspace preflight.
+11. Isolated execution runner.
+12. Real multi-agent child executions.
+13. Result package/evidence.
+14. Scoped Git push/PR approvals.
+15. FinOps + notifications + operational hardening.
 
-## Definition of Done для «виртуального отдела разработки»
+## Definition of Done для базового «виртуального отдела разработки»
 
-Система считается достигшей базового целевого состояния, когда руководитель может:
+Руководитель может:
 
-1. добавить ранее неизвестный Git repository через UI/API;
-2. поставить development-задачу;
-3. закрыть браузер;
-4. Orchestra самостоятельно подготовит isolated worktree;
-5. Lead сформирует план;
-6. независимые роли выполнят architecture/coding/review/QA;
+1. добавить ранее неизвестный Git repository;
+2. выбрать подходящий assurance tier;
+3. поставить development-задачу;
+4. закрыть браузер;
+5. Orchestra подготовит isolated workspace;
+6. профильные роли выполнят работу и независимую QA по policy;
 7. tests/build выполнятся в sandbox;
-8. после возвращения в кабинет будет виден полный timeline и пакет результата;
-9. без approval никакие изменения не уйдут наружу;
-10. после approval будет создан push/PR с точной привязкой к проверенному commit SHA.
+8. после возврата доступен полный timeline и result package;
+9. сбои/retries не повреждают Git/state и не создают duplicate effects;
+10. без разрешения никакое защищённое внешнее действие не выполняется;
+11. после разрешения push/PR относится к точно проверенному immutable состоянию;
+12. восстановление после сбоя/backup подтверждено практическим drill, а не только документацией.

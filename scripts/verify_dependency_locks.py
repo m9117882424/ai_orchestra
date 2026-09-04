@@ -23,14 +23,14 @@ FORBIDDEN = ("git+", "hg+", "svn+", "bzr+", "-e ", "@ http://", "@ https://")
 EXPECTED_HEADERS = {
     "requirements.lock": (
         "# AI Orchestra deterministic dependency lock",
-        "# generator: pip-tools==7.6.1; python: 3.12; resolver: backtracking",
+        "# generator: pip-tools==7.6.1; python: 3.12.14; resolver: backtracking",
         "# package-source policy: https://pypi.org/simple (resolution only; not embedded)",
         "# input: requirements.in",
         "# install policy: exact pins + SHA-256 hashes required",
     ),
     "requirements-dev.lock": (
         "# AI Orchestra deterministic dependency lock",
-        "# generator: pip-tools==7.6.1; python: 3.12; resolver: backtracking",
+        "# generator: pip-tools==7.6.1; python: 3.12.14; resolver: backtracking",
         "# package-source policy: https://pypi.org/simple (resolution only; not embedded)",
         "# input: requirements-dev.in",
         "# install policy: exact pins + SHA-256 hashes required",

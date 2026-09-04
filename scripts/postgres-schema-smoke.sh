@@ -21,6 +21,14 @@ wait_postgres() {
   return 1
 }
 
+schema_cli() {
+  docker compose run --rm --no-deps \
+    -e CONTROL_PLANE_ENVIRONMENT=production \
+    -e CONTROL_PLANE_SERVER_PASSWORD=ci-only-manager-password-000000 \
+    -e CONTROL_PLANE_OPENCODE_PASSWORD=ci-only-opencode-password-000000 \
+    control-plane python -m app.schema_cli "$@"
+}
+
 echo "[INFO] PostgreSQL legacy-adoption smoke"
 docker compose up -d postgres >/dev/null
 wait_postgres
@@ -37,15 +45,15 @@ Base.metadata.create_all(engine)
 print("[OK] Legacy unversioned schema created")
 PY
 
-docker compose run --rm --no-deps control-plane python -m app.schema_cli migrate
-docker compose run --rm --no-deps control-plane python -m app.schema_cli check
+schema_cli migrate
+schema_cli check
 
 echo "[INFO] PostgreSQL drift refusal smoke"
 docker compose exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U ai_orchestra -d ai_orchestra \
   -c 'DROP INDEX ix_execution_runs_task_id;' >/dev/null
 
-if docker compose run --rm --no-deps control-plane python -m app.schema_cli check; then
+if schema_cli check; then
   echo "[FAIL] schema check accepted deliberately removed index" >&2
   exit 1
 fi
@@ -55,7 +63,7 @@ docker compose down -v --remove-orphans >/dev/null
 docker compose up -d postgres >/dev/null
 wait_postgres
 
-docker compose run --rm --no-deps control-plane python -m app.schema_cli migrate
-docker compose run --rm --no-deps control-plane python -m app.schema_cli check
+schema_cli migrate
+schema_cli check
 
 echo "[OK] PostgreSQL schema smoke passed"

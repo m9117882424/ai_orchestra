@@ -19,7 +19,7 @@ if [[ ! -f .env ]]; then
   sed -i "s|CHANGE_ME_MODEL_ROUTER_CLIENT_KEY|sk-client-$(random_secret)|" .env
   echo "Создан .env с отдельными паролями интерфейсов, БД и router credentials."
 else
-  echo ".env уже существует — файл сохранен без перезаписи."
+  echo ".env уже существует — файл сохранен без перезаписи секретов."
   if ! grep -q '^MODEL_ROUTER_MASTER_KEY=' .env; then
     printf '\nMODEL_ROUTER_MASTER_KEY=sk-admin-%s\n' "$(random_secret)" >> .env
   fi
@@ -30,7 +30,16 @@ else
     echo 'MODEL_GATEWAY_PORT=18089' >> .env
   fi
   if ! grep -q '^LITELLM_VERSION=' .env; then
-    echo 'LITELLM_VERSION=1.99.0' >> .env
+    echo 'LITELLM_VERSION=1.98.0' >> .env
+  elif grep -q '^LITELLM_VERSION=1\.99\.0$' .env; then
+    sed -i 's/^LITELLM_VERSION=1\.99\.0$/LITELLM_VERSION=1.98.0/' .env
+    echo "Обновлен prerelease LiteLLM 1.99.0 → stable 1.98.0."
+  fi
+  if grep -q '^OPENCODE_VERSION=latest$' .env; then
+    sed -i 's/^OPENCODE_VERSION=latest$/OPENCODE_VERSION=1.18.27/' .env
+    echo "OPENCODE_VERSION=latest заменен на воспроизводимую 1.18.27."
+  elif ! grep -q '^OPENCODE_VERSION=' .env; then
+    echo 'OPENCODE_VERSION=1.18.27' >> .env
   fi
 fi
 chmod 600 .env
@@ -45,7 +54,7 @@ chmod 600 .env.providers
 
 if grep -Eq '^(AITUNNEL_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|GOOGLE_GENERATIVE_AI_API_KEY)=' .env; then
   echo "[WARN] В старом .env обнаружены provider-переменные."
-  echo "[WARN] Перенесите их значения в .env.providers; OpenCode их больше не получает."
+  echo "[WARN] Перенесите их значения в .env.providers и удалите строки из .env; preflight это проверит."
 fi
 
 key_mode="$(grep -E '^KEY_MODE=' .env | tail -1 | cut -d= -f2- || true)"

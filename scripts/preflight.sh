@@ -9,16 +9,28 @@ pass() { printf '[OK] %s\n' "$1"; }
 fail() { printf '[FAIL] %s\n' "$1"; failures=$((failures + 1)); }
 
 for command_name in docker python3; do
-  command -v "$command_name" >/dev/null 2>&1 && pass "Команда доступна: $command_name" || fail "Не найдена команда: $command_name"
+  if command -v "$command_name" >/dev/null 2>&1; then
+    pass "Команда доступна: $command_name"
+  else
+    fail "Не найдена команда: $command_name"
+  fi
 done
 
-docker compose version >/dev/null 2>&1 && pass "Docker Compose v2 доступен" || fail "Docker Compose v2 недоступен"
+if docker compose version >/dev/null 2>&1; then
+  pass "Docker Compose v2 доступен"
+else
+  fail "Docker Compose v2 недоступен"
+fi
 
 for secret_file in .env .env.providers; do
   if [[ -f "$secret_file" ]]; then
     pass "$secret_file существует"
     mode="$(stat -c '%a' "$secret_file" 2>/dev/null || true)"
-    [[ "$mode" == "600" ]] && pass "$secret_file имеет права 600" || fail "$secret_file должен иметь права 600 (сейчас: ${mode:-unknown})"
+    if [[ "$mode" == "600" ]]; then
+      pass "$secret_file имеет права 600"
+    else
+      fail "$secret_file должен иметь права 600 (сейчас: ${mode:-unknown})"
+    fi
   else
     fail "$secret_file не найден; выполните make init"
   fi
@@ -29,10 +41,14 @@ if [[ -f runtime/opencode.json ]] && python3 -m json.tool runtime/opencode.json 
 else
   fail "runtime/opencode.json отсутствует или содержит ошибку"
 fi
-[[ -s runtime/model-router.yaml ]] && pass "Конфигурация Model Router существует" || fail "runtime/model-router.yaml отсутствует"
+
+if [[ -s runtime/model-router.yaml ]]; then
+  pass "Конфигурация Model Router существует"
+else
+  fail "runtime/model-router.yaml отсутствует"
+fi
 
 if [[ -f .env && -f .env.providers ]]; then
-  # Provider credentials must never remain in the operational environment file.
   if grep -Eq '^(AITUNNEL_API_KEY|AITUNNEL_BASE_URL|OPENAI_API_KEY|ANTHROPIC_API_KEY|GOOGLE_GENERATIVE_AI_API_KEY)=' .env; then
     fail "Provider credentials/config обнаружены в .env; перенесите строки в .env.providers и удалите их из .env"
   else
@@ -54,12 +70,28 @@ if [[ -f .env && -f .env.providers ]]; then
 
   case "${KEY_MODE:-}" in
     shared)
-      [[ -n "${AITUNNEL_API_KEY:-}" ]] && pass "AITunnel-ключ задан в provider scope" || fail "Для shared заполните AITUNNEL_API_KEY в .env.providers"
+      if [[ -n "${AITUNNEL_API_KEY:-}" ]]; then
+        pass "AITunnel-ключ задан в provider scope"
+      else
+        fail "Для shared заполните AITUNNEL_API_KEY в .env.providers"
+      fi
       ;;
     separate)
-      [[ -n "${OPENAI_API_KEY:-}" ]] && pass "OpenAI-ключ задан" || fail "Для separate заполните OPENAI_API_KEY в .env.providers"
-      [[ -n "${ANTHROPIC_API_KEY:-}" ]] && pass "Anthropic-ключ задан" || fail "Для separate заполните ANTHROPIC_API_KEY в .env.providers"
-      [[ -n "${GOOGLE_GENERATIVE_AI_API_KEY:-}" ]] && pass "Google-ключ задан" || fail "Для separate заполните GOOGLE_GENERATIVE_AI_API_KEY в .env.providers"
+      if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+        pass "OpenAI-ключ задан"
+      else
+        fail "Для separate заполните OPENAI_API_KEY в .env.providers"
+      fi
+      if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+        pass "Anthropic-ключ задан"
+      else
+        fail "Для separate заполните ANTHROPIC_API_KEY в .env.providers"
+      fi
+      if [[ -n "${GOOGLE_GENERATIVE_AI_API_KEY:-}" ]]; then
+        pass "Google-ключ задан"
+      else
+        fail "Для separate заполните GOOGLE_GENERATIVE_AI_API_KEY в .env.providers"
+      fi
       ;;
     *)
       fail "KEY_MODE должен быть shared или separate"
@@ -70,30 +102,51 @@ if [[ -f .env && -f .env.providers ]]; then
     if cmp -s runtime/model-router.yaml "config/model-router.${KEY_MODE}.yaml"; then
       pass "runtime/model-router.yaml соответствует KEY_MODE=${KEY_MODE}"
     else
-      fail "runtime/model-router.yaml не соответствует KEY_MODE=${KEY_MODE}; выполните make ${KEY_MODE} --no-restart или make init"
+      fail "runtime/model-router.yaml не соответствует KEY_MODE=${KEY_MODE}; выполните ./scripts/switch-key-mode.sh ${KEY_MODE} --no-restart или make init"
     fi
   fi
-  cmp -s runtime/opencode.json config/opencode.gateway.json \
-    && pass "runtime/opencode.json соответствует gateway-конфигурации" \
-    || fail "runtime/opencode.json устарел; выполните make init"
 
-  [[ "${#OPENCODE_SERVER_PASSWORD}" -ge 20 && "$OPENCODE_SERVER_PASSWORD" != "CHANGE_ME_LONG_RANDOM_PASSWORD" ]] \
-    && pass "Пароль OpenCode задан" || fail "OPENCODE_SERVER_PASSWORD должен содержать не менее 20 символов"
+  if cmp -s runtime/opencode.json config/opencode.gateway.json; then
+    pass "runtime/opencode.json соответствует gateway-конфигурации"
+  else
+    fail "runtime/opencode.json устарел; выполните make init"
+  fi
 
-  [[ "${#CONTROL_PLANE_SERVER_PASSWORD}" -ge 20 && "$CONTROL_PLANE_SERVER_PASSWORD" != "CHANGE_ME_MANAGER_PASSWORD" ]] \
-    && pass "Пароль кабинета руководителя задан" || fail "CONTROL_PLANE_SERVER_PASSWORD должен содержать не менее 20 символов"
+  if [[ "${#OPENCODE_SERVER_PASSWORD}" -ge 20 && "$OPENCODE_SERVER_PASSWORD" != "CHANGE_ME_LONG_RANDOM_PASSWORD" ]]; then
+    pass "Пароль OpenCode задан"
+  else
+    fail "OPENCODE_SERVER_PASSWORD должен содержать не менее 20 символов"
+  fi
 
-  [[ "${#CONTROL_PLANE_DB_PASSWORD}" -ge 20 && "$CONTROL_PLANE_DB_PASSWORD" != "CHANGE_ME_DATABASE_PASSWORD" ]] \
-    && pass "Пароль PostgreSQL кабинета задан" || fail "CONTROL_PLANE_DB_PASSWORD должен содержать не менее 20 символов"
+  if [[ "${#CONTROL_PLANE_SERVER_PASSWORD}" -ge 20 && "$CONTROL_PLANE_SERVER_PASSWORD" != "CHANGE_ME_MANAGER_PASSWORD" ]]; then
+    pass "Пароль кабинета руководителя задан"
+  else
+    fail "CONTROL_PLANE_SERVER_PASSWORD должен содержать не менее 20 символов"
+  fi
 
-  [[ "${#MODEL_ROUTER_MASTER_KEY}" -ge 32 && "$MODEL_ROUTER_MASTER_KEY" == sk-admin-* && "$MODEL_ROUTER_MASTER_KEY" != "CHANGE_ME_MODEL_ROUTER_MASTER_KEY" ]] \
-    && pass "Admin key Model Router задан" || fail "MODEL_ROUTER_MASTER_KEY должен начинаться с sk-admin- и быть не короче 32 символов"
+  if [[ "${#CONTROL_PLANE_DB_PASSWORD}" -ge 20 && "$CONTROL_PLANE_DB_PASSWORD" != "CHANGE_ME_DATABASE_PASSWORD" ]]; then
+    pass "Пароль PostgreSQL кабинета задан"
+  else
+    fail "CONTROL_PLANE_DB_PASSWORD должен содержать не менее 20 символов"
+  fi
 
-  [[ "${#MODEL_ROUTER_CLIENT_KEY}" -ge 32 && "$MODEL_ROUTER_CLIENT_KEY" == sk-client-* && "$MODEL_ROUTER_CLIENT_KEY" != "CHANGE_ME_MODEL_ROUTER_CLIENT_KEY" ]] \
-    && pass "Inference client key задан" || fail "MODEL_ROUTER_CLIENT_KEY должен начинаться с sk-client- и быть не короче 32 символов"
+  if [[ "${#MODEL_ROUTER_MASTER_KEY}" -ge 32 && "$MODEL_ROUTER_MASTER_KEY" == sk-admin-* && "$MODEL_ROUTER_MASTER_KEY" != "CHANGE_ME_MODEL_ROUTER_MASTER_KEY" ]]; then
+    pass "Admin key Model Router задан"
+  else
+    fail "MODEL_ROUTER_MASTER_KEY должен начинаться с sk-admin- и быть не короче 32 символов"
+  fi
 
-  [[ "$MODEL_ROUTER_MASTER_KEY" != "$MODEL_ROUTER_CLIENT_KEY" ]] \
-    && pass "Router admin/client credentials разделены" || fail "Router admin/client credentials не должны совпадать"
+  if [[ "${#MODEL_ROUTER_CLIENT_KEY}" -ge 32 && "$MODEL_ROUTER_CLIENT_KEY" == sk-client-* && "$MODEL_ROUTER_CLIENT_KEY" != "CHANGE_ME_MODEL_ROUTER_CLIENT_KEY" ]]; then
+    pass "Inference client key задан"
+  else
+    fail "MODEL_ROUTER_CLIENT_KEY должен начинаться с sk-client- и быть не короче 32 символов"
+  fi
+
+  if [[ "$MODEL_ROUTER_MASTER_KEY" != "$MODEL_ROUTER_CLIENT_KEY" ]]; then
+    pass "Router admin/client credentials разделены"
+  else
+    fail "Router admin/client credentials не должны совпадать"
+  fi
 fi
 
 if docker compose config --quiet >/dev/null 2>&1; then

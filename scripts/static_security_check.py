@@ -54,7 +54,7 @@ def main() -> int:
     assert network_set(services["model-gateway"]) == {"model-net", "router-backend"}
     assert network_set(services["opencode"]) == {"model-net"}
 
-    # OpenCode must talk only to the inference gateway with a non-admin client credential.
+    # OpenCode talks only to the inference gateway with a non-admin client credential.
     gateway = json.loads((ROOT / "config/opencode.gateway.json").read_text(encoding="utf-8"))
     assert set(gateway["provider"]) == {"orchestra"}
     options = gateway["provider"]["orchestra"]["options"]
@@ -66,12 +66,20 @@ def main() -> int:
         assert f"{key}=" not in env_text, f"{key} must live only in .env.providers"
     assert "MODEL_ROUTER_MASTER_KEY=" in env_text
     assert "MODEL_ROUTER_CLIENT_KEY=" in env_text
+    assert "OPENCODE_VERSION=1.18.27" in env_text
+    assert "LITELLM_VERSION=1.98.0" in env_text
 
     provider_example = (ROOT / ".env.providers.example").read_text(encoding="utf-8")
     for key in ("AITUNNEL_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"):
         assert f"{key}=" in provider_example
     assert "MODEL_ROUTER_MASTER_KEY=" not in provider_example
     assert "MODEL_ROUTER_CLIENT_KEY=" not in provider_example
+
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    router_dockerfile = (ROOT / "model_router/Dockerfile").read_text(encoding="utf-8")
+    assert "ARG OPENCODE_VERSION=1.18.27" in dockerfile
+    assert "ARG LITELLM_VERSION=1.98.0" in router_dockerfile
+    assert "=latest" not in dockerfile
 
     models_text = (ROOT / "control_plane/app/models.py").read_text(encoding="utf-8")
     for marker in PRODUCT_POLICY_MARKERS:
@@ -85,7 +93,8 @@ def main() -> int:
         assert f"model_name: {alias}" in direct
     assert "anthropic/claude-sonnet-5" in direct
     assert "openai/gpt-5.6-sol" in direct
-    assert "gemini/gemini-3.5-flash" in direct
+    assert "gemini/gemini-3.7-flash" in direct
+    assert "gemini/gemini-3.5-flash-lite" in direct
 
     print("[OK] static security boundaries")
     return 0

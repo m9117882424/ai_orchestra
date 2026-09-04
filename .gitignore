@@ -1,5 +1,7 @@
 .env
+.env.providers
 runtime/opencode.json
+runtime/model-router.yaml
 data/
 repos/*
 !repos/.gitkeep

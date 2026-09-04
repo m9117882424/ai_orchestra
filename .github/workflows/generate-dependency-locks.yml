@@ -29,32 +29,69 @@ jobs:
       - name: Install pinned lock generator
         run: |
           set -Eeuo pipefail
-          unset PIP_NO_INDEX PIP_EXTRA_INDEX_URL PIP_FIND_LINKS
-          export PIP_CONFIG_FILE=/dev/null
           python -m pip install --disable-pip-version-check 'pip-tools==7.6.1'
 
-      - name: Generate hashed runtime and development locks
+      - name: Generate fresh hashed runtime and development locks
         working-directory: control_plane
         run: |
           set -Eeuo pipefail
 
-          # GitHub-hosted/containerized runners may inject pip policy variables.
-          # They must not silently change dependency-resolution semantics.
-          unset PIP_NO_INDEX PIP_EXTRA_INDEX_URL PIP_FIND_LINKS
-          export PIP_CONFIG_FILE=/dev/null
+          # Resolve in a minimal environment so runner-level PIP_* policy cannot
+          # silently alter package-source or resolver semantics. The lock source
+          # is explicit and pip/pip-tools configuration discovery is disabled.
+          clean_env=(
+            env -i
+            "PATH=$PATH"
+            "HOME=$HOME"
+            "LANG=C.UTF-8"
+            "PIP_CONFIG_FILE=/dev/null"
+          )
 
-          pip-compile \
+          "${clean_env[@]}" python - <<'PY'
+          from click.core import ParameterSource
+          from piptools.scripts.compile import cli
+
+          ctx = cli.make_context(
+              "pip-compile",
+              ["--no-config", "--index-url", "https://pypi.org/simple", "requirements.in"],
+              resilient_parsing=True,
+          )
+          try:
+              value = ctx.params["no_index"]
+              source = ctx.get_parameter_source("no_index")
+              print(f"pip-tools no_index={value!r}; source={source.name if source else 'unknown'}")
+              if value is not False or source is not ParameterSource.DEFAULT:
+                  raise SystemExit("ERROR: pip-tools no_index must remain the CLI default (False)")
+          finally:
+              ctx.close()
+          PY
+
+          # Never seed regeneration from the committed output. This forces a
+          # complete resolution/hash refresh from the declared input files.
+          rm -f requirements.lock requirements-dev.lock dependency-locks.sha256
+
+          "${clean_env[@]}" pip-compile \
+            --no-config \
+            --index-url=https://pypi.org/simple \
             --generate-hashes \
             --resolver=backtracking \
             --strip-extras \
+            --upgrade \
+            --rebuild \
+            --no-reuse-hashes \
             --no-emit-index-url \
             --no-emit-trusted-host \
             --output-file=requirements.lock \
             requirements.in
-          pip-compile \
+          "${clean_env[@]}" pip-compile \
+            --no-config \
+            --index-url=https://pypi.org/simple \
             --generate-hashes \
             --resolver=backtracking \
             --strip-extras \
+            --upgrade \
+            --rebuild \
+            --no-reuse-hashes \
             --no-emit-index-url \
             --no-emit-trusted-host \
             --output-file=requirements-dev.lock \
@@ -69,8 +106,17 @@ jobs:
             exit 1
           fi
 
-          python -m pip install --dry-run --require-hashes -r requirements.lock
-          python -m pip install --dry-run --require-hashes -r requirements-dev.lock
+          "${clean_env[@]}" python -m pip install \
+            --dry-run \
+            --require-hashes \
+            --index-url=https://pypi.org/simple \
+            -r requirements.lock
+          "${clean_env[@]}" python -m pip install \
+            --dry-run \
+            --require-hashes \
+            --index-url=https://pypi.org/simple \
+            -r requirements-dev.lock
+
           sha256sum requirements.in requirements-dev.in requirements.lock requirements-dev.lock > dependency-locks.sha256
 
       - name: Upload generated lock candidate

@@ -76,8 +76,8 @@ services:
     build:
       context: ./model_router
       args:
-        LITELLM_VERSION: ${LITELLM_VERSION:-1.99.0}
-    image: ai-development-department/model-router:${LITELLM_VERSION:-1.99.0}
+        LITELLM_VERSION: ${LITELLM_VERSION:-1.98.0}
+    image: ai-development-department/model-router:${LITELLM_VERSION:-1.98.0}
     restart: unless-stopped
     init: true
     env_file:

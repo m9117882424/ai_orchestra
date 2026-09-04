@@ -2,20 +2,60 @@
 
 ## Purpose
 
-The core platform provides generic execution, identity, evidence and approval mechanisms. Safety-critical engineering cannot be reduced to a generic `tests passed` gate. Each project activates a versioned domain assurance profile that defines additional required analyses, evidence, independence and release conditions.
+AI Orchestra core is a **high-reliability general software engineering platform**. Aviation, nuclear, space, medical and similar standards are not global requirements for every project; they are optional assurance profiles activated only when the project, customer, regulator or risk classification requires them.
+
+The safety-critical domains are used as stress tests for the platform architecture: if the core cannot preserve identity, isolation, recovery, auditability and exact approvals under those failure models, it is not robust enough for high-value commercial projects either. However, domain-specific artifacts such as DAL objectives, nuclear licensing evidence, FHA/PSSA/SSA, MC/DC or plant-safety traceability must never leak into ordinary web, analytics or business-software projects unless explicitly selected.
 
 Profiles are policy/data, not Lead prompt text.
+
+## Assurance tiers
+
+Every project selects one assurance tier independently from its technology stack:
+
+### `general-standard`
+For ordinary internal/business software. Uses the reliable core but avoids unnecessary regulatory ceremony.
+
+Mandatory examples:
+- isolated task workspace;
+- protected secrets;
+- durable execution/recovery;
+- code review/QA appropriate to risk;
+- tests/build checks defined by the repository;
+- exact Git/artifact identities;
+- audit of material external actions;
+- scoped approvals for destructive/production actions.
+
+### `general-high-assurance`
+Default target for expensive, business-critical or long-lived projects where failure is costly even without a regulator.
+
+Adds, depending on project policy:
+- independent review for high-risk changes;
+- stronger requirements/change traceability;
+- hermetic/reproducible build controls where practical;
+- SBOM/provenance;
+- immutable result/evidence package;
+- disaster-recovery and failure-injection tests;
+- stronger release quorum and rollback evidence;
+- model/tool configuration baseline and drift detection.
+
+This is the engineering quality level we want AI Orchestra itself to reach by default.
+
+### `regulated-critical`
+Activated only for projects whose domain or contract requires formal safety/security/compliance assurance. This tier then attaches a versioned domain profile such as aviation, nuclear, space, rail or medical.
+
+It may require organizational independence, formal requirements baselines, certification/licensing evidence, qualified tools, domain analyses and human release authority according to the applicable project plan.
 
 ## Common profile fields
 
 - profile id/version;
-- domain and criticality class;
-- applicable standards/guidance registry;
+- assurance tier;
+- domain and criticality class when applicable;
+- applicable standards/guidance registry when applicable;
 - required organizational roles and independence;
 - required lifecycle artifacts;
 - requirements/traceability rules;
 - allowed development and verification tools;
-- intended-use/qualification status of tools and AI;
+- intended-use/qualification status of tools and AI where required;
 - mandatory static/dynamic analyses;
 - target/environment requirements;
 - coverage criteria;
@@ -26,7 +66,7 @@ Profiles are policy/data, not Lead prompt text.
 - accepted deviations/tailoring;
 - failure-injection suite.
 
-Unknown or incomplete profile blocks controlled execution.
+Unknown required fields block only the execution modes that depend on them. A normal `general-standard` project must not be blocked because an aviation/nuclear field is absent.
 
 ## Aviation profile examples
 
@@ -86,7 +126,7 @@ A NASA-like profile can require:
 
 ## Profile execution semantics
 
-A profile emits machine-enforceable gates and evidence requirements. Example:
+A profile emits only the gates applicable to that project. Example for a regulated profile:
 
 ```text
 requirement_baseline.approved == true
@@ -100,13 +140,13 @@ release_manifest.complete == true
 release_approval.quorum == SATISFIED
 ```
 
-AI may help generate candidate evidence/artifacts, but only the configured trusted authority/tool may close each gate.
+A `general-standard` project may have a much smaller gate set. AI may help generate candidate evidence/artifacts, but only the configured authority/tool may close protected gates.
 
 ## Change control
 
 A profile is a configuration item. Any change to its rules:
 
 - creates a new version;
-- triggers impact analysis for active executions/releases;
+- triggers impact analysis for active executions/releases that use that profile;
 - cannot retroactively make old evidence compliant;
-- requires assurance-owner approval for controlled projects.
+- requires the configured profile owner approval for controlled projects.

@@ -7,6 +7,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN groupadd --system router \
     && useradd --system --gid router --home-dir /app router \
+    && mkdir -p /app \
+    && chown router:router /app \
     && pip install --no-cache-dir "litellm[proxy]==${LITELLM_VERSION}"
 
 WORKDIR /app

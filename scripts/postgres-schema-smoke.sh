@@ -50,4 +50,12 @@ if docker compose run --rm --no-deps control-plane python -m app.schema_cli chec
   exit 1
 fi
 
+echo "[INFO] PostgreSQL fresh-migration smoke"
+docker compose down -v --remove-orphans >/dev/null
+docker compose up -d postgres >/dev/null
+wait_postgres
+
+docker compose run --rm --no-deps control-plane python -m app.schema_cli migrate
+docker compose run --rm --no-deps control-plane python -m app.schema_cli check
+
 echo "[OK] PostgreSQL schema smoke passed"

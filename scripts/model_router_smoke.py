@@ -52,6 +52,23 @@ def request_json(base_url: str, api_key: str, method: str, path: str, payload: d
     return parsed
 
 
+def verify_rejects_bad_key(base_url: str) -> None:
+    req = urllib.request.Request(
+        base_url.rstrip("/") + "/models",
+        headers={"Authorization": "Bearer sk-client-intentionally-invalid"},
+        method="GET",
+    )
+    try:
+        urllib.request.urlopen(req, timeout=10).read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            return
+        raise RuntimeError(f"gateway returned HTTP {exc.code} for invalid credential") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"gateway unavailable during auth check: {exc.reason}") from exc
+    raise RuntimeError("gateway accepted an invalid inference credential")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default=os.getenv("MODEL_GATEWAY_BASE_URL", DEFAULT_BASE_URL))
@@ -63,6 +80,13 @@ def main() -> int:
     if not key:
         print("FAIL: MODEL_ROUTER_CLIENT_KEY is empty", file=sys.stderr)
         return 2
+
+    try:
+        verify_rejects_bad_key(args.base_url)
+    except Exception as exc:
+        print(f"FAIL: inference credential boundary: {exc}", file=sys.stderr)
+        return 1
+    print("[OK] Model Gateway rejects invalid inference credentials")
 
     catalog = request_json(args.base_url, key, "GET", "/models")
     ids = {str(row.get("id")) for row in catalog.get("data", []) if isinstance(row, dict)}
@@ -85,7 +109,8 @@ def main() -> int:
                 {
                     "model": model,
                     "messages": [{"role": "user", "content": "Reply with exactly OK."}],
-                    "max_tokens": 16,
+                    "max_tokens": 64,
+                    "temperature": 0,
                 },
             )
             choices = result.get("choices") or []

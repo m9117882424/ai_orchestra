@@ -7,7 +7,8 @@ import sys
 
 from sqlalchemy import create_engine, inspect, text
 
-from control_plane.app.db import Base
+from control_plane.app.database_base import Base
+import control_plane.app.models  # noqa: F401
 from control_plane.app.schema import head_revision, legacy_schema_diff
 
 
@@ -37,7 +38,6 @@ def _production_env(database_url: str) -> dict[str, str]:
             "PYTHONPATH": str(CONTROL_PLANE_ROOT),
         }
     )
-    env.pop("CONTROL_PLANE_SCHEMA_MODE", None)
     return env
 
 

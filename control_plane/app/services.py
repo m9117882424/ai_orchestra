@@ -4,7 +4,7 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .models import AuditEvent, Budget, TradingGuard, UsageEvent
+from .models import AuditEvent, Budget, CapabilityGuard, UsageEvent
 
 
 def write_audit(
@@ -28,12 +28,12 @@ def write_audit(
 
 
 def seed_defaults(db: Session, default_monthly_budget: float) -> None:
-    if db.get(TradingGuard, 1) is None:
-        db.add(TradingGuard(id=1))
+    if db.get(CapabilityGuard, 1) is None:
+        db.add(CapabilityGuard(id=1))
 
     defaults = {
         "department": Decimal(str(default_monthly_budget)),
-        "trading-research": Decimal(str(default_monthly_budget)) / Decimal("4"),
+        "high-risk-research": Decimal(str(default_monthly_budget)) / Decimal("4"),
     }
     for scope, limit in defaults.items():
         if db.get(Budget, scope) is None:

@@ -12,27 +12,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Получить код
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+
+      - name: Подготовить инструменты проверки
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          python3 -m pip install pyyaml
 
       - name: Подготовить безопасную тестовую конфигурацию
         run: |
           cp .env.example .env
-          cp config/opencode.shared.json runtime/opencode.json
+          cp .env.providers.example .env.providers
+          chmod 600 .env .env.providers
+          cp config/opencode.gateway.json runtime/opencode.json
+          cp config/model-router.shared.yaml runtime/model-router.yaml
 
-      - name: Проверить JSON
+      - name: Проверить JSON, YAML, Python и JavaScript
         run: |
-          python3 -m json.tool config/opencode.shared.json >/dev/null
-          python3 -m json.tool config/opencode.separate.json >/dev/null
+          python3 -m json.tool config/opencode.gateway.json >/dev/null
           python3 -m json.tool runtime/opencode.json >/dev/null
-
-      - name: Проверить Docker Compose
-        run: docker compose config --quiet
-
-      - name: Установить зависимости кабинета
-        run: python3 -m pip install --requirement control_plane/requirements-dev.txt
-
-      - name: Проверить кабинет руководителя
-        run: python3 -m pytest control_plane/tests
+          python3 - <<'PY'
+          from pathlib import Path
+          import yaml
+          for path in [Path('config/model-router.shared.yaml'), Path('config/model-router.separate.yaml')]:
+              data = yaml.safe_load(path.read_text(encoding='utf-8'))
+              assert isinstance(data, dict) and isinstance(data.get('model_list'), list) and data['model_list'], path
+          print('[OK] router YAML parsed')
+          PY
+          python3 -m compileall -q control_plane/app control_plane/tests scripts/model_router_smoke.py scripts/static_security_check.py
+          node --check control_plane/app/static/app.js
 
       - name: Проверить shell-скрипты
         run: |
@@ -43,3 +52,18 @@ jobs:
           bash -n scripts/backup.sh
           bash -n scripts/worktree-create.sh
           bash -n scripts/worktree-remove.sh
+          shellcheck scripts/*.sh
+
+      - name: Проверить Docker Compose и границы безопасности
+        run: |
+          docker compose config --quiet
+          python3 scripts/static_security_check.py
+
+      - name: Установить зависимости кабинета
+        run: python3 -m pip install --requirement control_plane/requirements-dev.txt
+
+      - name: Проверить кабинет руководителя
+        run: python3 -m pytest control_plane/tests
+
+      - name: Проверить воспроизводимость Docker build
+        run: docker compose build --pull

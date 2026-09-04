@@ -11,15 +11,16 @@ const statusLabels = {
 const domainLabels = {
   development: "Разработка",
   analytics: "Аналитика",
-  trading: "Торговля",
+  trading: "Торговые исследования",
 };
 
 const approvalLabels = {
   code_change: "Изменение кода",
   git_push: "Публикация ветки",
-  deploy: "Развертывание",
-  trading_mode: "Режим торговли",
-  live_order: "Реальный ордер",
+  deploy: "Production deploy",
+  secret_access: "Доступ к секретам",
+  external_write: "Запись во внешнюю систему",
+  financial_execution: "Финансовое исполнение",
 };
 
 const transitions = {
@@ -126,15 +127,16 @@ async function loadTasks() {
   });
 }
 
-async function loadGuard() {
-  const guard = await api("/api/trading/guard");
-  document.getElementById("guard-mode").textContent = guard.mode;
-  document.getElementById("guard-stop").textContent = guard.emergency_stop ? "Включен" : "Выключен";
-  document.getElementById("guard-live").textContent = guard.live_order_enabled ? "Разрешены" : "Запрещены";
-  document.getElementById("guard-sell").textContent = guard.auto_sell_enabled ? "Разрешена" : "Запрещена";
-  document.getElementById("guard-deviation").textContent = `${formatNumber(guard.min_deviation_pct)}%`;
-  document.getElementById("guard-reserve").textContent = `${formatNumber(guard.cash_reserve_min_pct)}–${formatNumber(guard.cash_reserve_max_pct)}%`;
-  document.getElementById("guard-limit").textContent = Number(guard.daily_purchase_limit) > 0 ? formatNumber(guard.daily_purchase_limit) : "Не задан";
+function deniedLabel(value) {
+  return value ? "РАЗРЕШЕНО" : "ЗАПРЕЩЕНО";
+}
+
+async function loadCapabilityGuard() {
+  const guard = await api("/api/capabilities/guard");
+  document.getElementById("guard-deploy").textContent = deniedLabel(guard.production_deploy_allowed);
+  document.getElementById("guard-write").textContent = deniedLabel(guard.external_write_allowed);
+  document.getElementById("guard-finance").textContent = deniedLabel(guard.financial_execution_allowed);
+  document.getElementById("guard-secrets").textContent = deniedLabel(guard.secret_access_allowed);
 }
 
 async function decideApproval(id, decision) {
@@ -223,7 +225,7 @@ async function loadAudit() {
 
 async function refreshAll() {
   try {
-    await Promise.all([loadSummary(), loadTasks(), loadGuard(), loadApprovals(), loadBudgets(), loadAudit()]);
+    await Promise.all([loadSummary(), loadTasks(), loadCapabilityGuard(), loadApprovals(), loadBudgets(), loadAudit()]);
   } catch (error) { toast(error.message, true); }
 }
 

@@ -1,0 +1,53 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "orchestra/orchestra-lead",
+  "small_model": "orchestra/orchestra-fast",
+  "provider": {
+    "orchestra": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "AI Orchestra Model Router",
+      "options": {
+        "baseURL": "http://model-gateway:8080/v1",
+        "apiKey": "{env:MODEL_ROUTER_CLIENT_KEY}"
+      },
+      "models": {
+        "orchestra-lead": {"name": "Lead"},
+        "orchestra-analyst": {"name": "Analyst"},
+        "orchestra-architect": {"name": "Architect"},
+        "orchestra-coder": {"name": "Coder"},
+        "orchestra-qa": {"name": "Qa"},
+        "orchestra-reviewer": {"name": "Reviewer"},
+        "orchestra-fast": {"name": "Fast"},
+        "orchestra-quant": {"name": "Quant"},
+        "orchestra-risk": {"name": "Risk"}
+      }
+    }
+  },
+  "permission": {
+    "*": "ask",
+    "read": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "webfetch": "allow",
+    "websearch": "allow",
+    "skill": "allow",
+    "edit": "ask",
+    "bash": {"*":"ask","rm *":"deny","sudo *":"deny","git push*":"deny","git reset --hard*":"deny","git clean*":"deny"}
+  },
+  "agent": {
+    "department-lead": {"description":"Руководитель виртуального отдела: принимает задачу, распределяет работу, контролирует качество и выдает итог владельцу.","mode":"primary","model":"orchestra/orchestra-lead","prompt":"{file:./prompts/department-lead.txt}","steps":30,"permission":{"edit":"deny","bash":"deny","task":{"*":"deny","business-analyst":"allow","architect":"allow","developer":"allow","qa-engineer":"allow","code-reviewer":"allow","devops-engineer":"allow","data-analyst":"allow","quant-researcher":"allow","market-data-engineer":"allow","portfolio-analyst":"allow","risk-officer":"allow","execution-engineer":"allow","trade-reviewer":"allow"}}},
+    "business-analyst": {"description":"Уточняет бизнес-цель, требования, критерии приемки, ограничения и риски.","mode":"subagent","model":"orchestra/orchestra-analyst","prompt":"{file:./prompts/business-analyst.txt}","steps":14,"permission":{"edit":"deny","bash":"deny"}},
+    "architect": {"description":"Проектирует решение, границы модулей, миграции, API и план внедрения.","mode":"subagent","model":"orchestra/orchestra-architect","prompt":"{file:./prompts/architect.txt}","steps":18,"permission":{"edit":"deny","bash":{"*":"deny","git status*":"allow","git log*":"allow","git diff*":"allow"}}},
+    "developer": {"description":"Реализует согласованные изменения в коде и локально проверяет результат.","mode":"subagent","model":"orchestra/orchestra-coder","prompt":"{file:./prompts/developer.txt}","steps":40,"permission":{"edit":"allow","bash":{"*":"ask","git status*":"allow","git log*":"allow","git diff*":"allow","git branch --show-current*":"allow","rg *":"allow","find *":"allow","pytest *":"allow","python3 -m pytest *":"allow","npm test*":"allow","npm run test*":"allow","npm run lint*":"allow","rm *":"deny","sudo *":"deny","git push*":"deny","git reset --hard*":"deny","git clean*":"deny"}}},
+    "qa-engineer": {"description":"Проверяет критерии приемки, запускает тесты и оформляет дефекты с доказательствами.","mode":"subagent","model":"orchestra/orchestra-qa","prompt":"{file:./prompts/qa.txt}","steps":24,"permission":{"edit":"deny","bash":{"*":"ask","git status*":"allow","git diff*":"allow","pytest *":"allow","python3 -m pytest *":"allow","npm test*":"allow","npm run test*":"allow","npm run lint*":"allow","rm *":"deny","sudo *":"deny","git push*":"deny"}}},
+    "code-reviewer": {"description":"Независимо проверяет diff на ошибки, регрессии, безопасность и сопровождаемость.","mode":"subagent","model":"orchestra/orchestra-reviewer","prompt":"{file:./prompts/reviewer.txt}","steps":18,"permission":{"edit":"deny","bash":{"*":"deny","git status*":"allow","git log*":"allow","git diff*":"allow","rg *":"allow"}}},
+    "devops-engineer": {"description":"Готовит Docker, CI/CD, миграции и инструкции развертывания без самостоятельного прод-деплоя.","mode":"subagent","model":"orchestra/orchestra-coder","prompt":"{file:./prompts/devops.txt}","steps":26,"permission":{"edit":"allow","bash":{"*":"ask","git status*":"allow","git diff*":"allow","docker compose config*":"allow","rm *":"deny","sudo *":"deny","git push*":"deny","docker compose down*":"deny","docker system prune*":"deny"}}},
+    "data-analyst": {"description":"Проверяет данные, SQL, метрики и аналитическую логику; отделяет факт от предположения.","mode":"subagent","model":"orchestra/orchestra-analyst","prompt":"{file:./prompts/data-analyst.txt}","steps":22,"permission":{"edit":"ask","bash":{"*":"ask","python3 *":"allow","pytest *":"allow","git diff*":"allow","rm *":"deny","sudo *":"deny","git push*":"deny"}}},
+    "quant-researcher": {"description":"Проверяет торговые гипотезы воспроизводимым backtest и учитывает costs, bias и tail-risk; ордера не размещает.","mode":"subagent","model":"orchestra/orchestra-quant","prompt":"{file:./prompts/quant-researcher.txt}","steps":28,"permission":{"edit":"deny","bash":{"*":"ask","python3 *":"allow","pytest *":"allow","git diff*":"allow","rm *":"deny","sudo *":"deny","git push*":"deny"}}},
+    "market-data-engineer": {"description":"Проектирует загрузку и контроль качества рыночных данных крипты и стандартных активов.","mode":"subagent","model":"orchestra/orchestra-coder","prompt":"{file:./prompts/market-data-engineer.txt}","steps":30,"permission":{"edit":"ask","bash":{"*":"ask","python3 *":"allow","pytest *":"allow","git status*":"allow","git diff*":"allow","rm *":"deny","sudo *":"deny","git push*":"deny"}}},
+    "portfolio-analyst": {"description":"Считает экспозиции, P&L, концентрацию и риск единого портфеля по разным классам активов.","mode":"subagent","model":"orchestra/orchestra-analyst","prompt":"{file:./prompts/portfolio-analyst.txt}","steps":24,"permission":{"edit":"deny","bash":{"*":"ask","python3 *":"allow","git diff*":"allow","rm *":"deny","sudo *":"deny","git push*":"deny"}}},
+    "risk-officer": {"description":"Независимо проверяет лимиты и fail-safe условия; при недостатке доказательств блокирует переход.","mode":"subagent","model":"orchestra/orchestra-risk","prompt":"{file:./prompts/risk-officer.txt}","steps":18,"permission":{"edit":"deny","bash":"deny"}},
+    "execution-engineer": {"description":"Разрабатывает безопасные broker/exchange adapters только на mocks и sandbox, без live-ключей и ордеров.","mode":"subagent","model":"orchestra/orchestra-coder","prompt":"{file:./prompts/execution-engineer.txt}","steps":32,"permission":{"edit":"allow","bash":{"*":"ask","python3 -m pytest *":"allow","pytest *":"allow","git status*":"allow","git diff*":"allow","rm *":"deny","sudo *":"deny","git push*":"deny","curl *":"deny","wget *":"deny","docker compose up*":"deny","docker compose down*":"deny"}}},
+    "trade-reviewer": {"description":"Независимо проверяет исследование, риск, исполнение и эксплуатационные защиты торгового кода.","mode":"subagent","model":"orchestra/orchestra-reviewer","prompt":"{file:./prompts/trade-reviewer.txt}","steps":22,"permission":{"edit":"deny","bash":{"*":"deny","git status*":"allow","git log*":"allow","git diff*":"allow","rg *":"allow"}}}
+  }
+}

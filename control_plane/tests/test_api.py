@@ -81,16 +81,16 @@ def test_task_lifecycle_is_audited(auth, mutation_headers):
     ]
 
 
-def test_live_order_approval_never_unlocks_trading(auth, mutation_headers):
+def test_financial_approval_never_unlocks_orchestra_capability(auth, mutation_headers):
     with TestClient(app) as client:
         requested = client.post(
             "/api/approvals",
             auth=auth,
             headers=mutation_headers,
             json={
-                "kind": "live_order",
+                "kind": "financial_execution",
                 "requested_by": "execution-engineer",
-                "reason": "Тест цепочки согласования",
+                "reason": "Тест управленческого согласования",
             },
         )
         approval_id = requested.json()["id"]
@@ -98,21 +98,22 @@ def test_live_order_approval_never_unlocks_trading(auth, mutation_headers):
             f"/api/approvals/{approval_id}/decision",
             auth=auth,
             headers=mutation_headers,
-            json={"decision": "approved", "comment": "Только проверка журнала"},
+            json={"decision": "approved", "comment": "Запись решения, не команда исполнения"},
         )
-        guard = client.get("/api/trading/guard", auth=auth)
+        guard = client.get("/api/capabilities/guard", auth=auth)
 
     assert decided.status_code == 200
     assert decided.json()["status"] == "approved"
-    assert guard.json()["emergency_stop"] is True
-    assert guard.json()["live_order_enabled"] is False
-    assert guard.json()["auto_sell_enabled"] is False
+    assert guard.json()["production_deploy_allowed"] is False
+    assert guard.json()["external_write_allowed"] is False
+    assert guard.json()["financial_execution_allowed"] is False
+    assert guard.json()["secret_access_allowed"] is False
 
 
 def test_budget_update_and_usage_summary(auth, mutation_headers):
     with TestClient(app) as client:
         updated = client.put(
-            "/api/budgets/trading-research",
+            "/api/budgets/high-risk-research",
             auth=auth,
             headers=mutation_headers,
             json={
@@ -128,8 +129,8 @@ def test_budget_update_and_usage_summary(auth, mutation_headers):
             headers=mutation_headers,
             json={
                 "role": "quant-researcher",
-                "provider": "aitunnel",
-                "model": "research-model",
+                "provider": "model-router",
+                "model": "orchestra-quant",
                 "input_tokens": 1000,
                 "output_tokens": 250,
                 "cost": "17.125000",

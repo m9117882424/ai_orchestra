@@ -92,18 +92,20 @@ class AuditEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
-class TradingGuard(Base):
-    __tablename__ = "trading_guard"
+class CapabilityGuard(Base):
+    """Fail-closed capabilities owned by Orchestra itself.
+
+    Product-specific policy (for example trading risk thresholds) belongs to the
+    product repository, never to the development department control plane.
+    """
+
+    __tablename__ = "capability_guard"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
-    mode: Mapped[str] = mapped_column(String(32), default="OFF")
-    emergency_stop: Mapped[bool] = mapped_column(Boolean, default=True)
-    live_order_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
-    auto_sell_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
-    min_deviation_pct: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=Decimal("5.00"))
-    cash_reserve_min_pct: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=Decimal("3.00"))
-    cash_reserve_max_pct: Mapped[Decimal] = mapped_column(Numeric(6, 2), default=Decimal("5.00"))
-    daily_purchase_limit: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"))
+    production_deploy_allowed: Mapped[bool] = mapped_column(Boolean, default=False)
+    external_write_allowed: Mapped[bool] = mapped_column(Boolean, default=False)
+    financial_execution_allowed: Mapped[bool] = mapped_column(Boolean, default=False)
+    secret_access_allowed: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
     )

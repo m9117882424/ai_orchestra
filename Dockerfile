@@ -1,6 +1,6 @@
 FROM node:22-bookworm-slim
 
-ARG OPENCODE_VERSION=latest
+ARG OPENCODE_VERSION=1.18.27
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -23,4 +23,3 @@ WORKDIR /workspace/repos
 EXPOSE 4096
 
 CMD ["opencode", "web", "--hostname", "0.0.0.0", "--port", "4096"]
-

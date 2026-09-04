@@ -11,7 +11,14 @@ TaskStatus = Literal[
     "backlog", "planned", "in_progress", "waiting_approval", "qa", "done", "failed"
 ]
 RiskLevel = Literal["low", "medium", "high", "critical"]
-ApprovalKind = Literal["code_change", "git_push", "deploy", "trading_mode", "live_order"]
+ApprovalKind = Literal[
+    "code_change",
+    "git_push",
+    "deploy",
+    "secret_access",
+    "external_write",
+    "financial_execution",
+]
 ApprovalDecision = Literal["approved", "rejected"]
 
 
@@ -108,15 +115,11 @@ class AuditRead(BaseModel):
     created_at: datetime
 
 
-class TradingGuardRead(BaseModel):
+class CapabilityGuardRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    mode: str
-    emergency_stop: bool
-    live_order_enabled: bool
-    auto_sell_enabled: bool
-    min_deviation_pct: Decimal
-    cash_reserve_min_pct: Decimal
-    cash_reserve_max_pct: Decimal
-    daily_purchase_limit: Decimal
+    production_deploy_allowed: bool
+    external_write_allowed: bool
+    financial_execution_allowed: bool
+    secret_access_allowed: bool
     updated_at: datetime

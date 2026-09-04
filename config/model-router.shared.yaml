@@ -1,17 +1,17 @@
 model_list:
   - model_name: orchestra-lead
     litellm_params:
-      model: openai/claude-sonnet-4-5
+      model: openai/claude-sonnet-4.5
       api_base: os.environ/AITUNNEL_BASE_URL
       api_key: os.environ/AITUNNEL_API_KEY
   - model_name: orchestra-reviewer
     litellm_params:
-      model: openai/claude-sonnet-4-5
+      model: openai/claude-sonnet-4.5
       api_base: os.environ/AITUNNEL_BASE_URL
       api_key: os.environ/AITUNNEL_API_KEY
   - model_name: orchestra-risk
     litellm_params:
-      model: openai/claude-sonnet-4-5
+      model: openai/claude-sonnet-4.5
       api_base: os.environ/AITUNNEL_BASE_URL
       api_key: os.environ/AITUNNEL_API_KEY
   - model_name: orchestra-architect
@@ -21,7 +21,7 @@ model_list:
       api_key: os.environ/AITUNNEL_API_KEY
   - model_name: orchestra-coder
     litellm_params:
-      model: openai/gpt-5.1-codex-max
+      model: openai/gpt-5.3-codex
       api_base: os.environ/AITUNNEL_BASE_URL
       api_key: os.environ/AITUNNEL_API_KEY
   - model_name: orchestra-quant

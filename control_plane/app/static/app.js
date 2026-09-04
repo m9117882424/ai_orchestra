@@ -23,6 +23,9 @@ const approvalLabels = {
   financial_execution: "Финансовое исполнение",
 };
 
+const executionLabels = { running: "Выполняется", completed: "Готов к приемке", failed: "Ошибка", cancelled: "Остановлен" };
+let executionsByTask = new Map();
+
 const transitions = {
   backlog: ["planned", "in_progress"],
   planned: ["backlog", "in_progress"],
@@ -79,6 +82,43 @@ async function loadSummary() {
   document.getElementById("metric-done").textContent = data.tasks.done || 0;
 }
 
+async function loadExecutions() {
+  const runs = await api("/api/executions?limit=100");
+  executionsByTask = new Map();
+  runs.forEach((run) => {
+    if (!executionsByTask.has(run.task_id)) executionsByTask.set(run.task_id, run);
+  });
+}
+
+async function startExecution(taskId) {
+  try {
+    await api(`/api/tasks/${taskId}/execute`, { method: "POST" });
+    toast("AI Orchestra начал выполнение задачи");
+    await refreshAll();
+  } catch (error) { toast(error.message, true); }
+}
+
+async function refreshExecution(id) {
+  try {
+    await api(`/api/executions/${id}/refresh`, { method: "POST" });
+    await refreshAll();
+  } catch (error) { toast(error.message, true); }
+}
+
+async function abortExecution(id) {
+  if (!window.confirm("Остановить выполнение этой задачи?")) return;
+  try {
+    await api(`/api/executions/${id}/abort`, { method: "POST" });
+    toast("Выполнение остановлено");
+    await refreshAll();
+  } catch (error) { toast(error.message, true); }
+}
+
+function showExecutionResult(text) {
+  document.getElementById("execution-result").textContent = text;
+  document.getElementById("result-modal").classList.remove("hidden");
+}
+
 async function loadTasks() {
   const tasks = await api("/api/tasks?limit=50");
   const body = document.getElementById("tasks-body");
@@ -86,7 +126,7 @@ async function loadTasks() {
   if (!tasks.length) {
     const row = node("tr");
     const cell = node("td", "empty", "Пока нет задач — создайте первую.");
-    cell.colSpan = 4;
+    cell.colSpan = 5;
     row.append(cell);
     body.append(row);
     return;
@@ -122,7 +162,32 @@ async function loadTasks() {
     } else {
       statusCell.append(node("span", `pill ${task.status}`, statusLabels[task.status] || task.status));
     }
-    row.append(titleCell, domainCell, riskCell, statusCell);
+    const executionCell = node("td");
+    const run = executionsByTask.get(task.id);
+    if (!run && task.domain === "development" && task.status !== "done") {
+      const start = node("button", "button button-small button-secondary", "Запустить");
+      start.addEventListener("click", () => startExecution(task.id));
+      executionCell.append(start);
+    } else if (run) {
+      executionCell.append(node("span", `pill ${run.status}`, executionLabels[run.status] || run.status));
+      if (run.status === "running") {
+        const actions = node("div", "stack-actions");
+        const refresh = node("button", "text-button", "Обновить");
+        const stop = node("button", "text-button", "Остановить");
+        refresh.addEventListener("click", () => refreshExecution(run.id));
+        stop.addEventListener("click", () => abortExecution(run.id));
+        actions.append(refresh, stop);
+        executionCell.append(actions);
+      }
+      if (run.result) {
+        const result = node("button", "text-button", "Результат");
+        result.addEventListener("click", () => showExecutionResult(run.result));
+        executionCell.append(result);
+      }
+    } else {
+      executionCell.append(node("span", "task-meta", "V1: development"));
+    }
+    row.append(titleCell, domainCell, riskCell, statusCell, executionCell);
     body.append(row);
   });
 }
@@ -225,9 +290,12 @@ async function loadAudit() {
 
 async function refreshAll() {
   try {
+    await loadExecutions();
     await Promise.all([loadSummary(), loadTasks(), loadCapabilityGuard(), loadApprovals(), loadBudgets(), loadAudit()]);
   } catch (error) { toast(error.message, true); }
 }
+
+document.getElementById("close-result").addEventListener("click", () => document.getElementById("result-modal").classList.add("hidden"));
 
 document.getElementById("show-task-form").addEventListener("click", () => document.getElementById("task-form-panel").classList.remove("hidden"));
 document.getElementById("hide-task-form").addEventListener("click", () => document.getElementById("task-form-panel").classList.add("hidden"));
@@ -249,3 +317,13 @@ document.getElementById("task-form").addEventListener("submit", async (event) =>
 });
 
 refreshAll();
+
+
+setInterval(async () => {
+  const running = [...executionsByTask.values()].filter((run) => run.status === "running");
+  if (!running.length) return;
+  for (const run of running) {
+    try { await api(`/api/executions/${run.id}/refresh`, { method: "POST" }); } catch (_) { /* transient */ }
+  }
+  await refreshAll();
+}, 10000);

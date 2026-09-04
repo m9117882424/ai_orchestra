@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+
+# The schema manager is the only application path allowed to perform DDL.
+# Set this before importing app.db so production runtime guards stay enabled elsewhere.
+os.environ["CONTROL_PLANE_SCHEMA_MODE"] = "migrate"
 
 from alembic import command
 from alembic.migration import MigrationContext

@@ -143,3 +143,19 @@ class ExecutionRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     finished_at: datetime | None
+
+
+class ExecutionProgressItem(BaseModel):
+    role: str
+    model: str | None = None
+    text: str
+    created_at: datetime | None = None
+
+
+class ExecutionProgressRead(BaseModel):
+    execution_id: str
+    status: ExecutionStatus
+    stage: str
+    session_state: str
+    elapsed_seconds: int
+    items: list[ExecutionProgressItem]

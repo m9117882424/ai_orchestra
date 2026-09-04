@@ -30,7 +30,7 @@ services:
   control-plane:
     build:
       context: ./control_plane
-    image: ai-development-department/control-plane:0.4.0
+    image: ai-development-department/control-plane:0.4.1
     restart: unless-stopped
     init: true
     read_only: true

@@ -24,6 +24,7 @@ const approvalLabels = {
 };
 
 const executionLabels = { running: "Выполняется", completed: "Готов к приемке", failed: "Ошибка", cancelled: "Остановлен" };
+let progressExecutionId = null;
 let executionsByTask = new Map();
 
 const transitions = {
@@ -114,6 +115,44 @@ async function abortExecution(id) {
   } catch (error) { toast(error.message, true); }
 }
 
+function formatElapsed(seconds) {
+  const total = Number(seconds || 0);
+  const min = Math.floor(total / 60);
+  const sec = total % 60;
+  return min ? `${min} мин ${sec} сек` : `${sec} сек`;
+}
+
+async function showExecutionProgress(id) {
+  progressExecutionId = id;
+  document.getElementById("progress-modal").classList.remove("hidden");
+  await loadExecutionProgress(id);
+}
+
+async function loadExecutionProgress(id) {
+  const progress = await api(`/api/executions/${id}/progress`);
+  const summary = document.getElementById("progress-summary");
+  summary.replaceChildren(
+    node("span", "", progress.status === "running" ? "● активен" : executionLabels[progress.status] || progress.status),
+    node("span", "", `Этап: ${progress.stage}`),
+    node("span", "", `OpenCode: ${progress.session_state}`),
+    node("span", "", `Время: ${formatElapsed(progress.elapsed_seconds)}`)
+  );
+  const feed = document.getElementById("progress-feed");
+  feed.replaceChildren();
+  if (!progress.items.length) {
+    feed.append(node("p", "empty", "OpenCode работает, но текстовых сообщений пока нет."));
+    return;
+  }
+  progress.items.forEach((item) => {
+    const card = node("article", "progress-item");
+    const header = node("header");
+    header.append(node("strong", "", item.role || "assistant"));
+    header.append(node("span", "", item.model || ""));
+    card.append(header, node("pre", "", item.text));
+    feed.append(card);
+  });
+}
+
 function showExecutionResult(text) {
   document.getElementById("execution-result").textContent = text;
   document.getElementById("result-modal").classList.remove("hidden");
@@ -172,11 +211,13 @@ async function loadTasks() {
       executionCell.append(node("span", `pill ${run.status}`, executionLabels[run.status] || run.status));
       if (run.status === "running") {
         const actions = node("div", "stack-actions");
+        const progress = node("button", "text-button", "Ход работы");
         const refresh = node("button", "text-button", "Обновить");
         const stop = node("button", "text-button", "Остановить");
         refresh.addEventListener("click", () => refreshExecution(run.id));
         stop.addEventListener("click", () => abortExecution(run.id));
-        actions.append(refresh, stop);
+        progress.addEventListener("click", () => showExecutionProgress(run.id));
+        actions.append(progress, refresh, stop);
         executionCell.append(actions);
       }
       if (run.result) {
@@ -296,6 +337,7 @@ async function refreshAll() {
 }
 
 document.getElementById("close-result").addEventListener("click", () => document.getElementById("result-modal").classList.add("hidden"));
+document.getElementById("close-progress").addEventListener("click", () => { progressExecutionId = null; document.getElementById("progress-modal").classList.add("hidden"); });
 
 document.getElementById("show-task-form").addEventListener("click", () => document.getElementById("task-form-panel").classList.remove("hidden"));
 document.getElementById("hide-task-form").addEventListener("click", () => document.getElementById("task-form-panel").classList.add("hidden"));
@@ -318,7 +360,6 @@ document.getElementById("task-form").addEventListener("submit", async (event) =>
 
 refreshAll();
 
-
 setInterval(async () => {
   const running = [...executionsByTask.values()].filter((run) => run.status === "running");
   if (!running.length) return;
@@ -327,3 +368,9 @@ setInterval(async () => {
   }
   await refreshAll();
 }, 10000);
+
+setInterval(async () => {
+  if (progressExecutionId) {
+    try { await loadExecutionProgress(progressExecutionId); } catch (_) { /* transient */ }
+  }
+}, 5000);

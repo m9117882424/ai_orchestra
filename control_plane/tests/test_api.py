@@ -204,3 +204,35 @@ def test_development_execution_reaches_manager_review(auth, mutation_headers):
         assert next(t for t in tasks if t["id"] == task_id)["status"] == "qa"
     finally:
         app.dependency_overrides.pop(get_opencode_client, None)
+
+
+def test_execution_progress_exposes_live_messages(auth, mutation_headers):
+    from control_plane.app.main import get_opencode_client
+
+    fake = FakeOpenCode()
+    app.dependency_overrides[get_opencode_client] = lambda: fake
+    try:
+        with TestClient(app) as client:
+            created = client.post(
+                "/api/tasks",
+                auth=auth,
+                headers=mutation_headers,
+                json={"title": "Показать живой прогресс", "domain": "development"},
+            )
+            started = client.post(
+                f"/api/tasks/{created.json()['id']}/execute",
+                auth=auth,
+                headers=mutation_headers,
+            )
+            progress = client.get(
+                f"/api/executions/{started.json()['id']}/progress",
+                auth=auth,
+            )
+
+        assert progress.status_code == 200
+        payload = progress.json()
+        assert payload["session_state"] == "busy"
+        assert payload["elapsed_seconds"] >= 0
+        assert payload["items"][-1]["text"] == "QA пройден. Результат готов."
+    finally:
+        app.dependency_overrides.pop(get_opencode_client, None)

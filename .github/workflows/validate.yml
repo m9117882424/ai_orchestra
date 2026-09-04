@@ -71,7 +71,7 @@ jobs:
         run: docker compose build --pull
 
       - name: Проверить PostgreSQL migration semantics
-        run: ./scripts/postgres-schema-smoke.sh
+        run: bash ./scripts/postgres-schema-smoke.sh
 
       - name: Проверить базовый OpenCode toolchain
         run: |

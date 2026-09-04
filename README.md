@@ -1,112 +1,206 @@
-# AI Orchestra — виртуальный отдел разработки, аналитики и торговых исследований
+# AI Orchestra — виртуальный отдел разработки и аналитики
 
-AI Orchestra превращает один интерфейс в управляемую AI-команду: руководитель принимает задачу, распределяет работу между профильными ролями, контролирует проверки и показывает владельцу состояние отдела в отдельном кабинете.
+AI Orchestra — самостоятельный AI-отдел, который принимает задачи владельца, декомпозирует их между профильными ролями, реализует изменения в изолированных Git worktree, проводит QA и независимое review и оставляет проверяемый audit trail.
 
-На старте модели работают через общий ключ AITunnel. Позже весь контур переключается на отдельные ключи OpenAI, Anthropic и Google одной командой — без переноса репозиториев, истории и правил.
+**AI Orchestra не является частью Trading Platform.** Trading Platform, Arvento, Wialon, Fuel Monitor, BI и другие системы — отдельные продукты, которые отдел может разрабатывать.
 
-> Статус: пилот 0.2. Код, аналитика, backtest и paper-trading разрешены. `git push`, merge, production deploy и реальные торговые операции остаются за отдельным подтвержденным процессом.
+> Статус: pilot 0.3 hardening. `git push`, merge, production deploy, доступ к product secrets, запись во внешние production-системы и финансовое исполнение технически не входят в разрешенный контур отдела.
 
-## Что уже предусмотрено
+## Ключевые свойства
 
-- OpenCode Web для работы с виртуальным отделом;
-- отдельный веб-кабинет руководителя;
-- задачи с контролируемыми переходами статуса;
-- согласования, журнал действий и учет расходов моделей;
-- PostgreSQL для состояния кабинета;
-- общий ключ AITunnel или раздельные ключи провайдеров;
-- изолированные Git worktree: одна задача — одна ветка — один агент-редактор;
-- резервное копирование БД, истории OpenCode, конфигурации и Git-репозиториев;
-- профильные роли для крипты и стандартных активов;
-- fail-closed торговый предохранитель: live-ордера отключены и не могут быть включены из кабинета.
+- OpenCode Web как рабочее место AI-руководителя и специалистов;
+- кабинет руководителя на FastAPI;
+- PostgreSQL для задач, согласований, бюджетов и audit trail;
+- обязательные QA и independent review;
+- одна задача — одна ветка/worktree — один агент-редактор;
+- inference-only Model Gateway между OpenCode и Model Router;
+- Model Router между отделом и внешними AI API;
+- shared AITunnel или отдельные API OpenAI / Anthropic / Google;
+- добавление новых AI-провайдеров без изменения prompts и ролей;
+- provider secrets и router admin key недоступны OpenCode/агентам;
+- control-plane PostgreSQL физически отделен Docker-сетью от OpenCode;
+- pinned runtime versions, resource limits и localhost-only web ports;
+- backup без `.env`, `.env.providers` и OpenCode credential store.
 
-## Интерфейсы
-
-| Интерфейс | Назначение | Локальный адрес по умолчанию |
-| --- | --- | --- |
-| Кабинет руководителя | задачи, согласования, бюджеты, аудит, торговые ограничения | `http://127.0.0.1:8088` |
-| OpenCode Web | постановка задач AI-руководителю и работа с репозиториями | `http://127.0.0.1:4096` |
-
-Оба адреса защищены отдельными Basic Auth учетными данными и публикуются только на `127.0.0.1`. Для внешнего доступа нужен Nginx с HTTPS либо защищенный VPN.
+Подробные границы описаны в [`docs/ARCHITECTURE_V1.md`](docs/ARCHITECTURE_V1.md).
 
 ## Архитектура
 
-```mermaid
-flowchart TD
-    Owner["Максим — владелец"] --> Manager["Кабинет руководителя"]
-    Owner --> OpenCode["OpenCode Web"]
-    Manager --> DB["PostgreSQL: задачи, бюджет, аудит"]
-    OpenCode --> Lead["Руководитель AI-отдела"]
-    Lead --> Dev["Разработка и аналитика"]
-    Lead --> Trade["Торговые исследования"]
-    Dev --> Worktrees["Изолированные Git worktree"]
-    Trade --> Guard["Risk gate: live закрыт"]
-    Guard -. "отдельный будущий контур" .-> Execution["Execution node без LLM"]
+```text
+                         Владелец
+                     /              \
+                    v                v
+          Кабинет руководителя    OpenCode Web
+                   |                  |
+                   v                  v
+          control-plane DB      department-lead
+          (private network)          |
+                                  specialists
+                                      |
+                                      v
+                                 worktrees/repos
+                                      |
+                                      v
+                                Model Gateway
+                           (inference endpoints only)
+                                      |
+                                      v
+                                Model Router
+                              /      |       \
+                             /       |        \
+                       AITunnel   direct APIs  future providers
+                                 /    |    \
+                              OpenAI Anthropic Google
 ```
 
-Контейнер OpenCode не получает Docker socket хоста. Он не может самостоятельно управлять production-контейнерами. Кабинет также не содержит функций deploy или отправки ордеров.
+OpenCode не получает:
 
-## Роли отдела
+- `AITUNNEL_API_KEY`;
+- `OPENAI_API_KEY`;
+- `ANTHROPIC_API_KEY`;
+- `GOOGLE_GENERATIVE_AI_API_KEY`;
+- `MODEL_ROUTER_MASTER_KEY`;
+- пароль PostgreSQL control-plane;
+- пароль кабинета руководителя;
+- GitHub write token;
+- broker/exchange/product production secrets.
 
-### Разработка и аналитика
+OpenCode получает только отдельный `MODEL_ROUTER_CLIENT_KEY`. Gateway разрешает этому ключу только inference endpoints и сам подставляет router admin credential на закрытом backend-сегменте.
 
-| Роль | Зона ответственности | Доступ |
-| --- | --- | --- |
-| `department-lead` | прием задачи, декомпозиция, делегирование и итог | управление агентами, без редактирования |
-| `business-analyst` | требования и критерии приемки | чтение |
-| `architect` | архитектура, API, БД, миграции и откат | чтение |
-| `developer` | реализация и локальные проверки | редактирование, безопасные команды |
-| `qa-engineer` | тесты и воспроизводимые дефекты | чтение и запуск проверок |
-| `code-reviewer` | независимое ревью diff | чтение |
-| `devops-engineer` | Docker, CI/CD и runbook | редактирование, без production deploy |
-| `data-analyst` | SQL, качество данных и метрики | ограниченные вычисления |
+## Роли
 
-### Крипта и стандартные активы
+### Общая разработка
 
-| Роль | Зона ответственности | Жесткое ограничение |
-| --- | --- | --- |
-| `quant-researcher` | гипотезы, backtest, costs, bias, tail-risk | без ордеров и ключей |
-| `market-data-engineer` | ingestion, instrument master, качество и свежесть данных | только read-only/sandbox источники |
-| `portfolio-analyst` | P&L, экспозиции, концентрация и сценарии | без исполнения |
-| `risk-officer` | лимиты, fail-safe проверки и независимое вето | не может включать торговлю |
-| `execution-engineer` | код адаптеров, idempotency и reconciliation | mocks/sandbox, сетевые order-вызовы запрещены |
-| `trade-reviewer` | независимая проверка исследования, риска и исполнения | только чтение |
+| Роль | Задача |
+| --- | --- |
+| `department-lead` | декомпозиция, делегирование, контроль результата |
+| `business-analyst` | требования и критерии приемки |
+| `architect` | архитектура, API, БД, безопасность, rollback |
+| `developer` | реализация |
+| `qa-engineer` | независимые тесты |
+| `code-reviewer` | независимое review diff |
+| `devops-engineer` | Docker, CI/CD, runbook |
+| `data-analyst` | данные, SQL, качество и метрики |
 
-## Режимы ключей моделей
+### Профильные специалисты для разработки Trading Platform
 
-### `shared` — временный общий ключ AITunnel
+| Роль | Задача |
+| --- | --- |
+| `quant-researcher` | гипотезы, backtest, bias, costs, tail-risk |
+| `market-data-engineer` | ingestion и качество market data |
+| `portfolio-analyst` | P&L, экспозиции, концентрация |
+| `risk-officer` | независимое risk veto |
+| `execution-engineer` | mocks/sandbox adapters |
+| `trade-reviewer` | независимое review торгового проекта |
 
-- один `AITUNNEL_API_KEY`;
-- модели разных производителей доступны через OpenAI-совместимый endpoint;
-- подходит для пилота и сравнения моделей;
-- для ключа нужно задать бюджет, срок действия, разрешенные модели и IP сервера.
+Эти роли — компетенции **отдела разработки**. Они не делают AI Orchestra торговым терминалом. Риск-параметры, позиции, ордера и execution runtime принадлежат отдельной Trading Platform.
 
-### `separate` — прямые ключи
+## Model Router
 
-- `OPENAI_API_KEY` — архитектура и coding-задачи;
-- `ANTHROPIC_API_KEY` — руководитель, risk и review;
-- `GOOGLE_GENERATIVE_AI_API_KEY` — бизнес-, data- и portfolio-аналитика.
+Агенты обращаются только к логическим моделям:
 
-Переключение выполняется атомарно:
+- `orchestra-lead`;
+- `orchestra-architect`;
+- `orchestra-coder`;
+- `orchestra-analyst`;
+- `orchestra-qa`;
+- `orchestra-reviewer`;
+- `orchestra-risk`;
+- `orchestra-quant`;
+- `orchestra-fast`.
 
-```bash
-make shared
-make separate
+Конкретная модель за alias зависит от режима и может меняться без изменения prompts и agent workflow.
+
+### `shared`
+
+Все aliases идут через AITunnel. Provider credentials находятся только в `.env.providers` и загружаются только в контейнер Model Router.
+
+### `separate`
+
+Aliases распределяются по прямым API:
+
+- Anthropic — lead/review/risk;
+- OpenAI — architecture/coding/QA/quant;
+- Google — analytics/fast tasks.
+
+Baseline direct profile v1:
+
+- Claude Sonnet 5;
+- GPT-5.6 Sol;
+- Gemini 3.7 Flash / Gemini 3.5 Flash-Lite.
+
+Gemini 3.8 Flash уже доступен у Google, но в baseline v1 намеренно не включен: сначала нужен совместимый stable LiteLLM и отдельный provider smoke. Новая модель не попадает в рабочий отдел только потому, что она новее.
+
+### Добавление нового AI-провайдера
+
+OpenCode менять не нужно.
+
+1. Добавьте API key в `.env.providers`.
+2. Добавьте deployment в `config/model-router.separate.yaml`.
+3. Направьте нужный `orchestra-*` alias на новый deployment.
+4. Выполните `make separate` или отдельный тестовый switch в ветке.
+
+Switch script сначала поднимает новую пару Router/Gateway, ждет health и выполняет реальные low-cost provider smoke tests. Только после успешной проверки пересоздается OpenCode. При ошибке выполняется rollback на предыдущую маршрутизацию.
+
+Model Router построен на LiteLLM Proxy, поэтому архитектура не ограничена тремя провайдерами.
+
+## Runtime baseline
+
+Для воспроизводимости версии закреплены:
+
+```text
+OpenCode  1.18.27
+LiteLLM   1.98.0 stable
 ```
 
-Пересоздается только OpenCode. Репозитории, кабинет, PostgreSQL и история сессий не затрагиваются.
+`latest` в production build не используется. Обновление версии — отдельное изменение с build + smoke + review.
 
-## Требования к серверу
+## Секреты
 
-Для пилота:
+После `make init` есть два файла:
 
-- Ubuntu 22.04 или 24.04;
+```text
+.env
+.env.providers
+```
+
+`.env` содержит operational credentials:
+
+- пароли Web UI;
+- пароль control-plane DB;
+- `MODEL_ROUTER_MASTER_KEY`;
+- `MODEL_ROUTER_CLIENT_KEY`;
+- версии runtime;
+- Git identity.
+
+`.env.providers` содержит только provider API keys.
+
+Оба файла имеют права `0600` и игнорируются Git. `make preflight` откажется продолжать, если provider credentials обнаружены в обычном `.env`.
+
+**Не используйте `/connect` OpenCode для production provider credentials.**
+
+## Docker isolation
+
+- `control-db` — только PostgreSQL + control-plane, internal network;
+- `model-net` — только OpenCode + Model Gateway;
+- `router-backend` — только Model Gateway + Model Router, internal network;
+- `provider-egress` — Model Router для исходящих AI API;
+- OpenCode не находится в сети control-plane DB или router admin service;
+- Docker socket хоста не монтируется;
+- все web/diagnostic ports привязаны только к `127.0.0.1`;
+- контейнеры имеют CPU/RAM limits, log rotation и `no-new-privileges`.
+
+## Требования
+
+Минимум для пилота:
+
+- Ubuntu 22.04/24.04;
 - 4 vCPU;
-- 8 ГБ RAM;
-- 40–60 ГБ диска плюс место под рабочие репозитории и backup;
-- Docker Engine и Docker Compose v2;
-- Nginx и TLS для внешнего доступа.
+- 8 GiB RAM;
+- Docker Engine + Compose v2;
+- Nginx/TLS или VPN для внешнего доступа.
 
-GPU не нужен: модели работают во внешних API. До развертывания проверьте порты `4096` и `8088`, запас RAM/CPU и отсутствие пересечений с действующими сервисами. Этот compose не публикует PostgreSQL наружу и не использует порты существующего Auto-trader.
+На основном сервере Orchestra имеет отдельные лимиты и не должен вытеснять действующие production-сервисы.
 
 ## Быстрый запуск
 
@@ -114,21 +208,24 @@ GPU не нужен: модели работают во внешних API. До
 cd /opt
 git clone https://github.com/m9117882424/ai_orchestra.git
 cd ai_orchestra
-
 make init
-nano .env
 ```
 
-Для первого запуска заполните только маршрут моделей:
+Для первого запуска используем `shared`. Откройте только provider secret file:
+
+```bash
+nano .env.providers
+```
+
+и заполните:
 
 ```dotenv
-KEY_MODE=shared
-AITUNNEL_API_KEY=sk-aitunnel-...
+AITUNNEL_API_KEY=...
 ```
 
-`make init` отдельно генерирует пароли OpenCode, кабинета руководителя и PostgreSQL. Не публикуйте `.env` и не отправляйте его в чат.
+Не публикуйте ключ в терминальных логах, Git или чатах.
 
-Проверка и запуск:
+Дальше:
 
 ```bash
 make shared
@@ -139,175 +236,125 @@ make status
 make smoke
 ```
 
-Логи:
+`make smoke` проверяет:
 
-```bash
-make logs
-make manager-logs
+1. inference-only Model Gateway и отказ неправильному client key;
+2. реальные model routes через Model Router;
+3. OpenCode Web;
+4. control-plane;
+5. PostgreSQL.
+
+## Переход на прямые API
+
+Заполните в `.env.providers`:
+
+```dotenv
+OPENAI_API_KEY=...
+ANTHROPIC_API_KEY=...
+GOOGLE_GENERATIVE_AI_API_KEY=...
 ```
 
-Для браузерного доступа настройте два домена по примеру `deploy/nginx-ai-department.conf.example`. Если домены отличаются от примера, также задайте корректный `OPENCODE_PUBLIC_URL` в `.env`.
+Затем:
 
-## Работа через кабинет руководителя
+```bash
+make separate
+make smoke
+```
+
+`make separate` выполняет реальный запрос минимум к одному route каждого прямого провайдера. При неуспехе прежний режим восстанавливается.
+
+Возврат:
+
+```bash
+make shared
+```
+
+## Интерфейсы
+
+| Сервис | Host bind |
+| --- | --- |
+| OpenCode | `127.0.0.1:4096` |
+| Manager | `127.0.0.1:8088` |
+| Model Gateway diagnostics | `127.0.0.1:18089` |
+| Model Router | не публикуется |
+| Control PostgreSQL | не публикуется |
+
+Для внешнего браузерного доступа используйте Nginx HTTPS/VPN. PostgreSQL, Router и Gateway наружу публиковать не нужно.
+
+## Кабинет руководителя
 
 Кабинет показывает:
 
-- количество задач в работе и завершенных;
-- запросы на согласование;
-- расходы моделей за текущий месяц;
-- лимиты `department` и `trading-research`;
-- журнал изменения задач, решений и бюджетов;
-- состояние торгового предохранителя.
+- задачи и статусы;
+- approvals;
+- budget records;
+- usage records;
+- audit trail;
+- fail-closed Capability Guard.
 
-Пока интеграция usage с провайдерами не подключена, расходы передаются в кабинет через API, а лимиты являются контрольной политикой. Фактический hard stop обязательно настройте также в AITunnel или кабинете прямого провайдера.
-
-Поддерживаемые статусы задачи:
+Capability Guard относится только к полномочиям AI-отдела:
 
 ```text
-backlog → planned → in_progress → waiting_approval → qa → done
-                              ↘ failed ↗
+production deploy       DENY
+external write          DENY
+financial execution     DENY
+secret access           DENY
 ```
 
-Переходы проверяются на сервере. Завершенную задачу нельзя случайно вернуть в работу через UI.
+Approval — запись решения владельца. Он **не изменяет Capability Guard автоматически** и не является командой выполнения.
 
-Типы согласований:
+## Workflow задачи
 
-- изменение кода;
-- `git push`;
-- развертывание;
-- изменение режима торговли;
-- реальный ордер.
-
-Важно: согласование — запись управленческого решения, а не исполнительная команда. Даже статус `approved` для `live_order` не меняет торговый предохранитель и никуда не отправляет заявку.
-
-Кабинет использует JSON API под тем же Basic Auth. Изменяющие запросы дополнительно требуют заголовок:
-
-```http
-X-Control-Request: ai-orchestra
+```text
+backlog
+   ↓
+planned
+   ↓
+in_progress
+   ├──→ waiting_approval
+   ↓
+qa
+   ├──→ in_progress
+   ├──→ failed
+   ↓
+done
 ```
 
-Это защищает пилотный интерфейс от простых cross-site запросов. Для production-уровня следующим этапом нужны SSO/OIDC, роли пользователей и миграции Alembic.
+Для нетривиальной задачи стандартная цепочка:
 
-## Добавление рабочего проекта
+```text
+Owner
+ → department-lead
+ → business-analyst + architect
+ → developer/devops
+ → qa-engineer
+ → code-reviewer
+ → result
+```
 
-Проекты находятся в `repos/`, внутри OpenCode — `/workspace/repos/projects`.
+## Рабочие репозитории
+
+Проекты клонируются на host в `/opt/ai_orchestra/repos/`. Не передавайте GitHub write token OpenCode-контейнеру.
 
 ```bash
 cd /opt/ai_orchestra/repos
 git clone https://github.com/m9117882424/arvento-kpp-report.git
 ```
 
-Для приватного репозитория используйте deploy key или fine-grained GitHub token только с необходимыми правами. Не вставляйте токен в URL, попадающий в историю shell.
-
-### Изолированный worktree задачи
+Worktree задачи:
 
 ```bash
+cd /opt/ai_orchestra
 ./scripts/worktree-create.sh arvento-kpp-report fix-mileage origin/main
 ```
 
-Будут созданы:
-
-- ветка `agent/fix-mileage`;
-- каталог `worktrees/arvento-kpp-report/fix-mileage`;
-- путь внутри OpenCode `/workspace/worktrees/arvento-kpp-report/fix-mileage`.
-
-Один worktree назначается только одному агенту-редактору. Аналитики и reviewer могут читать тот же diff, но не изменять его.
-
-После коммита и проверки чистоты:
+Удаление после проверки:
 
 ```bash
 ./scripts/worktree-remove.sh arvento-kpp-report fix-mileage --yes
 ```
 
-Скрипт откажется удалять worktree с незакоммиченными файлами и сохранит ветку.
-
-## Рекомендуемый рабочий цикл
-
-1. Создать задачу в кабинете.
-2. Создать для нее worktree.
-3. В OpenCode выбрать `department-lead` и передать задачу с путем проекта.
-4. Руководитель привлекает аналитика/архитектора, затем одного агента-редактора.
-5. QA и reviewer независимо проверяют фактический diff.
-6. При необходимости создать запрос согласования в кабинете.
-7. Владелец вручную решает, публиковать ли ветку, выполнять ли merge или deploy.
-
-Пример запроса:
-
-> В worktree `/workspace/worktrees/arvento-kpp-report/fix-mileage` нужно устранить дребезг координат при расчете пробега. Сначала зафиксируй критерии приемки, затем реализуй, запусти тесты и проведи независимое ревью. Не выполняй deploy и git push.
-
-## Безопасный торговый контур
-
-AI Orchestra сейчас готовит исследования и код, но не является торговым терминалом.
-
-| Этап | Что разрешено | Статус пилота |
-| --- | --- | --- |
-| `OFF` | документация и проектирование | по умолчанию |
-| `SIGNALS_ONLY` | расчет и журнал сигналов | можно тестировать без счетов |
-| `PAPER_TRADING` | виртуальные заявки и сверка | следующий безопасный этап |
-| `SEMI_AUTO` | сформировать намерение, человек подтверждает вне LLM | только после стабильного paper режима |
-| `AUTO_SAFE` | ограниченная автоматика | заблокировано |
-| `AUTO_FULL` | полная автоматика | заблокировано |
-
-Базовые правила:
-
-- реальные продажи — вручную;
-- потенциальная автопокупка рассматривается только при отклонении от целевой доли более 5%;
-- резерв денежных средств — 3–5%;
-- дневной лимит покупки обязателен;
-- stale data, ошибка сверки или отказ risk service всегда закрывают систему в безопасное состояние;
-- emergency stop не зависит от LLM;
-- критический путь отправки заявки не использует генеративную модель.
-
-Планируемые источники и адаптеры:
-
-- Bybit — крипта, сначала demo/sandbox;
-- T-Invest API — российские стандартные активы;
-- MOEX ISS — справочная и рыночная сверка;
-- IBKR — международные активы через отдельный execution-контур с учетом особенностей TWS/IB Gateway.
-
-Ключи брокеров и бирж нельзя добавлять в `.env` этого проекта. Для реального исполнения нужен отдельный узел с собственными секретами, IP allowlist, лимитами и аварийным стопом.
-
-## Резервное копирование
-
-При запущенном PostgreSQL:
-
-```bash
-make backup
-```
-
-Архив `backups/ai-orchestra-<UTC>.tar.gz` содержит:
-
-- PostgreSQL dump кабинета;
-- исходники контура, конфигурацию, prompts и policy;
-- историю и state OpenCode;
-- Git bundles всех репозиториев из `repos/`;
-- `SHA256SUMS` для проверки целостности.
-
-`.env` намеренно исключен. Храните его отдельно в менеджере секретов. Локальный срок хранения задается `BACKUP_RETENTION_DAYS`; архивы нужно дополнительно копировать в шифрованное внешнее хранилище. Восстановление сначала проверяйте в отдельном тестовом окружении — автоматического destructive restore в проекте нет.
-
-## Переход на раздельные ключи
-
-1. Заполните в `.env` прямые ключи.
-2. Проверьте доступные ID моделей:
-
-```bash
-docker compose exec opencode opencode models --refresh
-```
-
-3. При необходимости обновите `config/opencode.separate.json`.
-4. Переключите маршрут:
-
-```bash
-make separate
-make preflight
-make status
-```
-
-Возврат к общему AITunnel:
-
-```bash
-make shared
-```
+Скрипт не удалит worktree с незакоммиченными файлами.
 
 ## Проверки разработки
 
@@ -317,56 +364,50 @@ make test
 make validate
 ```
 
-CI проверяет оба OpenCode JSON, Docker Compose, shell-синтаксис и API кабинета.
+CI выполняет:
 
-## Безопасная эксплуатация
+- JSON/YAML/Python/JavaScript syntax;
+- shell syntax + ShellCheck;
+- Docker Compose validation;
+- static security boundary checks;
+- control-plane tests;
+- сборку всех контейнеров.
 
-- В репозитории нет и не должно быть реальных ключей, `.env`, токенов и дампов персональных данных.
-- Для AITunnel используйте отдельный ключ с бюджетом, сроком действия, allowlist моделей и IP.
-- Не публикуйте `4096`, `8088` и PostgreSQL напрямую в интернет.
-- Не монтируйте `/var/run/docker.sock` в агентские контейнеры.
-- Перед подключением проекта прочитайте его `AGENTS.md` и проверьте разрешенные команды.
-- Production deploy, миграции, merge, push и торговые действия требуют отдельного ручного процесса.
-- Не используйте глобальные `docker system prune`, удаление volumes или очистку чужих контейнеров.
-- AI Orchestra и существующий Auto-trader — разные контуры; этот compose не должен управлять Auto-trader.
-
-## Диагностика
+## Резервное копирование
 
 ```bash
-docker compose ps
-docker compose logs --tail=200 control-plane postgres
-docker compose logs --tail=200 opencode
+make backup
+```
 
+Backup включает:
+
+- dump control-plane PostgreSQL;
+- код и несекретную конфигурацию, включая Model Router и Model Gateway;
+- OpenCode state;
+- Git bundles проектов;
+- `SHA256SUMS`.
+
+Не включаются `.env`, `.env.providers` и `data/opencode/auth.json`. Provider secrets храните отдельно в password/secret manager; backup рекомендуется копировать в шифрованное внешнее хранилище.
+
+## Логи и диагностика
+
+```bash
+make status
+make logs
+make manager-logs
+make router-logs
+```
+
+Проверки вручную:
+
+```bash
 curl http://127.0.0.1:8088/health
+curl http://127.0.0.1:18089/health
 curl -u "manager:ПАРОЛЬ" http://127.0.0.1:8088/api/summary
 curl -u "opencode:ПАРОЛЬ" http://127.0.0.1:4096/global/health
 ```
 
-Проверка AITunnel без запуска отдела:
-
-```bash
-set -a
-source .env
-set +a
-python3 scripts/aitunnel_smoke_test.py --dry-run
-python3 scripts/aitunnel_smoke_test.py --model gpt-4o-mini
-```
-
-Расширенный тест structured output, tool calling, streaming и Responses API выполняет платные запросы:
-
-```bash
-python3 scripts/aitunnel_smoke_test.py --full --model gpt-4o-mini
-```
-
-## Остановка и обновление
-
-Остановка без удаления данных:
-
-```bash
-make down
-```
-
-Обновление после backup:
+## Обновление
 
 ```bash
 make backup
@@ -378,14 +419,13 @@ make up
 make smoke
 ```
 
-`docker compose down -v` удалит БД кабинета и потому не используется в штатном runbook.
+## Безопасная эксплуатация
 
-## Следующие этапы
-
-1. Развернуть пилот на арендованном сервере и закрыть интерфейсы VPN/HTTPS.
-2. Добавить OIDC/SSO, роли и Alembic-миграции кабинета.
-3. Подключить фактический сбор usage из AITunnel и прямых провайдеров.
-4. Добавить очередь заданий и recovery после перезапуска.
-5. Провести эталонные задачи и настроить лимиты по ролям/моделям.
-6. Построить отдельный market-data слой и paper-trading контур.
-7. Только после стабильного paper режима проектировать отдельный execution node.
+- не публиковать `4096`, `8088`, `18089` или PostgreSQL напрямую в интернет;
+- не монтировать Docker socket хоста;
+- не хранить product secrets в Orchestra;
+- не давать OpenCode GitHub write token;
+- не выполнять production deploy из agent runtime;
+- не считать prompt permission полноценной security boundary — критичные ограничения обеспечиваются Docker/network/secret separation;
+- изменения `main` проходят через ветку/PR и CI;
+- AI Orchestra и Trading Platform всегда остаются отдельными проектами.

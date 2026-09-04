@@ -1,22 +1,18 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
-
-# The schema manager is the only application path allowed to perform DDL.
-# Set this before importing app.db so production runtime guards stay enabled elsewhere.
-os.environ["CONTROL_PLANE_SCHEMA_MODE"] = "migrate"
 
 from alembic import command
 from alembic.migration import MigrationContext
 from sqlalchemy import text
 
-from .db import engine
+from .database_engine import create_configured_engine
 from .schema import alembic_config, head_revision, legacy_schema_diff
 
 
 LOCK_KEY = "ai_orchestra_schema_migration_v1"
+engine = create_configured_engine()
 
 
 def _current_revision(connection) -> str | None:
@@ -45,7 +41,11 @@ def check_schema() -> None:
         raise RuntimeError(
             f"schema mismatch: current={current or 'unversioned'}, expected={expected}"
         )
-    print(f"[OK] Control Plane schema revision: {current}")
+    differences = legacy_schema_diff(engine)
+    if differences:
+        joined = "\n - ".join(differences)
+        raise RuntimeError("schema shape mismatch despite valid revision:\n - " + joined)
+    print(f"[OK] Control Plane schema revision and shape: {current}")
 
 
 def migrate_schema() -> None:
@@ -54,6 +54,10 @@ def migrate_schema() -> None:
     def migrate(connection, cfg) -> None:
         current = _current_revision(connection)
         if current == expected:
+            differences = legacy_schema_diff(engine)
+            if differences:
+                joined = "\n - ".join(differences)
+                raise RuntimeError("schema drift at current head:\n - " + joined)
             print(f"[OK] Schema already at head: {current}")
             return
 
@@ -74,6 +78,10 @@ def migrate_schema() -> None:
         final = _current_revision(connection)
         if final != expected:
             raise RuntimeError(f"migration finished at {final}, expected {expected}")
+        differences = legacy_schema_diff(engine)
+        if differences:
+            joined = "\n - ".join(differences)
+            raise RuntimeError("migration reached head but schema shape differs:\n - " + joined)
         print(f"[OK] Schema migrated to {expected}")
 
     _run_under_lock(migrate)

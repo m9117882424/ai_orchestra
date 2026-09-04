@@ -49,10 +49,13 @@ def main() -> int:
     assert "MODEL_ROUTER_CLIENT_KEY" in opencode_env
 
     assert network_set(services["postgres"]) == {"control-db"}
-    assert network_set(services["control-plane"]) == {"control-db", "control-access"}
+    assert network_set(services["control-plane"]) == {"control-db", "control-access", "model-net"}
     assert network_set(services["model-router"]) == {"router-backend", "provider-egress"}
     assert network_set(services["model-gateway"]) == {"model-net", "router-backend"}
     assert network_set(services["opencode"]) == {"model-net"}
+    control_env = set((services["control-plane"].get("environment") or {}).keys())
+    assert "MODEL_ROUTER_CLIENT_KEY" not in control_env
+    assert "MODEL_ROUTER_MASTER_KEY" not in control_env
 
     # OpenCode talks only to the inference gateway with a non-admin client credential.
     gateway = json.loads((ROOT / "config/opencode.gateway.json").read_text(encoding="utf-8"))

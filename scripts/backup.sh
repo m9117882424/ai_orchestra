@@ -32,7 +32,7 @@ cleanup() {
 trap cleanup EXIT
 
 if ! docker compose ps --status running --services | grep -qx postgres; then
-  echo "[FAIL] PostgreSQL кабинета не запущен; резервная копия не будет неполной" >&2
+  echo "[FAIL] PostgreSQL кабинета не запущен; резервная копия не будет создана" >&2
   exit 1
 fi
 
@@ -47,10 +47,12 @@ cp -R \
   config \
   control_plane \
   deploy \
+  model_router \
   prompts \
   policy \
   scripts \
   .env.example \
+  .env.providers.example \
   Dockerfile \
   docker-compose.yml \
   Makefile \
@@ -59,6 +61,8 @@ cp -R \
 
 if [[ -d data/opencode || -d data/state ]]; then
   tar -czf "$staging_dir/opencode-state.tar.gz" \
+    --exclude='data/opencode/auth.json' \
+    --exclude='data/opencode/**/auth.json' \
     -C "$project_root" \
     data/opencode data/state
 fi
@@ -91,5 +95,5 @@ while IFS= read -r -d '' expired; do
 done < <(find "$backup_root" -maxdepth 1 -type f -name 'ai-orchestra-*.tar.gz' -mtime "+$retention_days" -print0)
 
 echo "[OK] Резервная копия: $archive"
-echo "[OK] .env намеренно не включен; храните его отдельно в secret store"
+echo "[OK] .env, .env.providers и OpenCode auth.json намеренно не включены; храните секреты отдельно"
 echo "[OK] Удалено устаревших архивов: $deleted_count"

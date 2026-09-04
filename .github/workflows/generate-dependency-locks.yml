@@ -10,10 +10,8 @@ on:
       - control_plane/requirements-dev.in
       - .github/workflows/generate-dependency-locks.yml
 
-# Temporary bootstrap permission: this workflow commits only generated lock outputs
-# to its own feature branch. It is removed immediately after the lock commit lands.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   generate:
@@ -51,27 +49,19 @@ jobs:
           python -m pip install --dry-run --require-hashes -r requirements-dev.lock
           sha256sum requirements.in requirements-dev.in requirements.lock requirements-dev.lock > dependency-locks.sha256
 
-      - name: Upload lock candidate
+      - name: Verify committed locks match generator output
+        working-directory: control_plane
+        run: |
+          set -Eeuo pipefail
+          git diff --exit-code -- requirements.lock requirements-dev.lock dependency-locks.sha256
+
+      - name: Upload verified lock set
         uses: actions/upload-artifact@v4
         with:
-          name: control-plane-lock-candidate-${{ github.sha }}
+          name: control-plane-lock-verified-${{ github.sha }}
           path: |
             control_plane/requirements.lock
             control_plane/requirements-dev.lock
             control_plane/dependency-locks.sha256
           if-no-files-found: error
           retention-days: 7
-
-      - name: Bootstrap commit lock outputs to this feature branch
-        if: github.ref == 'refs/heads/feature/g1-reproducible-dependencies'
-        run: |
-          set -Eeuo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add control_plane/requirements.lock control_plane/requirements-dev.lock control_plane/dependency-locks.sha256
-          if git diff --cached --quiet; then
-            echo '[OK] Lock outputs already match repository state'
-            exit 0
-          fi
-          git commit -m 'Lock Control Plane Python dependency closure'
-          git push origin "HEAD:${GITHUB_REF_NAME}"

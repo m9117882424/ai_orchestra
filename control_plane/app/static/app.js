@@ -23,7 +23,8 @@ const approvalLabels = {
   financial_execution: "Финансовое исполнение",
 };
 
-const executionLabels = { running: "Выполняется", completed: "Готов к приемке", failed: "Ошибка", cancelled: "Остановлен" };\nlet progressExecutionId = null;
+const executionLabels = { running: "Выполняется", completed: "Готов к приемке", failed: "Ошибка", cancelled: "Остановлен" };
+let progressExecutionId = null;
 let executionsByTask = new Map();
 
 const transitions = {
@@ -210,11 +211,13 @@ async function loadTasks() {
       executionCell.append(node("span", `pill ${run.status}`, executionLabels[run.status] || run.status));
       if (run.status === "running") {
         const actions = node("div", "stack-actions");
-        const progress = node("button", "text-button", "Ход работы");\n        const refresh = node("button", "text-button", "Обновить");
+        const progress = node("button", "text-button", "Ход работы");
+        const refresh = node("button", "text-button", "Обновить");
         const stop = node("button", "text-button", "Остановить");
         refresh.addEventListener("click", () => refreshExecution(run.id));
         stop.addEventListener("click", () => abortExecution(run.id));
-        progress.addEventListener("click", () => showExecutionProgress(run.id));\n        actions.append(progress, refresh, stop);
+        progress.addEventListener("click", () => showExecutionProgress(run.id));
+        actions.append(progress, refresh, stop);
         executionCell.append(actions);
       }
       if (run.result) {
@@ -333,7 +336,8 @@ async function refreshAll() {
   } catch (error) { toast(error.message, true); }
 }
 
-document.getElementById("close-result").addEventListener("click", () => document.getElementById("result-modal").classList.add("hidden"));\ndocument.getElementById("close-progress").addEventListener("click", () => { progressExecutionId = null; document.getElementById("progress-modal").classList.add("hidden"); });
+document.getElementById("close-result").addEventListener("click", () => document.getElementById("result-modal").classList.add("hidden"));
+document.getElementById("close-progress").addEventListener("click", () => { progressExecutionId = null; document.getElementById("progress-modal").classList.add("hidden"); });
 
 document.getElementById("show-task-form").addEventListener("click", () => document.getElementById("task-form-panel").classList.remove("hidden"));
 document.getElementById("hide-task-form").addEventListener("click", () => document.getElementById("task-form-panel").classList.add("hidden"));
@@ -356,7 +360,6 @@ document.getElementById("task-form").addEventListener("submit", async (event) =>
 
 refreshAll();
 
-
 setInterval(async () => {
   const running = [...executionsByTask.values()].filter((run) => run.status === "running");
   if (!running.length) return;
@@ -365,7 +368,6 @@ setInterval(async () => {
   }
   await refreshAll();
 }, 10000);
-
 
 setInterval(async () => {
   if (progressExecutionId) {

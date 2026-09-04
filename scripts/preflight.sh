@@ -173,7 +173,7 @@ def nets(name):
     return set(n.keys() if isinstance(n, dict) else n)
 
 assert nets("postgres")=={"control-db"}, nets("postgres")
-assert nets("control-plane")=={"control-db"}, nets("control-plane")
+assert nets("control-plane")=={"control-db","control-access"}, nets("control-plane")
 assert nets("opencode")=={"model-net"}, nets("opencode")
 assert nets("model-gateway")=={"model-net","router-backend"}, nets("model-gateway")
 assert nets("model-router")=={"router-backend","provider-egress"}, nets("model-router")

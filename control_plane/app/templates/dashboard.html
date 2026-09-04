@@ -11,10 +11,7 @@
     <header class="topbar">
       <div class="brand">
         <span class="brand-mark">AO</span>
-        <div>
-          <strong>AI Orchestra</strong>
-          <span>операционный контур</span>
-        </div>
+        <div><strong>AI Orchestra</strong><span>операционный контур</span></div>
       </div>
       <div class="topbar-actions">
         <span class="live"><i></i>система на связи</span>
@@ -27,23 +24,20 @@
         <div>
           <p class="eyebrow">Кабинет руководителя</p>
           <h1>От задач до решений — в одном окне</h1>
-          <p>Контроль загрузки отдела, согласований, расходов и торговых ограничений.</p>
+          <p>Контроль загрузки отдела, согласований, расходов и системных ограничений.</p>
         </div>
         <button class="button button-primary" id="show-task-form">+ Новая задача</button>
       </section>
 
       <section class="task-form panel hidden" id="task-form-panel">
         <div class="panel-heading">
-          <div>
-            <p class="eyebrow">Постановка</p>
-            <h2>Новая задача</h2>
-          </div>
+          <div><p class="eyebrow">Постановка</p><h2>Новая задача</h2></div>
           <button class="icon-button" id="hide-task-form" aria-label="Закрыть">×</button>
         </div>
         <form id="task-form">
           <label class="wide">Название<input name="title" minlength="3" maxlength="200" required placeholder="Что должен сделать отдел"></label>
           <label>Проект<input name="project" value="general" maxlength="120" required></label>
-          <label>Направление<select name="domain"><option value="development">Разработка</option><option value="analytics">Аналитика</option><option value="trading">Торговля</option></select></label>
+          <label>Направление<select name="domain"><option value="development">Разработка</option><option value="analytics">Аналитика</option><option value="trading">Торговые исследования</option></select></label>
           <label>Приоритет<select name="priority"><option value="normal">Обычный</option><option value="high">Высокий</option><option value="critical">Критический</option><option value="low">Низкий</option></select></label>
           <label>Риск<select name="risk_level"><option value="low">Низкий</option><option value="medium">Средний</option><option value="high">Высокий</option><option value="critical">Критический</option></select></label>
           <label class="wide">Описание<textarea name="description" maxlength="10000" rows="4" placeholder="Результат, ограничения и критерии приемки"></textarea></label>
@@ -60,30 +54,19 @@
 
       <div class="layout">
         <section class="panel span-two">
-          <div class="panel-heading">
-            <div><p class="eyebrow">Портфель</p><h2>Задачи отдела</h2></div>
-            <button class="text-button" data-refresh>Обновить</button>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr><th>Задача</th><th>Направление</th><th>Риск</th><th>Статус</th></tr></thead>
-              <tbody id="tasks-body"><tr><td colspan="4" class="empty">Загрузка…</td></tr></tbody>
-            </table>
-          </div>
+          <div class="panel-heading"><div><p class="eyebrow">Портфель</p><h2>Задачи отдела</h2></div><button class="text-button" data-refresh>Обновить</button></div>
+          <div class="table-wrap"><table><thead><tr><th>Задача</th><th>Направление</th><th>Риск</th><th>Статус</th></tr></thead><tbody id="tasks-body"><tr><td colspan="4" class="empty">Загрузка…</td></tr></tbody></table></div>
         </section>
 
         <aside class="panel guard-panel">
-          <div class="panel-heading"><div><p class="eyebrow">Risk control</p><h2>Торговый контур</h2></div><span class="lock">LOCKED</span></div>
-          <div class="guard-status"><span id="guard-mode">—</span><small>текущий режим</small></div>
+          <div class="panel-heading"><div><p class="eyebrow">Capability guard</p><h2>Границы отдела</h2></div><span class="lock">FAIL-CLOSED</span></div>
           <dl class="guard-grid">
-            <div><dt>Аварийный стоп</dt><dd id="guard-stop">—</dd></div>
-            <div><dt>Реальные ордера</dt><dd id="guard-live">—</dd></div>
-            <div><dt>Автопродажа</dt><dd id="guard-sell">—</dd></div>
-            <div><dt>Мин. отклонение</dt><dd id="guard-deviation">—</dd></div>
-            <div><dt>Резерв денег</dt><dd id="guard-reserve">—</dd></div>
-            <div><dt>Дневной лимит</dt><dd id="guard-limit">—</dd></div>
+            <div><dt>Production deploy</dt><dd id="guard-deploy">—</dd></div>
+            <div><dt>Запись наружу</dt><dd id="guard-write">—</dd></div>
+            <div><dt>Финансовое исполнение</dt><dd id="guard-finance">—</dd></div>
+            <div><dt>Доступ к секретам</dt><dd id="guard-secrets">—</dd></div>
           </dl>
-          <p class="guard-note">Из кабинета нельзя включить live-торговлю. Для перехода между этапами требуется отдельное изменение конфигурации, проверка и явное решение владельца.</p>
+          <p class="guard-note">Это ограничения самого AI-отдела. Риск-параметры конкретных продуктов, включая Trading Platform, хранятся только в их собственных репозиториях и сервисах.</p>
         </aside>
 
         <section class="panel">
@@ -94,7 +77,7 @@
         <section class="panel">
           <div class="panel-heading"><div><p class="eyebrow">FinOps</p><h2>Контрольные бюджеты</h2></div></div>
           <div class="stack" id="budgets-list"><p class="empty">Загрузка…</p></div>
-          <p class="panel-note">Фактический hard stop задавайте также у AITunnel или провайдера: кабинет пока ведет учет и политику лимитов.</p>
+          <p class="panel-note">Фактический hard stop должен обеспечиваться Model Router и/или кабинетом провайдера; этот экран хранит управленческую политику и историю.</p>
         </section>
 
         <section class="panel span-two">

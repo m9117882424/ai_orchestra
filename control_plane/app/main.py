@@ -11,7 +11,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from .auth import require_control_request, require_manager
-from .db import Base, engine, get_db
+from .db import get_db
 from .models import Approval, AuditEvent, Budget, CapabilityGuard, ExecutionRun, Task, UsageEvent
 from .schemas import (
     ApprovalCreate,
@@ -47,7 +47,6 @@ TASK_TRANSITIONS = {
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    Base.metadata.create_all(bind=engine)
     from .db import SessionLocal
 
     with SessionLocal() as db:

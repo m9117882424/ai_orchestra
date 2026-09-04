@@ -125,6 +125,10 @@ def main() -> int:
     assert "Docker buildability with current upstream bases" in validate_workflow
     assert_actions_pinned(validate_workflow_path, validate_workflow)
 
+    main_text = (ROOT / "control_plane/app/main.py").read_text(encoding="utf-8")
+    assert "Base.metadata.create_all" not in main_text
+    assert ".metadata.create_all(" not in main_text
+
     db_text = (ROOT / "control_plane/app/db.py").read_text(encoding="utf-8")
     schema_cli_text = (ROOT / "control_plane/app/schema_cli.py").read_text(encoding="utf-8")
     migrate_script = (ROOT / "scripts/migrate-control-plane.sh").read_text(encoding="utf-8")

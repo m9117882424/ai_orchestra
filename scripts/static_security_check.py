@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -21,6 +22,8 @@ PRODUCT_POLICY_MARKERS = {
     "cash_reserve_max_pct",
     "daily_purchase_limit",
 }
+ACTION_USE_RE = re.compile(r"uses:\s+[^@\s]+@([^\s#]+)")
+FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 
 def resolved_compose() -> dict:
@@ -37,6 +40,12 @@ def resolved_compose() -> dict:
 def network_set(service: dict) -> set[str]:
     value = service.get("networks") or {}
     return set(value.keys() if isinstance(value, dict) else value)
+
+
+def assert_actions_pinned(path: Path, text: str) -> None:
+    refs = ACTION_USE_RE.findall(text)
+    for ref in refs:
+        assert FULL_SHA_RE.fullmatch(ref), f"Mutable GitHub Action ref in {path}: @{ref}"
 
 
 def main() -> int:
@@ -96,18 +105,25 @@ def main() -> int:
     assert "--require-hashes" in runtime_wrapper and "-r requirements.lock" in runtime_wrapper
     assert "--require-hashes" in dev_wrapper and "-r requirements-dev.lock" in dev_wrapper
 
-    lock_workflow = (ROOT / ".github/workflows/generate-dependency-locks.yml").read_text(encoding="utf-8")
+    lock_workflow_path = ROOT / ".github/workflows/generate-dependency-locks.yml"
+    lock_workflow = lock_workflow_path.read_text(encoding="utf-8")
     assert "contents: read" in lock_workflow
     assert "contents: write" not in lock_workflow
     assert "git push" not in lock_workflow
     assert "pip-tools==7.6.1" in lock_workflow
     assert "--generate-hashes" in lock_workflow
     assert "git diff --exit-code -- requirements.lock requirements-dev.lock dependency-locks.sha256" in lock_workflow
+    assert "pull_request:" in lock_workflow
+    assert "feature/g1-reproducible-dependencies" not in lock_workflow
+    assert_actions_pinned(lock_workflow_path, lock_workflow)
 
-    validate_workflow = (ROOT / ".github/workflows/validate.yml").read_text(encoding="utf-8")
+    validate_workflow_path = ROOT / ".github/workflows/validate.yml"
+    validate_workflow = validate_workflow_path.read_text(encoding="utf-8")
     assert "runs-on: ubuntu-24.04" in validate_workflow
     assert "scripts/verify_dependency_locks.py" in validate_workflow
     assert "--require-hashes --requirement control_plane/requirements-dev.lock" in validate_workflow
+    assert "Docker buildability with current upstream bases" in validate_workflow
+    assert_actions_pinned(validate_workflow_path, validate_workflow)
 
     db_text = (ROOT / "control_plane/app/db.py").read_text(encoding="utf-8")
     schema_cli_text = (ROOT / "control_plane/app/schema_cli.py").read_text(encoding="utf-8")

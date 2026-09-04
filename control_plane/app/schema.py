@@ -137,3 +137,10 @@ def legacy_schema_diff(bind: Engine | Connection) -> list[str]:
             )
 
     return differences
+
+
+def assert_database_shape(bind: Engine | Connection) -> None:
+    differences = legacy_schema_diff(bind)
+    if differences:
+        joined = "\n - ".join(differences)
+        raise RuntimeError("Control Plane schema drift detected:\n - " + joined)

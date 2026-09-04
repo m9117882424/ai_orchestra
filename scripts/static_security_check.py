@@ -89,12 +89,15 @@ def main() -> int:
 
     db_text = (ROOT / "control_plane/app/db.py").read_text(encoding="utf-8")
     schema_cli_text = (ROOT / "control_plane/app/schema_cli.py").read_text(encoding="utf-8")
+    migrate_script = (ROOT / "scripts/migrate-control-plane.sh").read_text(encoding="utf-8")
     assert "CONTROL_PLANE_SCHEMA_MODE" not in db_text
     assert "CONTROL_PLANE_SCHEMA_MODE" not in schema_cli_text
     assert "pg_advisory_xact_lock" in schema_cli_text
     assert "pg_advisory_lock(" not in schema_cli_text
     assert "pg_advisory_unlock" not in schema_cli_text
     assert "from .db import engine" not in schema_cli_text
+    assert "SKIP_PRE_MIGRATION_BACKUP" not in migrate_script
+    assert "bash ./scripts/backup.sh" in migrate_script
 
     models_text = (ROOT / "control_plane/app/models.py").read_text(encoding="utf-8")
     for marker in PRODUCT_POLICY_MARKERS:

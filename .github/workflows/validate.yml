@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Получить код
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Подготовить инструменты проверки
         run: |
@@ -73,7 +73,7 @@ jobs:
       - name: Проверить API и migration safety
         run: python3 -m pytest control_plane/tests
 
-      - name: Проверить Docker build
+      - name: Проверить Docker buildability with current upstream bases
         run: docker compose build --pull
 
       - name: Проверить PostgreSQL migration semantics

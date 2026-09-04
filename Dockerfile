@@ -14,6 +14,7 @@ RUN apt-get update \
         python3 \
         python3-pip \
         python3-venv \
+        ripgrep \
     && rm -rf /var/lib/apt/lists/* \
     && npm install --global "opencode-ai@${OPENCODE_VERSION}" \
     && corepack enable

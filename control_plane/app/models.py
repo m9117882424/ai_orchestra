@@ -5,7 +5,7 @@ from uuid import uuid4
 from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from .db import Base
+from .database_base import Base
 
 
 def utc_now() -> datetime:

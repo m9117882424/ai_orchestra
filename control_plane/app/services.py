@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .models import AuditEvent, Budget, CapabilityGuard, UsageEvent
+from .settings import get_settings
 
 
 def write_audit(
@@ -27,7 +28,19 @@ def write_audit(
     )
 
 
+def _assert_runtime_schema_shape(db: Session) -> None:
+    if get_settings().environment.lower() == "test":
+        return
+    from .schema import assert_database_shape
+
+    assert_database_shape(db.get_bind())
+
+
 def seed_defaults(db: Session, default_monthly_budget: float) -> None:
+    # Startup seed is also the point where all ORM models are already registered.
+    # Verify physical schema shape before the application performs normal writes.
+    _assert_runtime_schema_shape(db)
+
     if db.get(CapabilityGuard, 1) is None:
         db.add(CapabilityGuard(id=1))
 

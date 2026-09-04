@@ -56,6 +56,7 @@ def main() -> int:
     control_env = set((services["control-plane"].get("environment") or {}).keys())
     assert "MODEL_ROUTER_CLIENT_KEY" not in control_env
     assert "MODEL_ROUTER_MASTER_KEY" not in control_env
+    assert "CONTROL_PLANE_SCHEMA_MODE" not in control_env
 
     # OpenCode talks only to the inference gateway with a non-admin client credential.
     gateway = json.loads((ROOT / "config/opencode.gateway.json").read_text(encoding="utf-8"))
@@ -71,6 +72,7 @@ def main() -> int:
     assert "MODEL_ROUTER_CLIENT_KEY=" in env_text
     assert "OPENCODE_VERSION=1.18.27" in env_text
     assert "LITELLM_VERSION=1.98.0" in env_text
+    assert "CONTROL_PLANE_SCHEMA_MODE=" not in env_text
 
     provider_example = (ROOT / ".env.providers.example").read_text(encoding="utf-8")
     for key in ("AITUNNEL_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"):
@@ -83,6 +85,19 @@ def main() -> int:
     assert "ARG OPENCODE_VERSION=1.18.27" in dockerfile
     assert "ARG LITELLM_VERSION=1.98.0" in router_dockerfile
     assert "=latest" not in dockerfile
+    assert "ripgrep" in dockerfile
+
+    db_text = (ROOT / "control_plane/app/db.py").read_text(encoding="utf-8")
+    schema_cli_text = (ROOT / "control_plane/app/schema_cli.py").read_text(encoding="utf-8")
+    migrate_script = (ROOT / "scripts/migrate-control-plane.sh").read_text(encoding="utf-8")
+    assert "CONTROL_PLANE_SCHEMA_MODE" not in db_text
+    assert "CONTROL_PLANE_SCHEMA_MODE" not in schema_cli_text
+    assert "pg_advisory_xact_lock" in schema_cli_text
+    assert "pg_advisory_lock(" not in schema_cli_text
+    assert "pg_advisory_unlock" not in schema_cli_text
+    assert "from .db import engine" not in schema_cli_text
+    assert "SKIP_PRE_MIGRATION_BACKUP" not in migrate_script
+    assert "bash ./scripts/backup.sh" in migrate_script
 
     models_text = (ROOT / "control_plane/app/models.py").read_text(encoding="utf-8")
     for marker in PRODUCT_POLICY_MARKERS:

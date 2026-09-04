@@ -65,6 +65,7 @@ set_mode "$mode"
 echo "Маршрутизация подготовлена: $mode"
 
 if [[ "$restart" == "--no-restart" ]]; then
+  echo "[INFO] Режим сохранен без сетевого smoke test; он будет проверен после запуска."
   exit 0
 fi
 
@@ -73,31 +74,48 @@ if ! command -v docker >/dev/null 2>&1 || ! docker compose ps -q model-router 2>
   exit 0
 fi
 
+wait_healthy_pair() {
+  local router_id gateway_id router_state gateway_state
+  router_id="$(docker compose ps -q model-router)"
+  gateway_id="$(docker compose ps -q model-gateway)"
+  [[ -n "$router_id" && -n "$gateway_id" ]] || return 1
+
+  for _ in $(seq 1 50); do
+    router_state="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$router_id" 2>/dev/null || true)"
+    gateway_state="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$gateway_id" 2>/dev/null || true)"
+    if [[ "$router_state" == "healthy" && "$gateway_state" == "healthy" ]]; then
+      return 0
+    fi
+    [[ "$router_state" == "unhealthy" || "$router_state" == "exited" || "$gateway_state" == "unhealthy" || "$gateway_state" == "exited" ]] && return 1
+    sleep 2
+  done
+  return 1
+}
+
 rollback() {
   echo "[ROLLBACK] Возвращаю предыдущую маршрутизацию: $previous_mode" >&2
   [[ -f "$backup_dir/model-router.yaml" ]] && cp "$backup_dir/model-router.yaml" runtime/model-router.yaml
   [[ -f "$backup_dir/opencode.json" ]] && cp "$backup_dir/opencode.json" runtime/opencode.json
   set_mode "$previous_mode"
-  docker compose up -d --force-recreate model-router model-gateway >/dev/null 2>&1 || true
+  if docker compose up -d --force-recreate model-router model-gateway >/dev/null 2>&1; then
+    if wait_healthy_pair; then
+      docker compose up -d --force-recreate opencode >/dev/null 2>&1 || true
+      echo "[ROLLBACK] Предыдущий Model Router/Gateway восстановлены." >&2
+    else
+      echo "[ROLLBACK][WARN] Предыдущая пара Router/Gateway не стала healthy; проверьте make router-logs." >&2
+    fi
+  else
+    echo "[ROLLBACK][WARN] Не удалось пересоздать предыдущую пару Router/Gateway." >&2
+  fi
 }
 
-docker compose up -d --force-recreate model-router model-gateway
+if ! docker compose up -d --force-recreate model-router model-gateway; then
+  echo "[FAIL] Не удалось пересоздать Model Router/Gateway" >&2
+  rollback
+  exit 1
+fi
 
-router_id="$(docker compose ps -q model-router)"
-gateway_id="$(docker compose ps -q model-gateway)"
-healthy=0
-for _ in $(seq 1 50); do
-  router_state="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$router_id" 2>/dev/null || true)"
-  gateway_state="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$gateway_id" 2>/dev/null || true)"
-  if [[ "$router_state" == "healthy" && "$gateway_state" == "healthy" ]]; then
-    healthy=1
-    break
-  fi
-  [[ "$router_state" == "unhealthy" || "$router_state" == "exited" || "$gateway_state" == "unhealthy" || "$gateway_state" == "exited" ]] && break
-  sleep 2
-done
-
-if (( healthy == 0 )); then
+if ! wait_healthy_pair; then
   echo "[FAIL] Model Router/Gateway не стали healthy" >&2
   rollback
   exit 1
@@ -110,5 +128,10 @@ if ! python3 scripts/model_router_smoke.py --mode "$mode"; then
   exit 1
 fi
 
-docker compose up -d --force-recreate opencode
+if ! docker compose up -d --force-recreate opencode; then
+  echo "[FAIL] OpenCode не удалось переключить на проверенный маршрут" >&2
+  rollback
+  exit 1
+fi
+
 echo "[OK] Режим $mode активирован; provider smoke test пройден."

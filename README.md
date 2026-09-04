@@ -127,9 +127,9 @@ Baseline direct profile v1:
 
 - Claude Sonnet 5;
 - GPT-5.6 Sol;
-- Gemini 3.7 Flash / Gemini 3.5 Flash-Lite.
+- Gemini 3.5 Flash / Gemini 3.5 Flash-Lite.
 
-Gemini 3.8 Flash уже доступен у Google, но в baseline v1 намеренно не включен: сначала нужен совместимый stable LiteLLM и отдельный provider smoke. Новая модель не попадает в рабочий отдел только потому, что она новее.
+Gemini 3.7 Flash и Gemini 3.8 Flash рассматриваются как следующие upgrade-кандидаты, но не включаются в baseline v1 до отдельной проверки полного agent workflow со stable LiteLLM. Новая модель не попадает в рабочий отдел только потому, что она новее.
 
 ### Добавление нового AI-провайдера
 

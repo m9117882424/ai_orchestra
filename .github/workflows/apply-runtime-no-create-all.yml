@@ -1,0 +1,67 @@
+name: Apply runtime schema ownership cleanup
+
+on:
+  push:
+    branches:
+      - feature/g1-runtime-no-create-all
+    paths:
+      - .github/workflows/apply-runtime-no-create-all.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: feature/g1-runtime-no-create-all
+          fetch-depth: 2
+
+      - name: Verify ancestry and apply cleanup
+        run: |
+          set -Eeuo pipefail
+          expected_parent='8b4f2388dc443a1ebd8701a4064dfabe860054d8'
+          test "$(git rev-parse HEAD^)" = "$expected_parent"
+          test "$(git diff --name-only "$expected_parent"..HEAD)" = '.github/workflows/apply-runtime-no-create-all.yml'
+
+          python - <<'PY'
+          from pathlib import Path
+
+          main = Path('control_plane/app/main.py')
+          text = main.read_text(encoding='utf-8')
+          old_import = 'from .db import Base, engine, get_db\n'
+          old_ddl = '    Base.metadata.create_all(bind=engine)\n'
+          if text.count(old_import) != 1 or text.count(old_ddl) != 1:
+              raise SystemExit('ERROR: expected historical runtime create_all shape not found exactly once')
+          text = text.replace(old_import, 'from .db import get_db\n', 1)
+          text = text.replace(old_ddl, '', 1)
+          main.write_text(text, encoding='utf-8')
+
+          check = Path('scripts/static_security_check.py')
+          text = check.read_text(encoding='utf-8')
+          anchor = '    db_text = (ROOT / "control_plane/app/db.py").read_text(encoding="utf-8")\n'
+          insert = (
+              '    main_text = (ROOT / "control_plane/app/main.py").read_text(encoding="utf-8")\n'
+              '    assert "Base.metadata.create_all" not in main_text\n'
+              '    assert ".metadata.create_all(" not in main_text\n\n'
+          )
+          if text.count(anchor) != 1:
+              raise SystemExit('ERROR: static security anchor not found exactly once')
+          text = text.replace(anchor, insert + anchor, 1)
+          check.write_text(text, encoding='utf-8')
+          PY
+
+          grep -RFn 'Base.metadata.create_all' control_plane/app && exit 1 || true
+          python -m py_compile control_plane/app/main.py scripts/static_security_check.py
+
+          git rm .github/workflows/apply-runtime-no-create-all.yml
+          git add control_plane/app/main.py scripts/static_security_check.py
+          test -z "$(git diff --cached --name-only | grep -Ev '^(control_plane/app/main\.py|scripts/static_security_check\.py|\.github/workflows/apply-runtime-no-create-all\.yml)$' || true)"
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'refactor: remove runtime schema creation path'
+          git push origin HEAD:feature/g1-runtime-no-create-all

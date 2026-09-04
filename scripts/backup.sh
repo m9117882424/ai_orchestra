@@ -47,6 +47,7 @@ cp -R \
   config \
   control_plane \
   deploy \
+  model_gateway \
   model_router \
   prompts \
   policy \

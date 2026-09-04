@@ -1,31 +1,19 @@
 from collections.abc import Generator
-import os
 from pathlib import Path
 
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import create_engine, event
-from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
-from sqlalchemy.pool import StaticPool
+from sqlalchemy import event
+from sqlalchemy.orm import Session, sessionmaker
 
+from .database_base import Base
+from .database_engine import create_configured_engine
 from .settings import get_settings
 
 
-class Base(DeclarativeBase):
-    pass
-
-
 settings = get_settings()
-database_url = settings.sqlalchemy_url()
-engine_kwargs: dict = {"pool_pre_ping": True}
-
-if str(database_url).startswith("sqlite"):
-    engine_kwargs["connect_args"] = {"check_same_thread": False}
-    if str(database_url).endswith(":memory:"):
-        engine_kwargs["poolclass"] = StaticPool
-
-engine = create_engine(database_url, **engine_kwargs)
+engine = create_configured_engine()
 
 
 def _expected_schema_revision() -> str:
@@ -40,8 +28,6 @@ def _expected_schema_revision() -> str:
 
 def _guard_production_schema() -> None:
     if settings.environment.lower() == "test":
-        return
-    if os.environ.get("CONTROL_PLANE_SCHEMA_MODE", "runtime").lower() == "migrate":
         return
 
     expected = _expected_schema_revision()

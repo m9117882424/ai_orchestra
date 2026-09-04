@@ -187,7 +187,8 @@ def test_production_application_never_repairs_schema_drift(tmp_path):
 
     started = _run_production_startup(database_url)
     assert started.returncode != 0
-    assert "Runtime DDL" in started.stderr
+    assert "schema drift detected" in started.stderr
+    assert "missing table: audit_events" in started.stderr
 
 
 def test_production_application_detects_index_drift_with_valid_revision(tmp_path):

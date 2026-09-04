@@ -5,7 +5,8 @@ from pathlib import Path
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import Engine, inspect
+from sqlalchemy import inspect
+from sqlalchemy.engine import Connection, Engine
 
 from .database_base import Base
 from . import models as _models  # noqa: F401
@@ -47,15 +48,18 @@ def _compiled_type(column_type, dialect) -> str:
     return " ".join(column_type.compile(dialect=dialect).lower().split())
 
 
-def legacy_schema_diff(engine: Engine) -> list[str]:
+def legacy_schema_diff(bind: Engine | Connection) -> list[str]:
     """Compare a database with the declared ORM baseline before trusting it.
+
+    A caller performing a migration should pass its transaction connection so the
+    verification sees the exact uncommitted DDL it is about to commit.
 
     The comparison intentionally ignores SQL defaults because current model defaults
     are application-side. It compares table/column shape, nullability, primary keys,
     foreign keys and explicit indexes. Any ambiguity fails closed.
     """
     differences: list[str] = []
-    inspector = inspect(engine)
+    inspector = inspect(bind)
     actual_tables = set(inspector.get_table_names()) - {"alembic_version"}
     expected_tables = set(Base.metadata.tables)
 
@@ -66,7 +70,7 @@ def legacy_schema_diff(engine: Engine) -> list[str]:
     if differences:
         return differences
 
-    dialect = engine.dialect
+    dialect = bind.dialect
     for table_name in sorted(expected_tables):
         table = Base.metadata.tables[table_name]
         expected_columns = {column.name: column for column in table.columns}

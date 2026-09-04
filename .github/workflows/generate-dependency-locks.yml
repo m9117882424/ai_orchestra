@@ -9,6 +9,7 @@ on:
       - control_plane/requirements.lock
       - control_plane/requirements-dev.lock
       - control_plane/dependency-locks.sha256
+      - scripts/verify_dependency_locks.py
       - .github/workflows/generate-dependency-locks.yml
   pull_request:
     paths:
@@ -17,6 +18,7 @@ on:
       - control_plane/requirements.lock
       - control_plane/requirements-dev.lock
       - control_plane/dependency-locks.sha256
+      - scripts/verify_dependency_locks.py
       - .github/workflows/generate-dependency-locks.yml
 
 permissions:

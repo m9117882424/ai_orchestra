@@ -43,6 +43,7 @@ if [[ -f .env && -f .env.providers ]]; then
   CONTROL_PLANE_SERVER_PASSWORD="${CONTROL_PLANE_SERVER_PASSWORD:-}"
   CONTROL_PLANE_DB_PASSWORD="${CONTROL_PLANE_DB_PASSWORD:-}"
   MODEL_ROUTER_MASTER_KEY="${MODEL_ROUTER_MASTER_KEY:-}"
+  MODEL_ROUTER_CLIENT_KEY="${MODEL_ROUTER_CLIENT_KEY:-}"
 
   case "${KEY_MODE:-}" in
     shared)
@@ -67,8 +68,14 @@ if [[ -f .env && -f .env.providers ]]; then
   [[ "${#CONTROL_PLANE_DB_PASSWORD}" -ge 20 && "$CONTROL_PLANE_DB_PASSWORD" != "CHANGE_ME_DATABASE_PASSWORD" ]] \
     && pass "Пароль PostgreSQL кабинета задан" || fail "CONTROL_PLANE_DB_PASSWORD должен содержать не менее 20 символов"
 
-  [[ "${#MODEL_ROUTER_MASTER_KEY}" -ge 32 && "$MODEL_ROUTER_MASTER_KEY" == sk-* && "$MODEL_ROUTER_MASTER_KEY" != "CHANGE_ME_MODEL_ROUTER_KEY" ]] \
-    && pass "Внутренний ключ Model Router задан" || fail "MODEL_ROUTER_MASTER_KEY должен начинаться с sk- и быть не короче 32 символов"
+  [[ "${#MODEL_ROUTER_MASTER_KEY}" -ge 32 && "$MODEL_ROUTER_MASTER_KEY" == sk-admin-* && "$MODEL_ROUTER_MASTER_KEY" != "CHANGE_ME_MODEL_ROUTER_MASTER_KEY" ]] \
+    && pass "Admin key Model Router задан" || fail "MODEL_ROUTER_MASTER_KEY должен начинаться с sk-admin- и быть не короче 32 символов"
+
+  [[ "${#MODEL_ROUTER_CLIENT_KEY}" -ge 32 && "$MODEL_ROUTER_CLIENT_KEY" == sk-client-* && "$MODEL_ROUTER_CLIENT_KEY" != "CHANGE_ME_MODEL_ROUTER_CLIENT_KEY" ]] \
+    && pass "Inference client key задан" || fail "MODEL_ROUTER_CLIENT_KEY должен начинаться с sk-client- и быть не короче 32 символов"
+
+  [[ "$MODEL_ROUTER_MASTER_KEY" != "$MODEL_ROUTER_CLIENT_KEY" ]] \
+    && pass "Router admin/client credentials разделены" || fail "Router admin/client credentials не должны совпадать"
 fi
 
 if docker compose config --quiet >/dev/null 2>&1; then
@@ -83,22 +90,27 @@ import json, sys
 cfg=json.load(sys.stdin)
 services=cfg["services"]
 op=services["opencode"]
-forbidden={"AITUNNEL_API_KEY","OPENAI_API_KEY","ANTHROPIC_API_KEY","GOOGLE_GENERATIVE_AI_API_KEY","CONTROL_PLANE_DB_PASSWORD","CONTROL_PLANE_SERVER_PASSWORD"}
+forbidden={"AITUNNEL_API_KEY","OPENAI_API_KEY","ANTHROPIC_API_KEY","GOOGLE_GENERATIVE_AI_API_KEY","CONTROL_PLANE_DB_PASSWORD","CONTROL_PLANE_SERVER_PASSWORD","MODEL_ROUTER_MASTER_KEY"}
 env=set((op.get("environment") or {}).keys())
 bad=sorted(env & forbidden)
 if bad:
     raise SystemExit("OpenCode receives forbidden secrets: " + ", ".join(bad))
+assert "MODEL_ROUTER_CLIENT_KEY" in env
+
 def nets(name):
     n=services[name].get("networks") or {}
     return set(n.keys() if isinstance(n, dict) else n)
+
 assert nets("postgres")=={"control-db"}, nets("postgres")
 assert nets("control-plane")=={"control-db"}, nets("control-plane")
-assert nets("model-router")=={"model-net"}, nets("model-router")
 assert nets("opencode")=={"model-net"}, nets("opencode")
+assert nets("model-gateway")=={"model-net","router-backend"}, nets("model-gateway")
+assert nets("model-router")=={"router-backend","provider-egress"}, nets("model-router")
+assert not (nets("opencode") & nets("model-router")), "OpenCode must not share a network with router admin service"
 ' >/dev/null; then
-  pass "Секреты и Docker-сети изолированы: OpenCode не видит provider/control-plane credentials"
+  pass "Секреты, admin router и Docker-сети изолированы от OpenCode"
 else
-  fail "Нарушена изоляция OpenCode / Model Router / control-plane"
+  fail "Нарушена изоляция OpenCode / Model Gateway / Model Router / control-plane"
 fi
 
 if (( failures > 0 )); then

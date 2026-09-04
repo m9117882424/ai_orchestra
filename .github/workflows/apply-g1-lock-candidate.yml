@@ -2,6 +2,11 @@ name: Apply verified G1 lock candidate
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - feature/g1-reproducible-dependencies
+    paths:
+      - .github/workflows/apply-g1-lock-candidate.yml
 
 permissions:
   contents: write
@@ -14,15 +19,14 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: feature/g1-reproducible-dependencies
-          fetch-depth: 2
+          fetch-depth: 8
 
-      - name: Verify applicator ancestry
+      - name: Verify applicator ancestry and scope
         run: |
           set -Eeuo pipefail
-          expected_parent='ddbaa92e585d9ced18acdfed08ee586638442627'
-          actual_parent="$(git rev-parse HEAD^)"
-          test "$actual_parent" = "$expected_parent"
-          changed="$(git diff --name-only "$expected_parent"..HEAD)"
+          expected_source='ddbaa92e585d9ced18acdfed08ee586638442627'
+          git merge-base --is-ancestor "$expected_source" HEAD
+          changed="$(git diff --name-only "$expected_source"..HEAD)"
           test "$changed" = '.github/workflows/apply-g1-lock-candidate.yml'
 
       - name: Download exact lock candidate

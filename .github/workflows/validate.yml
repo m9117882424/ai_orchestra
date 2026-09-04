@@ -28,6 +28,15 @@ jobs:
           cp config/opencode.gateway.json runtime/opencode.json
           cp config/model-router.shared.yaml runtime/model-router.yaml
 
+      - name: Проверить shell-совместимость env-файлов
+        run: |
+          set -a
+          source .env
+          source .env.providers
+          set +a
+          test "$GIT_AUTHOR_NAME" = "AI Development Department"
+          test "$GIT_COMMITTER_NAME" = "AI Development Department"
+
       - name: Проверить JSON, YAML, Python и JavaScript
         run: |
           python3 -m json.tool config/opencode.gateway.json >/dev/null

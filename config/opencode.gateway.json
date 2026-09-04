@@ -7,8 +7,8 @@
       "npm": "@ai-sdk/openai-compatible",
       "name": "AI Orchestra Model Router",
       "options": {
-        "baseURL": "http://model-router:4000/v1",
-        "apiKey": "{env:MODEL_ROUTER_MASTER_KEY}"
+        "baseURL": "http://model-gateway:8080/v1",
+        "apiKey": "{env:MODEL_ROUTER_CLIENT_KEY}"
       },
       "models": {
         "orchestra-lead": {"name": "Lead"},

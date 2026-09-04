@@ -53,6 +53,7 @@ jobs:
           bash -n scripts/worktree-create.sh
           bash -n scripts/worktree-remove.sh
           bash -n scripts/migrate-control-plane.sh
+          bash -n scripts/postgres-schema-smoke.sh
           shellcheck scripts/*.sh
 
       - name: Проверить Docker Compose и границы безопасности
@@ -68,6 +69,9 @@ jobs:
 
       - name: Проверить Docker build
         run: docker compose build --pull
+
+      - name: Проверить PostgreSQL migration semantics
+        run: ./scripts/postgres-schema-smoke.sh
 
       - name: Проверить базовый OpenCode toolchain
         run: |

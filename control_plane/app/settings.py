@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     server_username: str = "manager"
     server_password: str = "CHANGE_ME_MANAGER_PASSWORD"
     opencode_url: str = "http://127.0.0.1:4096"
+    opencode_internal_url: str = "http://opencode:4096"
+    opencode_username: str = "opencode"
+    opencode_password: str = ""
     default_monthly_budget: float = 25000.0
 
     model_config = SettingsConfigDict(
@@ -35,6 +38,8 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "CONTROL_PLANE_SERVER_PASSWORD должен быть заменен и содержать не менее 20 символов"
                 )
+            if len(self.opencode_password) < 20:
+                raise ValueError("CONTROL_PLANE_OPENCODE_PASSWORD должен содержать не менее 20 символов")
             if not self.database_url and len(self.db_password) < 20:
                 raise ValueError(
                     "CONTROL_PLANE_DB_PASSWORD должен содержать не менее 20 символов"

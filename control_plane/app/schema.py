@@ -7,7 +7,7 @@ from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy import Engine, inspect
 
-from .db import Base
+from .database_base import Base
 from . import models as _models  # noqa: F401
 
 
@@ -48,7 +48,7 @@ def _compiled_type(column_type, dialect) -> str:
 
 
 def legacy_schema_diff(engine: Engine) -> list[str]:
-    """Compare an unversioned database with the ORM baseline before stamping it.
+    """Compare a database with the declared ORM baseline before trusting it.
 
     The comparison intentionally ignores SQL defaults because current model defaults
     are application-side. It compares table/column shape, nullability, primary keys,

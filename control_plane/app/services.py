@@ -31,14 +31,9 @@ def write_audit(
 def _assert_runtime_schema_shape(db: Session) -> None:
     if get_settings().environment.lower() == "test":
         return
-    from .schema import legacy_schema_diff
+    from .schema import assert_database_shape
 
-    differences = legacy_schema_diff(db.get_bind())
-    if differences:
-        joined = "\n - ".join(differences)
-        raise RuntimeError(
-            "Control Plane schema drift detected despite valid revision:\n - " + joined
-        )
+    assert_database_shape(db.get_bind())
 
 
 def seed_defaults(db: Session, default_monthly_budget: float) -> None:

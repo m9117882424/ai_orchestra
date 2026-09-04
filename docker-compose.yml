@@ -115,8 +115,9 @@ services:
     init: true
     read_only: true
     tmpfs:
-      - /var/cache/nginx:size=16m
-      - /var/run:size=4m
+      - /etc/nginx/conf.d:size=1m,mode=1777
+      - /var/cache/nginx:size=16m,mode=1777
+      - /var/run:size=4m,mode=1777
     environment:
       MODEL_ROUTER_MASTER_KEY: ${MODEL_ROUTER_MASTER_KEY}
       MODEL_ROUTER_CLIENT_KEY: ${MODEL_ROUTER_CLIENT_KEY}
@@ -131,7 +132,7 @@ services:
     security_opt:
       - no-new-privileges:true
     cap_drop:
-      - ALL
+      - NET_RAW
     mem_limit: 64m
     cpus: 0.25
     healthcheck:

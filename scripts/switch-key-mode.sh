@@ -78,25 +78,27 @@ rollback() {
   [[ -f "$backup_dir/model-router.yaml" ]] && cp "$backup_dir/model-router.yaml" runtime/model-router.yaml
   [[ -f "$backup_dir/opencode.json" ]] && cp "$backup_dir/opencode.json" runtime/opencode.json
   set_mode "$previous_mode"
-  docker compose up -d --force-recreate model-router >/dev/null 2>&1 || true
+  docker compose up -d --force-recreate model-router model-gateway >/dev/null 2>&1 || true
 }
 
-docker compose up -d --force-recreate model-router
+docker compose up -d --force-recreate model-router model-gateway
 
 router_id="$(docker compose ps -q model-router)"
+gateway_id="$(docker compose ps -q model-gateway)"
 healthy=0
-for _ in $(seq 1 40); do
-  state="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$router_id" 2>/dev/null || true)"
-  if [[ "$state" == "healthy" ]]; then
+for _ in $(seq 1 50); do
+  router_state="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$router_id" 2>/dev/null || true)"
+  gateway_state="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$gateway_id" 2>/dev/null || true)"
+  if [[ "$router_state" == "healthy" && "$gateway_state" == "healthy" ]]; then
     healthy=1
     break
   fi
-  [[ "$state" == "unhealthy" || "$state" == "exited" ]] && break
+  [[ "$router_state" == "unhealthy" || "$router_state" == "exited" || "$gateway_state" == "unhealthy" || "$gateway_state" == "exited" ]] && break
   sleep 2
 done
 
 if (( healthy == 0 )); then
-  echo "[FAIL] Model Router не стал healthy" >&2
+  echo "[FAIL] Model Router/Gateway не стали healthy" >&2
   rollback
   exit 1
 fi

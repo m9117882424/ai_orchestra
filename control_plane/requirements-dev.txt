@@ -1,3 +1,4 @@
--r requirements.txt
-httpx2>=2.10,<3
-pytest>=8.4,<9
+# Compatibility entry point. Development intent lives in requirements-dev.in.
+# Test/development resolution is committed in requirements-dev.lock.
+--require-hashes
+-r requirements-dev.lock

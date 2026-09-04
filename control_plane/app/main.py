@@ -22,6 +22,7 @@ from .schemas import (
     BudgetUpdate,
     CapabilityGuardRead,
     ExecutionRead,
+    ExecutionProgressRead,
     TaskCreate,
     TaskRead,
     TaskStatusUpdate,
@@ -56,7 +57,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="AI Orchestra Control Plane",
-    version="0.4.0",
+    version="0.4.1",
     docs_url=None,
     redoc_url=None,
     lifespan=lifespan,
@@ -495,3 +496,69 @@ def abort_execution(
     db.commit()
     db.refresh(run)
     return run
+
+
+def _message_time(info: dict):
+    raw = info.get("created_at") or info.get("createdAt") or info.get("time")
+    if isinstance(raw, str):
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
+
+
+def _progress_items(messages: list[dict]) -> list[dict]:
+    items = []
+    for item in messages[-30:]:
+        info = item.get("info") or {}
+        role = str(info.get("agent") or info.get("role") or "assistant")
+        model = info.get("model") or info.get("modelID")
+        chunks = [
+            str(part["text"]).strip()
+            for part in (item.get("parts") or [])
+            if part.get("type") == "text" and part.get("text")
+        ]
+        text_value = "\n".join(chunk for chunk in chunks if chunk).strip()
+        if not text_value:
+            continue
+        items.append({
+            "role": role,
+            "model": str(model) if model else None,
+            "text": text_value[:4000],
+            "created_at": _message_time(info),
+        })
+    return items[-12:]
+
+
+@app.get("/api/executions/{execution_id}/progress", response_model=ExecutionProgressRead)
+def execution_progress(
+    execution_id: str,
+    db: DbSession,
+    _: Manager,
+    opencode: OpenCode,
+) -> dict:
+    run = db.get(ExecutionRun, execution_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Запуск не найден")
+    try:
+        statuses = opencode.session_statuses()
+        messages = opencode.messages(run.opencode_session_id)
+    except OpenCodeError as exc:
+        raise HTTPException(status_code=502, detail=f"Не удалось получить прогресс OpenCode: {exc}") from exc
+    state = statuses.get(run.opencode_session_id) or {}
+    state_type = state.get("type") if isinstance(state, dict) else str(state)
+    now = run.finished_at or datetime.now(timezone.utc)
+    created = run.created_at
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return {
+        "execution_id": run.id,
+        "status": run.status,
+        "stage": run.stage,
+        "session_state": state_type or "unknown",
+        "elapsed_seconds": max(0, int((now - created).total_seconds())),
+        "items": _progress_items(messages),
+    }

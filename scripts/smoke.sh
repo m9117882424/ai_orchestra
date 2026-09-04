@@ -9,12 +9,12 @@ set -a
 source .env
 set +a
 
-router_health="http://127.0.0.1:${MODEL_ROUTER_PORT:-18089}/health/liveliness"
-curl -fsS "$router_health" >/dev/null
-echo "[OK] Model Router отвечает"
+gateway_health="http://127.0.0.1:${MODEL_GATEWAY_PORT:-18089}/health"
+curl -fsS "$gateway_health" >/dev/null
+echo "[OK] Inference Model Gateway отвечает"
 
 python3 scripts/model_router_smoke.py \
-  --base-url "http://127.0.0.1:${MODEL_ROUTER_PORT:-18089}/v1" \
+  --base-url "http://127.0.0.1:${MODEL_GATEWAY_PORT:-18089}/v1" \
   --mode "${KEY_MODE:-shared}"
 
 health_url="http://127.0.0.1:${OPENCODE_PORT:-4096}/global/health"

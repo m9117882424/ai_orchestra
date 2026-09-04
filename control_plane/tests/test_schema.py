@@ -52,6 +52,25 @@ def _run_schema_cli(database_url: str, command: str) -> subprocess.CompletedProc
     )
 
 
+def _run_production_startup(database_url: str) -> subprocess.CompletedProcess[str]:
+    code = """
+from fastapi.testclient import TestClient
+from app.main import app
+with TestClient(app) as client:
+    response = client.get('/health')
+    assert response.status_code == 200
+print('STARTED')
+"""
+    return subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=CONTROL_PLANE_ROOT,
+        env=_production_env(database_url),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
 def test_declared_schema_head_is_stable():
     assert head_revision() == "20260904_0001"
 
@@ -143,3 +162,29 @@ with engine.begin() as connection:
     )
     assert result.returncode != 0
     assert "Runtime DDL" in result.stderr
+
+
+def test_production_application_starts_on_migrated_schema(tmp_path):
+    database_path = tmp_path / "application.db"
+    database_url = f"sqlite+pysqlite:///{database_path}"
+    migrated = _run_schema_cli(database_url, "migrate")
+    assert migrated.returncode == 0, migrated.stderr
+
+    started = _run_production_startup(database_url)
+    assert started.returncode == 0, started.stderr
+    assert "STARTED" in started.stdout
+
+
+def test_production_application_never_repairs_schema_drift(tmp_path):
+    database_path = tmp_path / "drift-after-version.db"
+    database_url = f"sqlite+pysqlite:///{database_path}"
+    migrated = _run_schema_cli(database_url, "migrate")
+    assert migrated.returncode == 0, migrated.stderr
+
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DROP TABLE audit_events")
+
+    started = _run_production_startup(database_url)
+    assert started.returncode != 0
+    assert "Runtime DDL" in started.stderr

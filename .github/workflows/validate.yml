@@ -17,22 +17,16 @@ jobs:
       - name: Подготовить безопасную тестовую конфигурацию
         run: |
           cp .env.example .env
-          cp config/opencode.shared.json runtime/opencode.json
+          cp .env.providers.example .env.providers
+          chmod 600 .env .env.providers
+          cp config/opencode.gateway.json runtime/opencode.json
+          cp config/model-router.shared.yaml runtime/model-router.yaml
 
-      - name: Проверить JSON
+      - name: Проверить JSON и Python
         run: |
-          python3 -m json.tool config/opencode.shared.json >/dev/null
-          python3 -m json.tool config/opencode.separate.json >/dev/null
+          python3 -m json.tool config/opencode.gateway.json >/dev/null
           python3 -m json.tool runtime/opencode.json >/dev/null
-
-      - name: Проверить Docker Compose
-        run: docker compose config --quiet
-
-      - name: Установить зависимости кабинета
-        run: python3 -m pip install --requirement control_plane/requirements-dev.txt
-
-      - name: Проверить кабинет руководителя
-        run: python3 -m pytest control_plane/tests
+          python3 -m compileall -q control_plane/app control_plane/tests scripts/model_router_smoke.py scripts/static_security_check.py
 
       - name: Проверить shell-скрипты
         run: |
@@ -43,3 +37,17 @@ jobs:
           bash -n scripts/backup.sh
           bash -n scripts/worktree-create.sh
           bash -n scripts/worktree-remove.sh
+
+      - name: Проверить Docker Compose и границы безопасности
+        run: |
+          docker compose config --quiet
+          python3 scripts/static_security_check.py
+
+      - name: Установить зависимости кабинета
+        run: python3 -m pip install --requirement control_plane/requirements-dev.txt
+
+      - name: Проверить кабинет руководителя
+        run: python3 -m pytest control_plane/tests
+
+      - name: Проверить воспроизводимость Docker build
+        run: docker compose build --pull

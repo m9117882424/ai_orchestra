@@ -142,3 +142,65 @@ def test_budget_update_and_usage_summary(auth, mutation_headers):
     assert updated.json()["monthly_limit"] == "4500.00"
     assert usage.status_code == 201
     assert summary.json()["month_cost"] == "17.125000"
+
+
+class FakeOpenCode:
+    def __init__(self):
+        self.status = "busy"
+
+    def create_session(self, title):
+        return {"id": "session-test-1"}
+
+    def prompt_async(self, session_id, prompt):
+        assert session_id == "session-test-1"
+        assert "не выполняй production deploy" in prompt
+
+    def session_statuses(self):
+        return {"session-test-1": {"type": self.status}}
+
+    def messages(self, session_id):
+        return [{
+            "info": {"role": "assistant"},
+            "parts": [{"type": "text", "text": "QA пройден. Результат готов."}],
+        }]
+
+    def abort(self, session_id):
+        return None
+
+
+def test_development_execution_reaches_manager_review(auth, mutation_headers):
+    from control_plane.app.main import get_opencode_client
+
+    fake = FakeOpenCode()
+    app.dependency_overrides[get_opencode_client] = lambda: fake
+    try:
+        with TestClient(app) as client:
+            created = client.post(
+                "/api/tasks",
+                auth=auth,
+                headers=mutation_headers,
+                json={"title": "Сделать тестовый модуль", "domain": "development"},
+            )
+            task_id = created.json()["id"]
+            started = client.post(
+                f"/api/tasks/{task_id}/execute",
+                auth=auth,
+                headers=mutation_headers,
+            )
+            assert started.status_code == 201
+            assert started.json()["status"] == "running"
+
+            fake.status = "idle"
+            refreshed = client.post(
+                f"/api/executions/{started.json()['id']}/refresh",
+                auth=auth,
+                headers=mutation_headers,
+            )
+            tasks = client.get("/api/tasks", auth=auth).json()
+
+        assert refreshed.status_code == 200
+        assert refreshed.json()["status"] == "completed"
+        assert "QA пройден" in refreshed.json()["result"]
+        assert next(t for t in tasks if t["id"] == task_id)["status"] == "qa"
+    finally:
+        app.dependency_overrides.pop(get_opencode_client, None)

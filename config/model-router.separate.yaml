@@ -29,7 +29,7 @@ model_list:
       api_key: os.environ/OPENAI_API_KEY
   - model_name: orchestra-analyst
     litellm_params:
-      model: gemini/gemini-3.7-flash
+      model: gemini/gemini-3.5-flash
       api_key: os.environ/GOOGLE_GENERATIVE_AI_API_KEY
   - model_name: orchestra-fast
     litellm_params:

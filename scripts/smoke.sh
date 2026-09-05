@@ -26,4 +26,12 @@ curl -fsS "${control_plane_url}/health" >/dev/null
 curl -fsS -u "${CONTROL_PLANE_SERVER_USERNAME}:${CONTROL_PLANE_SERVER_PASSWORD}" "${control_plane_url}/api/summary" >/dev/null
 echo "[OK] Кабинет руководителя и PostgreSQL отвечают"
 
+worker_id="$(docker compose ps --status running -q execution-worker)"
+if [[ -z "$worker_id" ]]; then
+  echo "[FAIL] Execution Worker не запущен" >&2
+  docker compose logs --tail=100 execution-worker >&2 || true
+  exit 1
+fi
+echo "[OK] Execution Worker запущен"
+
 echo "[OK] Smoke test завершен"

@@ -30,7 +30,7 @@ services:
   control-plane:
     build:
       context: ./control_plane
-    image: ai-development-department/control-plane:0.5.1
+    image: ai-development-department/control-plane:0.6.0
     restart: unless-stopped
     init: true
     read_only: true
@@ -71,6 +71,51 @@ services:
       timeout: 10s
       retries: 5
       start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
+
+  execution-worker:
+    build:
+      context: ./control_plane
+    image: ai-development-department/control-plane:0.6.0
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    command: ["python", "-m", "app.execution_worker"]
+    environment:
+      CONTROL_PLANE_ENVIRONMENT: production
+      CONTROL_PLANE_DB_HOST: postgres
+      CONTROL_PLANE_DB_PORT: 5432
+      CONTROL_PLANE_DB_NAME: ai_orchestra
+      CONTROL_PLANE_DB_USER: ai_orchestra
+      CONTROL_PLANE_DB_PASSWORD: ${CONTROL_PLANE_DB_PASSWORD}
+      CONTROL_PLANE_SERVER_USERNAME: execution-worker
+      CONTROL_PLANE_SERVER_PASSWORD: execution-worker-does-not-use-manager-auth
+      CONTROL_PLANE_OPENCODE_INTERNAL_URL: http://opencode:4096
+      CONTROL_PLANE_OPENCODE_USERNAME: ${OPENCODE_SERVER_USERNAME}
+      CONTROL_PLANE_OPENCODE_PASSWORD: ${OPENCODE_SERVER_PASSWORD}
+      CONTROL_PLANE_EXECUTION_WORKER_LEASE_SECONDS: ${CONTROL_PLANE_EXECUTION_WORKER_LEASE_SECONDS:-120}
+      CONTROL_PLANE_EXECUTION_WORKER_MAX_ACTIVE: ${CONTROL_PLANE_EXECUTION_WORKER_MAX_ACTIVE:-4}
+      CONTROL_PLANE_EXECUTION_WORKER_POLL_SECONDS: ${CONTROL_PLANE_EXECUTION_WORKER_POLL_SECONDS:-5}
+    networks:
+      - control-db
+      - model-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      opencode:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 256m
+    cpus: 0.35
     logging:
       driver: json-file
       options:

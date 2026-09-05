@@ -13,6 +13,25 @@ from . import models as _models  # noqa: F401
 
 
 CONTROL_PLANE_ROOT = Path(__file__).resolve().parents[1]
+LEGACY_BASELINE_REVISION = "20260904_0001"
+
+_REVISION_EXCLUDED_COLUMNS = {
+    LEGACY_BASELINE_REVISION: frozenset(
+        {
+            ("execution_runs", "lease_owner"),
+            ("execution_runs", "lease_generation"),
+            ("execution_runs", "heartbeat_at"),
+            ("execution_runs", "lease_expires_at"),
+        }
+    )
+}
+_REVISION_EXCLUDED_INDEXES = {
+    LEGACY_BASELINE_REVISION: frozenset(
+        {
+            ("execution_runs", ("lease_expires_at",), False),
+        }
+    )
+}
 
 
 def alembic_config() -> Config:
@@ -48,15 +67,17 @@ def _compiled_type(column_type, dialect) -> str:
     return " ".join(column_type.compile(dialect=dialect).lower().split())
 
 
-def legacy_schema_diff(bind: Engine | Connection) -> list[str]:
-    """Compare a database with the declared ORM baseline before trusting it.
+def _schema_diff(
+    bind: Engine | Connection,
+    *,
+    excluded_columns: frozenset[tuple[str, str]] = frozenset(),
+    excluded_indexes: frozenset[tuple[str, tuple[str, ...], bool]] = frozenset(),
+) -> list[str]:
+    """Compare a database with an exact declared schema shape.
 
-    A caller performing a migration should pass its transaction connection so the
-    verification sees the exact uncommitted DDL it is about to commit.
-
-    The comparison intentionally ignores SQL defaults because current model defaults
-    are application-side. It compares table/column shape, nullability, primary keys,
-    foreign keys and explicit indexes. Any ambiguity fails closed.
+    Exclusions are used only to reconstruct a specifically known historical Alembic
+    baseline from today's ORM metadata. Any partially migrated/unknown shape still
+    fails closed because extra columns or indexes remain visible as unexpected.
     """
     differences: list[str] = []
     inspector = inspect(bind)
@@ -73,7 +94,11 @@ def legacy_schema_diff(bind: Engine | Connection) -> list[str]:
     dialect = bind.dialect
     for table_name in sorted(expected_tables):
         table = Base.metadata.tables[table_name]
-        expected_columns = {column.name: column for column in table.columns}
+        expected_columns = {
+            column.name: column
+            for column in table.columns
+            if (table_name, column.name) not in excluded_columns
+        }
         actual_columns = {column["name"]: column for column in inspector.get_columns(table_name)}
 
         for missing in sorted(set(expected_columns) - set(actual_columns)):
@@ -125,6 +150,8 @@ def legacy_schema_diff(bind: Engine | Connection) -> list[str]:
         expected_indexes = {
             (tuple(column.name for column in index.columns), bool(index.unique))
             for index in table.indexes
+            if (table_name, tuple(column.name for column in index.columns), bool(index.unique))
+            not in excluded_indexes
         }
         actual_indexes = {
             (tuple(index.get("column_names") or []), bool(index.get("unique")))
@@ -137,6 +164,22 @@ def legacy_schema_diff(bind: Engine | Connection) -> list[str]:
             )
 
     return differences
+
+
+def legacy_schema_diff(bind: Engine | Connection) -> list[str]:
+    """Compare a database with the current declared ORM head exactly."""
+    return _schema_diff(bind)
+
+
+def schema_diff_for_revision(bind: Engine | Connection, revision: str) -> list[str]:
+    """Compare an unversioned database with one explicitly supported old baseline."""
+    if revision not in _REVISION_EXCLUDED_COLUMNS:
+        raise RuntimeError(f"Unsupported historical schema revision: {revision}")
+    return _schema_diff(
+        bind,
+        excluded_columns=_REVISION_EXCLUDED_COLUMNS[revision],
+        excluded_indexes=_REVISION_EXCLUDED_INDEXES[revision],
+    )
 
 
 def assert_database_shape(bind: Engine | Connection) -> None:

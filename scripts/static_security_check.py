@@ -16,6 +16,14 @@ FORBIDDEN_OPENCODE_ENV = {
     "CONTROL_PLANE_SERVER_PASSWORD",
     "MODEL_ROUTER_MASTER_KEY",
 }
+FORBIDDEN_EXECUTION_WORKER_ENV = {
+    "AITUNNEL_API_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GOOGLE_GENERATIVE_AI_API_KEY",
+    "MODEL_ROUTER_MASTER_KEY",
+    "MODEL_ROUTER_CLIENT_KEY",
+}
 PRODUCT_POLICY_MARKERS = {
     "min_deviation_pct",
     "cash_reserve_min_pct",
@@ -59,13 +67,29 @@ def main() -> int:
 
     assert network_set(services["postgres"]) == {"control-db"}
     assert network_set(services["control-plane"]) == {"control-db", "control-access", "model-net"}
+    assert network_set(services["execution-worker"]) == {"control-db", "model-net"}
     assert network_set(services["model-router"]) == {"router-backend", "provider-egress"}
     assert network_set(services["model-gateway"]) == {"model-net", "router-backend"}
     assert network_set(services["opencode"]) == {"model-net"}
+
     control_env = set((services["control-plane"].get("environment") or {}).keys())
     assert "MODEL_ROUTER_CLIENT_KEY" not in control_env
     assert "MODEL_ROUTER_MASTER_KEY" not in control_env
     assert "CONTROL_PLANE_SCHEMA_MODE" not in control_env
+
+    worker = services["execution-worker"]
+    worker_environment = worker.get("environment") or {}
+    worker_env = set(worker_environment.keys())
+    worker_leaks = sorted(worker_env & FORBIDDEN_EXECUTION_WORKER_ENV)
+    assert not worker_leaks, f"Execution worker receives forbidden model/provider keys: {worker_leaks}"
+    assert "CONTROL_PLANE_DB_PASSWORD" in worker_env
+    assert "CONTROL_PLANE_OPENCODE_PASSWORD" in worker_env
+    assert worker_environment.get("CONTROL_PLANE_SERVER_PASSWORD") == "execution-worker-does-not-use-manager-auth"
+    assert not worker.get("ports"), "Execution worker must not expose host ports"
+    assert not worker.get("volumes"), "Execution worker must not receive repository or secret volumes"
+    assert worker.get("read_only") is True
+    assert worker.get("command") == ["python", "-m", "app.execution_worker"]
+    assert worker.get("image") == services["control-plane"].get("image")
 
     # OpenCode talks only to the inference gateway with a non-admin client credential.
     gateway = json.loads((ROOT / "config/opencode.gateway.json").read_text(encoding="utf-8"))
@@ -101,6 +125,12 @@ def main() -> int:
     assert "sha256sum --check dependency-locks.sha256" in control_dockerfile
     assert "--require-hashes --requirement requirements.lock" in control_dockerfile
     assert "runtime-lock.sha256" in control_dockerfile
+    assert "app.production:app" in control_dockerfile
+
+    production_wrapper = (ROOT / "control_plane/app/production.py").read_text(encoding="utf-8")
+    assert "_EXECUTION_REFRESH_RE" in production_wrapper
+    assert 'scope["method"] = "GET"' in production_wrapper
+    assert 'scope["path"] = "/api/executions"' in production_wrapper
 
     runtime_wrapper = (ROOT / "control_plane/requirements.txt").read_text(encoding="utf-8")
     dev_wrapper = (ROOT / "control_plane/requirements-dev.txt").read_text(encoding="utf-8")
@@ -164,6 +194,14 @@ def main() -> int:
     models_text = (ROOT / "control_plane/app/models.py").read_text(encoding="utf-8")
     for marker in PRODUCT_POLICY_MARKERS:
         assert marker not in models_text, f"Product policy leaked into Orchestra core: {marker}"
+    for marker in ("lease_owner", "lease_generation", "heartbeat_at", "lease_expires_at"):
+        assert marker in models_text, f"Execution fencing state missing: {marker}"
+
+    worker_text = (ROOT / "control_plane/app/execution_worker.py").read_text(encoding="utf-8")
+    assert "with_for_update(skip_locked=True)" in worker_text
+    assert "run.lease_generation" in worker_text
+    assert "expires_at <= now" in worker_text
+    assert "Rejected stale execution observation" in worker_text
 
     shared = (ROOT / "config/model-router.shared.yaml").read_text(encoding="utf-8")
     direct = (ROOT / "config/model-router.separate.yaml").read_text(encoding="utf-8")

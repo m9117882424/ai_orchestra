@@ -54,6 +54,10 @@ jobs:
           bash -n scripts/worktree-remove.sh
           bash -n scripts/migrate-control-plane.sh
           bash -n scripts/postgres-schema-smoke.sh
+          bash -n scripts/verify-backup.sh
+          bash -n scripts/restore-drill.sh
+          bash -n scripts/export-backup-offsite.sh
+          bash -n scripts/backup-restore-smoke.sh
           shellcheck scripts/*.sh
 
       - name: Проверить dependency locks
@@ -75,6 +79,9 @@ jobs:
 
       - name: Проверить Docker buildability with current upstream bases
         run: docker compose build --pull
+
+      - name: Проверить backup/restore disaster-recovery path
+        run: bash ./scripts/backup-restore-smoke.sh
 
       - name: Проверить PostgreSQL migration semantics
         run: bash ./scripts/postgres-schema-smoke.sh

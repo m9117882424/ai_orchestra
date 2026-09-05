@@ -91,8 +91,19 @@ if [[ "$ready" != "1" ]]; then
 fi
 
 echo "[INFO] Restoring backup into isolated PostgreSQL container"
-docker exec -i "$db_container" \
-  pg_restore -U "$db_user" -d "$db_name" --no-owner --no-privileges --exit-on-error < "$dump"
+if ! docker exec -i "$db_container" \
+  pg_restore -U "$db_user" -d "$db_name" --no-owner --no-privileges --exit-on-error < "$dump"; then
+  echo "[FAIL] pg_restore failed; disposable PostgreSQL logs follow" >&2
+  docker logs "$db_container" >&2 || true
+  docker inspect "$db_container" --format 'state={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}}' >&2 || true
+  exit 1
+fi
+if [[ "$(docker inspect "$db_container" --format '{{.State.Running}}')" != "true" ]]; then
+  echo "[FAIL] Disposable PostgreSQL stopped after pg_restore" >&2
+  docker logs "$db_container" >&2 || true
+  docker inspect "$db_container" --format 'state={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}}' >&2 || true
+  exit 1
+fi
 
 has_alembic="$(docker exec "$db_container" psql -U "$db_user" -d "$db_name" -Atc "SELECT to_regclass('public.alembic_version') IS NOT NULL")"
 if [[ "$has_alembic" == "t" ]]; then
@@ -108,7 +119,6 @@ docker run --rm --network "$network_name" \
   -e CONTROL_PLANE_ENVIRONMENT=test \
   -e "CONTROL_PLANE_DATABASE_URL=$connection_url" \
   "$control_image" python -m app.schema_cli migrate
-
 docker run --rm --network "$network_name" \
   -e CONTROL_PLANE_ENVIRONMENT=test \
   -e "CONTROL_PLANE_DATABASE_URL=$connection_url" \

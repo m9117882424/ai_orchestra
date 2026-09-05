@@ -44,6 +44,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
+fail_with_db_logs() {
+  echo "[FAIL] $1" >&2
+  docker logs "$db_container" >&2 || true
+  docker inspect "$db_container" --format 'state={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}}' >&2 || true
+  exit 1
+}
+
 mkdir -p "$staging_dir/payload"
 tar -xzf "$archive" -C "$staging_dir/payload"
 dump="$staging_dir/payload/control-plane.pgdump"
@@ -76,33 +83,49 @@ docker run -d \
   -v "$volume_name:/var/lib/postgresql/data" \
   "$postgres_image" >/dev/null
 
+# The official postgres image first starts a temporary init server. pg_isready can
+# succeed against that server before POSTGRES_DB has been created, then the entrypoint
+# shuts it down and starts the final server. Do not restore until initialization has
+# explicitly completed and the final target database accepts a real query.
+init_complete=0
+for _ in $(seq 1 90); do
+  if [[ "$(docker inspect "$db_container" --format '{{.State.Running}}' 2>/dev/null || true)" != "true" ]]; then
+    fail_with_db_logs "Restore-drill PostgreSQL stopped during initialization"
+  fi
+  if docker logs "$db_container" 2>&1 | grep -Fq 'PostgreSQL init process complete; ready for start up.'; then
+    init_complete=1
+    break
+  fi
+  sleep 1
+done
+if [[ "$init_complete" != "1" ]]; then
+  fail_with_db_logs "Restore-drill PostgreSQL initialization did not complete"
+fi
+
 ready=0
 for _ in $(seq 1 60); do
-  if docker exec "$db_container" pg_isready -U "$db_user" -d "$db_name" >/dev/null 2>&1; then
+  if [[ "$(docker inspect "$db_container" --format '{{.State.Running}}' 2>/dev/null || true)" != "true" ]]; then
+    fail_with_db_logs "Restore-drill PostgreSQL stopped before final readiness"
+  fi
+  if docker exec "$db_container" pg_isready -U "$db_user" -d "$db_name" >/dev/null 2>&1 \
+    && [[ "$(docker exec "$db_container" psql -U "$db_user" -d postgres -Atc "SELECT 1 FROM pg_database WHERE datname='$db_name'" 2>/dev/null || true)" == "1" ]] \
+    && [[ "$(docker exec "$db_container" psql -U "$db_user" -d "$db_name" -Atc 'SELECT 1' 2>/dev/null || true)" == "1" ]]; then
     ready=1
     break
   fi
   sleep 1
 done
 if [[ "$ready" != "1" ]]; then
-  echo "[FAIL] Restore-drill PostgreSQL did not become ready" >&2
-  docker logs "$db_container" >&2 || true
-  exit 1
+  fail_with_db_logs "Restore-drill PostgreSQL final target database did not become ready"
 fi
 
 echo "[INFO] Restoring backup into isolated PostgreSQL container"
 if ! docker exec -i "$db_container" \
   pg_restore -U "$db_user" -d "$db_name" --no-owner --no-privileges --exit-on-error < "$dump"; then
-  echo "[FAIL] pg_restore failed; disposable PostgreSQL logs follow" >&2
-  docker logs "$db_container" >&2 || true
-  docker inspect "$db_container" --format 'state={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}}' >&2 || true
-  exit 1
+  fail_with_db_logs "pg_restore failed"
 fi
 if [[ "$(docker inspect "$db_container" --format '{{.State.Running}}')" != "true" ]]; then
-  echo "[FAIL] Disposable PostgreSQL stopped after pg_restore" >&2
-  docker logs "$db_container" >&2 || true
-  docker inspect "$db_container" --format 'state={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}}' >&2 || true
-  exit 1
+  fail_with_db_logs "Disposable PostgreSQL stopped after pg_restore"
 fi
 
 has_alembic="$(docker exec "$db_container" psql -U "$db_user" -d "$db_name" -Atc "SELECT to_regclass('public.alembic_version') IS NOT NULL")"

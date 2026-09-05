@@ -99,6 +99,13 @@ if [[ -z "${port}" ]]; then
 fi
 address="127.0.0.1:${port}"
 
+# auto-setup can briefly expose a frontend where the default namespace is visible,
+# then recycle/settle internal services before workflow starts are consistently
+# accepted. Require namespace readiness to survive a quiet interval before the PoC
+# dispatches its first workflow; this turns that startup race into deterministic
+# readiness instead of an intermittent CI failure.
+wait_for_temporal "${address}"
+sleep 2
 wait_for_temporal "${address}"
 "${poc_python}" scripts/temporal_durable_poc.py exercise \
   --address "${address}" \

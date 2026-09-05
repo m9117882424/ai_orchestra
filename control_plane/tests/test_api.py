@@ -2,7 +2,9 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 import pytest
 
+from control_plane.app.db import SessionLocal
 from control_plane.app.main import app
+from control_plane.app.models import ExecutionRun, Task
 from control_plane.app.settings import Settings
 
 
@@ -147,52 +149,131 @@ def test_budget_update_and_usage_summary(auth, mutation_headers):
 class FakeOpenCode:
     def __init__(self):
         self.status = "busy"
-
-    def create_session(self, title):
-        return {"id": "session-test-1"}
-
-    def prompt_async(self, session_id, prompt):
-        assert session_id == "session-test-1"
-        assert "не выполняй production deploy" in prompt
+        self.status_calls = 0
+        self.message_calls = 0
 
     def session_statuses(self):
+        self.status_calls += 1
         return {"session-test-1": {"type": self.status}}
 
     def messages(self, session_id):
+        self.message_calls += 1
+        assert session_id == "session-test-1"
         return [{
             "info": {"role": "assistant"},
             "parts": [{"type": "text", "text": "QA пройден. Результат готов."}],
         }]
 
     def abort(self, session_id):
+        assert session_id == "session-test-1"
         return None
 
 
-def test_development_execution_reaches_manager_review(auth, mutation_headers):
+def _create_development_task(client, auth, mutation_headers, title="Сделать тестовый модуль"):
+    created = client.post(
+        "/api/tasks",
+        auth=auth,
+        headers=mutation_headers,
+        json={"title": title, "domain": "development"},
+    )
+    assert created.status_code == 201
+    return created.json()["id"]
+
+
+def _seed_running_execution(task_id: str, session_id: str = "session-test-1") -> str:
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert task is not None
+        task.status = "in_progress"
+        run = ExecutionRun(
+            task_id=task_id,
+            status="running",
+            stage="department_lead",
+            opencode_session_id=session_id,
+            assigned_roles=["department-lead"],
+        )
+        db.add(run)
+        db.commit()
+        return run.id
+
+
+def test_development_execution_is_durably_queued_before_opencode(auth, mutation_headers):
+    with TestClient(app) as client:
+        task_id = _create_development_task(client, auth, mutation_headers)
+        started = client.post(
+            f"/api/tasks/{task_id}/execute",
+            auth=auth,
+            headers=mutation_headers,
+        )
+        tasks = client.get("/api/tasks", auth=auth).json()
+        audit = client.get("/api/audit", auth=auth).json()
+
+    assert started.status_code == 201
+    assert started.json()["status"] == "queued"
+    assert started.json()["stage"] == "dispatch_pending"
+    assert started.json()["opencode_session_id"] is None
+    assert next(t for t in tasks if t["id"] == task_id)["status"] == "in_progress"
+    assert audit[0]["action"] == "execution.queued"
+
+
+def test_second_execute_is_rejected_while_first_is_queued(auth, mutation_headers):
+    with TestClient(app) as client:
+        task_id = _create_development_task(client, auth, mutation_headers)
+        first = client.post(
+            f"/api/tasks/{task_id}/execute",
+            auth=auth,
+            headers=mutation_headers,
+        )
+        second = client.post(
+            f"/api/tasks/{task_id}/execute",
+            auth=auth,
+            headers=mutation_headers,
+        )
+
+    assert first.status_code == 201
+    assert second.status_code == 409
+    assert "активный запуск" in second.json()["detail"]
+
+
+def test_queued_progress_does_not_call_opencode(auth, mutation_headers):
     from control_plane.app.main import get_opencode_client
 
     fake = FakeOpenCode()
     app.dependency_overrides[get_opencode_client] = lambda: fake
     try:
         with TestClient(app) as client:
-            created = client.post(
-                "/api/tasks",
-                auth=auth,
-                headers=mutation_headers,
-                json={"title": "Сделать тестовый модуль", "domain": "development"},
-            )
-            task_id = created.json()["id"]
+            task_id = _create_development_task(client, auth, mutation_headers, "Показать queued прогресс")
             started = client.post(
                 f"/api/tasks/{task_id}/execute",
                 auth=auth,
                 headers=mutation_headers,
             )
-            assert started.status_code == 201
-            assert started.json()["status"] == "running"
+            progress = client.get(
+                f"/api/executions/{started.json()['id']}/progress",
+                auth=auth,
+            )
 
-            fake.status = "idle"
+        assert progress.status_code == 200
+        assert progress.json()["session_state"] == "queued"
+        assert progress.json()["items"] == []
+        assert fake.status_calls == 0
+        assert fake.message_calls == 0
+    finally:
+        app.dependency_overrides.pop(get_opencode_client, None)
+
+
+def test_running_execution_can_reach_manager_review(auth, mutation_headers):
+    from control_plane.app.main import get_opencode_client
+
+    fake = FakeOpenCode()
+    fake.status = "idle"
+    app.dependency_overrides[get_opencode_client] = lambda: fake
+    try:
+        with TestClient(app) as client:
+            task_id = _create_development_task(client, auth, mutation_headers)
+            run_id = _seed_running_execution(task_id)
             refreshed = client.post(
-                f"/api/executions/{started.json()['id']}/refresh",
+                f"/api/executions/{run_id}/refresh",
                 auth=auth,
                 headers=mutation_headers,
             )
@@ -206,26 +287,17 @@ def test_development_execution_reaches_manager_review(auth, mutation_headers):
         app.dependency_overrides.pop(get_opencode_client, None)
 
 
-def test_execution_progress_exposes_live_messages(auth, mutation_headers):
+def test_execution_progress_exposes_live_messages_after_dispatch(auth, mutation_headers):
     from control_plane.app.main import get_opencode_client
 
     fake = FakeOpenCode()
     app.dependency_overrides[get_opencode_client] = lambda: fake
     try:
         with TestClient(app) as client:
-            created = client.post(
-                "/api/tasks",
-                auth=auth,
-                headers=mutation_headers,
-                json={"title": "Показать живой прогресс", "domain": "development"},
-            )
-            started = client.post(
-                f"/api/tasks/{created.json()['id']}/execute",
-                auth=auth,
-                headers=mutation_headers,
-            )
+            task_id = _create_development_task(client, auth, mutation_headers, "Показать живой прогресс")
+            run_id = _seed_running_execution(task_id)
             progress = client.get(
-                f"/api/executions/{started.json()['id']}/progress",
+                f"/api/executions/{run_id}/progress",
                 auth=auth,
             )
 

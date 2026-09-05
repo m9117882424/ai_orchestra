@@ -1,4 +1,4 @@
-.PHONY: init shared separate build up down restart logs manager-logs router-logs status preflight smoke validate test backup migrate schema-check dependency-check
+.PHONY: init shared separate build up down restart logs manager-logs router-logs status preflight smoke validate test backup backup-verify backup-offsite restore-drill migrate schema-check dependency-check
 
 init:
 	./scripts/bootstrap.sh
@@ -44,6 +44,15 @@ test:
 
 backup:
 	./scripts/backup.sh
+
+backup-verify:
+	bash ./scripts/verify-backup.sh
+
+backup-offsite:
+	bash ./scripts/export-backup-offsite.sh
+
+restore-drill:
+	bash ./scripts/restore-drill.sh
 
 migrate:
 	bash ./scripts/migrate-control-plane.sh

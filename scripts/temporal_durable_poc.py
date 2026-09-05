@@ -75,11 +75,11 @@ def canonical_sha256(value: Any) -> str:
 
 async def connect_with_retry(address: str, timeout_seconds: float) -> Client:
     deadline = time.monotonic() + timeout_seconds
-    last_error: BaseException | None = None
+    last_error: Exception | None = None
     while time.monotonic() < deadline:
         try:
             return await Client.connect(address)
-        except BaseException as exc:
+        except Exception as exc:
             last_error = exc
             await asyncio.sleep(0.5)
     raise RuntimeError(f"Temporal did not become ready at {address}: {last_error}")
@@ -160,7 +160,7 @@ async def start_worker_process(
     )
     try:
         await wait_for_file(ready_file, 20)
-    except BaseException:
+    except Exception:
         output = b""
         if proc.stdout is not None:
             try:
@@ -206,8 +206,15 @@ async def exercise(address: str, state_dir: Path, evidence_path: Path) -> None:
 
         worker1_pid = worker1.pid
         await terminate_process(worker1, graceful=False)
+        if worker1.returncode is None or worker1.returncode == 0:
+            raise RuntimeError(
+                f"worker #1 did not prove forced process loss: exit={worker1.returncode}"
+            )
 
         worker2 = await start_worker_process(address, task_queue, ready2)
+        if worker2.pid == worker1_pid:
+            raise RuntimeError("worker #2 unexpectedly reused worker #1 PID")
+
         result = await asyncio.wait_for(handle.result(), timeout=30)
         attempts = read_marker_attempts(marker)
         observed_attempts = [int(item["attempt"]) for item in attempts]

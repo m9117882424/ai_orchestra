@@ -1,0 +1,148 @@
+name: Generate Temporal PoC lock
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - poc/temporal/requirements.in
+      - poc/temporal/requirements.lock
+      - poc/temporal/dependency-lock.sha256
+      - .github/workflows/generate-temporal-poc-lock.yml
+  pull_request:
+    paths:
+      - poc/temporal/requirements.in
+      - poc/temporal/requirements.lock
+      - poc/temporal/dependency-lock.sha256
+      - .github/workflows/generate-temporal-poc-lock.yml
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Configure Python 3.12.14
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.14'
+
+      - name: Install pinned lock generator in sanitized environment
+        run: |
+          set -Eeuo pipefail
+          clean_env=(
+            env -i
+            "PATH=$PATH"
+            "HOME=$HOME"
+            "LANG=C.UTF-8"
+            "PIP_CONFIG_FILE=/dev/null"
+          )
+          "${clean_env[@]}" python - <<'PY'
+          import sys
+          expected = (3, 12, 14)
+          actual = sys.version_info[:3]
+          if actual != expected:
+              raise SystemExit(f"ERROR: expected Python {expected}, got {actual}")
+          print(f"lock-generator Python={'.'.join(map(str, actual))}")
+          PY
+          "${clean_env[@]}" python -m pip install \
+            --disable-pip-version-check \
+            --index-url=https://pypi.org/simple \
+            'pip-tools==7.6.1'
+
+      - name: Generate fresh hashed Temporal PoC lock
+        working-directory: poc/temporal
+        run: |
+          set -Eeuo pipefail
+          clean_env=(
+            env -i
+            "PATH=$PATH"
+            "HOME=$HOME"
+            "LANG=C.UTF-8"
+            "PIP_CONFIG_FILE=/dev/null"
+          )
+
+          "${clean_env[@]}" python - <<'PY'
+          from click.core import ParameterSource
+          from piptools.scripts.compile import cli
+          ctx = cli.make_context(
+              "pip-compile",
+              ["--no-config", "--index-url", "https://pypi.org/simple", "requirements.in"],
+              resilient_parsing=True,
+          )
+          try:
+              value = ctx.params["no_index"]
+              source = ctx.get_parameter_source("no_index")
+              if value is not False or source is not ParameterSource.DEFAULT:
+                  raise SystemExit("ERROR: pip-tools no_index must remain CLI default False")
+          finally:
+              ctx.close()
+          PY
+
+          rm -f requirements.lock dependency-lock.sha256
+          "${clean_env[@]}" pip-compile \
+            --no-config \
+            --index-url=https://pypi.org/simple \
+            --generate-hashes \
+            --resolver=backtracking \
+            --strip-extras \
+            --upgrade \
+            --rebuild \
+            --no-reuse-hashes \
+            --no-header \
+            --no-emit-index-url \
+            --no-emit-trusted-host \
+            --output-file=requirements.lock \
+            requirements.in
+
+          "${clean_env[@]}" python - <<'PY'
+          from pathlib import Path
+          path = Path("requirements.lock")
+          body = path.read_text(encoding="utf-8")
+          header = (
+              "# AI Orchestra deterministic Temporal PoC dependency lock\n"
+              "# generator: pip-tools==7.6.1; python: 3.12.14; resolver: backtracking\n"
+              "# package-source policy: https://pypi.org/simple (resolution only; not embedded)\n"
+              "# input: poc/temporal/requirements.in\n"
+              "# scope: isolated CI proof-of-concept only; not Control Plane runtime\n"
+              "# install policy: exact pins + SHA-256 hashes required\n\n"
+          )
+          path.write_text(header + body.lstrip("\n"), encoding="utf-8")
+          PY
+
+          if grep -Eq '^[[:space:]]*--(no-index|index-url|extra-index-url|trusted-host|find-links)([=[:space:]]|$)' requirements.lock; then
+            echo 'ERROR: Temporal PoC lock embeds forbidden package-source directives' >&2
+            exit 1
+          fi
+
+          "${clean_env[@]}" python -m pip install \
+            --dry-run \
+            --require-hashes \
+            --index-url=https://pypi.org/simple \
+            -r requirements.lock
+          sha256sum requirements.in requirements.lock > dependency-lock.sha256
+
+      - name: Upload generated lock candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: temporal-poc-lock-candidate-${{ github.sha }}
+          path: |
+            poc/temporal/requirements.lock
+            poc/temporal/dependency-lock.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Verify committed lock matches generator output
+        working-directory: poc/temporal
+        run: |
+          set -Eeuo pipefail
+          git diff --exit-code -- requirements.lock dependency-lock.sha256
+          status="$(git status --porcelain=v1 --untracked-files=all -- requirements.lock dependency-lock.sha256)"
+          if [[ -n "${status}" ]]; then
+            echo 'ERROR: generated Temporal PoC lock state differs from the commit' >&2
+            printf '%s\n' "${status}" >&2
+            exit 1
+          fi

@@ -14,6 +14,12 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from .db import SessionLocal
+from .execution_protocol import (
+    EXECUTION_METADATA_KEY,
+    execution_message_id,
+    execution_prompt,
+    execution_session_title,
+)
 from .models import ExecutionRun, Task
 from .opencode_client import OpenCodeClient, OpenCodeError, extract_last_assistant_text
 from .schema import assert_database_shape
@@ -22,6 +28,7 @@ from .settings import get_settings
 
 
 LOGGER = logging.getLogger("ai_orchestra.execution_worker")
+ACTIVE_EXECUTION_STATUSES = ("queued", "running")
 
 
 def utc_now() -> datetime:
@@ -62,15 +69,16 @@ def _positive_float(name: str, default: float, *, minimum: float = 0.1) -> float
 class ExecutionLease:
     execution_id: str
     generation: int
-    opencode_session_id: str
+    status: str
+    opencode_session_id: str | None
 
 
 class ExecutionLeaseManager:
-    """PostgreSQL-backed lease and fencing boundary for execution completion.
+    """PostgreSQL-backed lease and fencing boundary for dispatch and completion.
 
-    A result may change durable state only while the caller still owns an unexpired
-    lease with the exact generation it claimed. Expired/zombie workers therefore
-    cannot commit a late success after another worker recovered the execution.
+    Queued dispatch and running observation share the same lease generation. Any
+    external side effect is reconciled before retry, while durable state may change
+    only when the caller still owns the exact unexpired generation.
     """
 
     def __init__(self, worker_id: str, *, lease_seconds: int = 120):
@@ -100,7 +108,7 @@ class ExecutionLeaseManager:
             db.scalars(
                 select(ExecutionRun)
                 .where(
-                    ExecutionRun.status == "running",
+                    ExecutionRun.status.in_(ACTIVE_EXECUTION_STATUSES),
                     or_(
                         ExecutionRun.lease_expires_at.is_(None),
                         ExecutionRun.lease_expires_at <= now,
@@ -133,6 +141,7 @@ class ExecutionLeaseManager:
                 entity_id=run.id,
                 details={
                     "generation": run.lease_generation,
+                    "status": run.status,
                     "previous_owner": previous_owner,
                     "previous_lease_expires_at": (
                         previous_expiry.isoformat() if previous_expiry else None
@@ -143,6 +152,7 @@ class ExecutionLeaseManager:
                 ExecutionLease(
                     execution_id=run.id,
                     generation=run.lease_generation,
+                    status=run.status,
                     opencode_session_id=run.opencode_session_id,
                 )
             )
@@ -160,7 +170,7 @@ class ExecutionLeaseManager:
             .where(ExecutionRun.id == lease.execution_id)
             .with_for_update()
         )
-        if run is None or run.status != "running":
+        if run is None or run.status not in ACTIVE_EXECUTION_STATUSES:
             return None
         expires_at = _as_utc(run.lease_expires_at)
         if (
@@ -190,6 +200,70 @@ class ExecutionLeaseManager:
         db.commit()
         return True
 
+    def persist_dispatch_session(
+        self,
+        db: Session,
+        lease: ExecutionLease,
+        session_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        now = now or utc_now()
+        run = self._locked_owned_run(db, lease, now)
+        if run is None or run.status != "queued":
+            db.rollback()
+            return False
+        if run.opencode_session_id and run.opencode_session_id != session_id:
+            db.rollback()
+            return False
+        run.opencode_session_id = session_id
+        run.stage = "dispatch_session_ready"
+        run.heartbeat_at = now
+        run.lease_expires_at = self._deadline(now)
+        run.updated_at = now
+        db.commit()
+        return True
+
+    def mark_dispatched(
+        self,
+        db: Session,
+        lease: ExecutionLease,
+        session_id: str,
+        message_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        now = now or utc_now()
+        run = self._locked_owned_run(db, lease, now)
+        if run is None or run.status != "queued":
+            db.rollback()
+            return False
+        if run.opencode_session_id != session_id:
+            db.rollback()
+            return False
+        run.status = "running"
+        run.stage = "department_lead"
+        run.error = ""
+        run.heartbeat_at = now
+        run.lease_owner = None
+        run.lease_expires_at = None
+        run.updated_at = now
+        write_audit(
+            db,
+            actor=self.audit_actor,
+            action="execution.dispatched",
+            entity_type="execution",
+            entity_id=run.id,
+            details={
+                "task_id": run.task_id,
+                "generation": lease.generation,
+                "session_id": session_id,
+                "message_id": message_id,
+            },
+        )
+        db.commit()
+        return True
+
     def apply_observation(
         self,
         db: Session,
@@ -201,7 +275,7 @@ class ExecutionLeaseManager:
     ) -> str:
         now = now or utc_now()
         run = self._locked_owned_run(db, lease, now)
-        if run is None:
+        if run is None or run.status != "running":
             db.rollback()
             return "lost"
 
@@ -240,6 +314,70 @@ class ExecutionLeaseManager:
         return "running"
 
 
+def _queued_dispatch_context(
+    manager: ExecutionLeaseManager,
+    lease: ExecutionLease,
+) -> tuple[str | None, str, str] | None:
+    """Read a fenced queued run without holding its DB transaction over network I/O."""
+    with SessionLocal() as db:
+        now = utc_now()
+        run = manager._locked_owned_run(db, lease, now)
+        if run is None or run.status != "queued":
+            db.rollback()
+            return None
+        task = db.get(Task, run.task_id)
+        if task is None:
+            db.rollback()
+            return None
+        session_id = run.opencode_session_id
+        title = execution_session_title(task, run.id)
+        prompt = execution_prompt(task)
+        db.rollback()
+        return session_id, title, prompt
+
+
+def dispatch_execution(
+    manager: ExecutionLeaseManager,
+    client: OpenCodeClient,
+    lease: ExecutionLease,
+) -> str:
+    context = _queued_dispatch_context(manager, lease)
+    if context is None:
+        return "lost"
+    session_id, title, prompt = context
+
+    if not session_id:
+        matches = client.sessions_for_execution(lease.execution_id)
+        if len(matches) > 1:
+            raise OpenCodeError(
+                f"Ambiguous OpenCode dispatch recovery for execution {lease.execution_id}: "
+                f"{len(matches)} sessions carry the same metadata"
+            )
+        if matches:
+            session = matches[0]
+        else:
+            session = client.create_session(
+                title,
+                metadata={EXECUTION_METADATA_KEY: lease.execution_id},
+            )
+        session_id = str(session.get("id") or session.get("sessionID") or "")
+        if not session_id:
+            raise OpenCodeError("OpenCode не вернул session id")
+        with SessionLocal() as db:
+            if not manager.persist_dispatch_session(db, lease, session_id):
+                return "lost"
+
+    message_id = execution_message_id(lease.execution_id)
+    existing_message = client.message(session_id, message_id)
+    if existing_message is None:
+        client.prompt_async(session_id, prompt, message_id=message_id)
+
+    with SessionLocal() as db:
+        if not manager.mark_dispatched(db, lease, session_id, message_id):
+            return "lost"
+    return "dispatched"
+
+
 def poll_execution(
     manager: ExecutionLeaseManager,
     client_factory: Callable[[], OpenCodeClient],
@@ -247,6 +385,12 @@ def poll_execution(
 ) -> str:
     try:
         client = client_factory()
+        if lease.status == "queued":
+            return dispatch_execution(manager, client, lease)
+        if not lease.opencode_session_id:
+            raise OpenCodeError(
+                f"Running execution {lease.execution_id} has no OpenCode session id"
+            )
         statuses = client.session_statuses()
         messages = client.messages(lease.opencode_session_id)
         state = statuses.get(lease.opencode_session_id) or {}
@@ -254,9 +398,10 @@ def poll_execution(
         result = extract_last_assistant_text(messages)
     except OpenCodeError as exc:
         LOGGER.warning(
-            "OpenCode poll failed execution=%s generation=%s: %s",
+            "OpenCode operation failed execution=%s generation=%s status=%s: %s",
             lease.execution_id,
             lease.generation,
+            lease.status,
             exc,
         )
         with SessionLocal() as db:
@@ -306,9 +451,11 @@ def run_forever(
                 lease = futures[future]
                 try:
                     outcome = future.result()
-                except Exception:  # worker boundary: let lease expire and recover safely.
+                except Exception:
+                    # Worker boundary: never let an unexpected process-level error
+                    # commit stale state; the lease expires and another generation recovers.
                     LOGGER.exception(
-                        "Unexpected poll failure execution=%s generation=%s",
+                        "Unexpected worker failure execution=%s generation=%s",
                         lease.execution_id,
                         lease.generation,
                     )

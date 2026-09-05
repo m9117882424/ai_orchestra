@@ -1,3 +1,4 @@
 -r requirements.in
 httpx2>=2.10,<3
 pytest>=8.4,<9
+temporalio>=1.32,<1.33

@@ -45,6 +45,19 @@ def _seed_queued_execution(session_id: str | None = None) -> tuple[str, str]:
         return task.id, run.id
 
 
+def _steal_lease(run_id: str) -> None:
+    """Deterministically simulate another generation winning before an external POST."""
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        run = db.get(ExecutionRun, run_id)
+        assert run is not None
+        run.lease_owner = "new-generation-worker"
+        run.lease_generation = int(run.lease_generation or 0) + 1
+        run.heartbeat_at = now
+        run.lease_expires_at = now + timedelta(seconds=60)
+        db.commit()
+
+
 class FakeDispatchOpenCode:
     def __init__(self, *, sessions=None, existing_messages=None, fail_after_create=False):
         self.sessions = list(sessions or [])
@@ -83,6 +96,26 @@ class FakeDispatchOpenCode:
         assert message_id is not None and message_id.startswith("msg")
         self.prompt_calls.append((session_id, message_id))
         self.existing_messages.add((session_id, message_id))
+
+
+class StealLeaseBeforeCreate(FakeDispatchOpenCode):
+    def __init__(self, run_id: str):
+        super().__init__()
+        self.run_id = run_id
+
+    def sessions_for_execution(self, execution_id: str):
+        _steal_lease(self.run_id)
+        return []
+
+
+class StealLeaseBeforePrompt(FakeDispatchOpenCode):
+    def __init__(self, run_id: str):
+        super().__init__()
+        self.run_id = run_id
+
+    def message(self, session_id: str, message_id: str):
+        _steal_lease(self.run_id)
+        return None
 
 
 def test_heartbeat_keeps_live_lease_from_being_recovered():
@@ -274,3 +307,44 @@ def test_stale_dispatch_generation_cannot_persist_session_after_recovery():
         assert run.status == "queued"
         assert run.opencode_session_id is None
         assert run.lease_owner == "dispatch-b"
+
+
+def test_lost_generation_cannot_create_opencode_session():
+    _, run_id = _seed_queued_execution()
+    manager = ExecutionLeaseManager("stale-before-create", lease_seconds=60)
+    with SessionLocal() as db:
+        [lease] = manager.claim_available(db, limit=1)
+
+    fake = StealLeaseBeforeCreate(run_id)
+    assert dispatch_execution(manager, fake, lease) == "lost"
+    assert fake.create_calls == 0
+    assert fake.prompt_calls == []
+
+    with SessionLocal() as db:
+        run = db.get(ExecutionRun, run_id)
+        assert run is not None
+        assert run.status == "queued"
+        assert run.opencode_session_id is None
+        assert run.lease_owner == "new-generation-worker"
+        assert run.lease_generation == lease.generation + 1
+
+
+def test_lost_generation_cannot_send_opencode_prompt():
+    session_id = "session-before-fenced-prompt"
+    _, run_id = _seed_queued_execution(session_id)
+    manager = ExecutionLeaseManager("stale-before-prompt", lease_seconds=60)
+    with SessionLocal() as db:
+        [lease] = manager.claim_available(db, limit=1)
+
+    fake = StealLeaseBeforePrompt(run_id)
+    assert dispatch_execution(manager, fake, lease) == "lost"
+    assert fake.create_calls == 0
+    assert fake.prompt_calls == []
+
+    with SessionLocal() as db:
+        run = db.get(ExecutionRun, run_id)
+        assert run is not None
+        assert run.status == "queued"
+        assert run.opencode_session_id == session_id
+        assert run.lease_owner == "new-generation-worker"
+        assert run.lease_generation == lease.generation + 1

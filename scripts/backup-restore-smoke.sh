@@ -11,13 +11,40 @@ cleanup() {
 trap cleanup EXIT
 
 wait_postgres() {
+  local container_id
+  container_id="$(docker compose ps -q postgres)"
+  if [[ -z "$container_id" ]]; then
+    echo "[FAIL] PostgreSQL container was not created" >&2
+    return 1
+  fi
+
+  local init_complete=0
+  for _ in $(seq 1 60); do
+    if [[ "$(docker inspect "$container_id" --format '{{.State.Running}}' 2>/dev/null || true)" != "true" ]]; then
+      echo "[FAIL] PostgreSQL stopped during CI initialization" >&2
+      docker compose logs postgres >&2 || true
+      return 1
+    fi
+    if docker compose logs --no-color postgres 2>&1 | grep -Fq 'PostgreSQL init process complete; ready for start up.'; then
+      init_complete=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$init_complete" != "1" ]]; then
+    echo "[FAIL] PostgreSQL CI initialization did not complete" >&2
+    docker compose logs postgres >&2 || true
+    return 1
+  fi
+
   for _ in $(seq 1 30); do
-    if docker compose exec -T postgres pg_isready -U ai_orchestra -d ai_orchestra >/dev/null 2>&1; then
+    if docker compose exec -T postgres pg_isready -U ai_orchestra -d ai_orchestra >/dev/null 2>&1 \
+      && [[ "$(docker compose exec -T postgres psql -U ai_orchestra -d ai_orchestra -Atc 'SELECT 1' 2>/dev/null || true)" == "1" ]]; then
       return 0
     fi
     sleep 1
   done
-  echo "[FAIL] PostgreSQL did not become ready" >&2
+  echo "[FAIL] PostgreSQL final CI database did not become ready" >&2
   docker compose logs postgres >&2 || true
   return 1
 }

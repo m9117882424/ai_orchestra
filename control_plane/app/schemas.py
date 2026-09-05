@@ -125,7 +125,7 @@ class CapabilityGuardRead(BaseModel):
     updated_at: datetime
 
 
-ExecutionStatus = Literal["running", "completed", "failed", "cancelled"]
+ExecutionStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 
 
 class ExecutionRead(BaseModel):
@@ -135,7 +135,7 @@ class ExecutionRead(BaseModel):
     task_id: str
     status: ExecutionStatus
     stage: str
-    opencode_session_id: str
+    opencode_session_id: str | None
     lead_role: str
     assigned_roles: list[str]
     result: str

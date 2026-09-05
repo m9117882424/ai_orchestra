@@ -4,7 +4,7 @@
 
 This is an **isolated G1 proof of concept**, not a production deployment and not a replacement for Execution V1.
 
-The PoC exists to answer one narrow question with executable evidence: can AI Orchestra move long-running orchestration state out of the browser/request lifecycle and recover deterministically after worker and workflow-engine process loss?
+The PoC exists to answer two narrow questions with executable evidence: can AI Orchestra move long-running orchestration state out of the browser/request lifecycle and recover deterministically after worker and workflow-engine process loss, and can a workflow preserve a digest-bound external approval wait across that restart?
 
 ## Versions under test
 
@@ -31,14 +31,20 @@ The Python exercise then:
 5. requires Temporal to detect the lost heartbeat and retry the activity;
 6. requires the workflow to complete only on attempt 2 or later;
 7. records a canonical SHA-256 of the workflow result;
-8. restarts the Temporal server container while preserving the disposable PostgreSQL database;
-9. reconnects and reads the completed workflow result again;
-10. fails if the post-restart result payload or digest differs.
+8. starts a second workflow bound to the canonical SHA-256 of an approval request;
+9. confirms that the second workflow reached `waiting`;
+10. restarts the Temporal server container while preserving the disposable PostgreSQL database;
+11. reconnects and verifies that the completed workflow result and digest are unchanged;
+12. starts a fresh worker;
+13. confirms that the approval workflow is still `waiting` before any signal is sent;
+14. sends an external approval signal carrying the exact request digest and waits for completion;
+15. records and verifies the approval result payload and canonical SHA-256.
 
-This gives executable evidence for both:
+This gives executable evidence for:
 
 - worker-process loss and activity retry;
-- Temporal server process restart with workflow history/result persisted in PostgreSQL.
+- Temporal server process restart with workflow history/result persisted in PostgreSQL;
+- durable wait/resume mechanics for a digest-bound external approval signal.
 
 All disposable resources are removed after the test.
 
@@ -52,7 +58,8 @@ Temporal does not provide exactly-once external effects by itself. This PoC ther
 - financial execution;
 - access to secrets;
 - exactly-once side effects;
-- approval semantics;
+- production approval identity, authentication, authorization or one-time-use semantics;
+- a real human approval UI or operator ceremony;
 - repository/worktree allocation;
 - multi-agent fan-out;
 - production Temporal HA, TLS, authentication or authorization;
@@ -103,6 +110,9 @@ This PoC is eligible to inform the production design only if CI repeatedly demon
 - a distinct worker #2 is started;
 - the same workflow completes via attempt >= 2 on worker #2;
 - a Temporal server restart does not alter the persisted workflow result;
+- the approval workflow is waiting both before and after the server restart;
+- only a post-restart signal carrying the expected request digest completes the approval workflow;
+- the approval result payload and digest are recorded as evidence;
 - no production Compose service or volume is touched by the test;
 - dependency locks remain deterministic and hash-enforced.
 

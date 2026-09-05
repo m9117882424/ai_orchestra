@@ -32,6 +32,13 @@ _REVISION_EXCLUDED_INDEXES = {
         }
     )
 }
+_REVISION_NULLABLE_OVERRIDES = {
+    # Revision 0001 required an OpenCode session before ExecutionRun persistence.
+    # Head 0003 intentionally makes it nullable so queued dispatch can be durable.
+    LEGACY_BASELINE_REVISION: {
+        ("execution_runs", "opencode_session_id"): False,
+    }
+}
 
 
 def alembic_config() -> Config:
@@ -72,14 +79,15 @@ def _schema_diff(
     *,
     excluded_columns: frozenset[tuple[str, str]] = frozenset(),
     excluded_indexes: frozenset[tuple[str, tuple[str, ...], bool]] = frozenset(),
+    nullable_overrides: dict[tuple[str, str], bool] | None = None,
 ) -> list[str]:
     """Compare a database with an exact declared schema shape.
 
-    Exclusions are used only to reconstruct a specifically known historical Alembic
-    baseline from today's ORM metadata. Any partially migrated/unknown shape still
-    fails closed because extra columns or indexes remain visible as unexpected.
+    Historical exclusions/overrides reconstruct only explicitly known Alembic
+    baselines from today's ORM metadata. Partial or unknown drift still fails closed.
     """
     differences: list[str] = []
+    nullable_overrides = nullable_overrides or {}
     inspector = inspect(bind)
     actual_tables = set(inspector.get_table_names()) - {"alembic_version"}
     expected_tables = set(Base.metadata.tables)
@@ -115,10 +123,13 @@ def _schema_diff(
                 differences.append(
                     f"{table_name}.{column_name}: type {actual_type!r} != {expected_type!r}"
                 )
-            if bool(actual["nullable"]) != bool(expected.nullable):
+            expected_nullable = nullable_overrides.get(
+                (table_name, column_name), bool(expected.nullable)
+            )
+            if bool(actual["nullable"]) != expected_nullable:
                 differences.append(
                     f"{table_name}.{column_name}: nullable={actual['nullable']} "
-                    f"!= {expected.nullable}"
+                    f"!= {expected_nullable}"
                 )
 
         expected_pk = tuple(column.name for column in table.primary_key.columns)
@@ -179,6 +190,7 @@ def schema_diff_for_revision(bind: Engine | Connection, revision: str) -> list[s
         bind,
         excluded_columns=_REVISION_EXCLUDED_COLUMNS[revision],
         excluded_indexes=_REVISION_EXCLUDED_INDEXES[revision],
+        nullable_overrides=_REVISION_NULLABLE_OVERRIDES.get(revision),
     )
 
 

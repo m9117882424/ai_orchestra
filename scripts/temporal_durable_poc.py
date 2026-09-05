@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from temporalio import activity, workflow
+from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest
 from temporalio.client import Client
 from temporalio.common import RetryPolicy
 from temporalio.worker import Worker
@@ -73,16 +74,27 @@ def canonical_sha256(value: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-async def connect_with_retry(address: str, timeout_seconds: float) -> Client:
+async def connect_with_retry(
+    address: str,
+    timeout_seconds: float,
+    namespace: str = "default",
+) -> Client:
+    """Wait until both Temporal frontend and the target namespace are usable."""
     deadline = time.monotonic() + timeout_seconds
     last_error: Exception | None = None
     while time.monotonic() < deadline:
         try:
-            return await Client.connect(address)
+            client = await Client.connect(address, namespace=namespace)
+            await client.workflow_service.describe_namespace(
+                DescribeNamespaceRequest(namespace=namespace)
+            )
+            return client
         except Exception as exc:
             last_error = exc
             await asyncio.sleep(0.5)
-    raise RuntimeError(f"Temporal did not become ready at {address}: {last_error}")
+    raise RuntimeError(
+        f"Temporal namespace {namespace!r} did not become ready at {address}: {last_error}"
+    )
 
 
 async def worker_main(address: str, task_queue: str, ready_file: Path) -> None:
@@ -271,8 +283,8 @@ async def verify(address: str, evidence_path: Path) -> None:
 
 
 async def wait_server(address: str, timeout_seconds: float) -> None:
-    await connect_with_retry(address, timeout_seconds)
-    print(f"[OK] Temporal ready at {address}")
+    client = await connect_with_retry(address, timeout_seconds)
+    print(f"[OK] Temporal namespace {client.namespace!r} ready at {address}")
 
 
 def parse_args() -> argparse.Namespace:

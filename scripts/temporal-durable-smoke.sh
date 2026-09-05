@@ -118,7 +118,10 @@ if [[ -z "${port}" ]]; then
   exit 1
 fi
 address="127.0.0.1:${port}"
-wait_for_temporal "${address}"
+# The verify command owns the post-restart readiness retry and the recovery
+# client lifecycle. Keeping both operations in one process avoids tearing down
+# a short-lived SDK Core runtime immediately after the restarted server accepts
+# its first connection.
 "${poc_python}" scripts/temporal_durable_poc.py verify --address "${address}" --evidence "${evidence_path}"
 after_image_id="$(docker inspect --format '{{.Image}}' "${temporal_container}")"
 

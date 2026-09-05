@@ -141,4 +141,4 @@ evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", 
 print(json.dumps(evidence, sort_keys=True))
 PY
 
-echo '[OK] Temporal durable-workflow PoC: worker-loss retry and server-restart recovery verified'
+echo '[OK] Temporal durable-workflow PoC: worker-loss retry, server-restart recovery, and approval wait verified'

@@ -10,6 +10,8 @@ postgres_container="ai-orchestra-temporal-poc-postgres-${suffix}"
 temporal_container="ai-orchestra-temporal-poc-server-${suffix}"
 state_dir="$(mktemp -d)"
 evidence_path="${state_dir}/evidence.json"
+poc_venv="${state_dir}/venv"
+poc_python="${poc_venv}/bin/python"
 
 cleanup() {
   set +e
@@ -41,7 +43,7 @@ host_port() {
 
 wait_for_temporal() {
   local address="$1"
-  if ! python3 scripts/temporal_durable_poc.py wait --address "${address}" --timeout 120; then
+  if ! "${poc_python}" scripts/temporal_durable_poc.py wait --address "${address}" --timeout 120; then
     echo 'ERROR: disposable Temporal server did not become ready' >&2
     docker inspect "${temporal_container}" >&2 || true
     docker logs "${temporal_container}" >&2 || true
@@ -51,6 +53,16 @@ wait_for_temporal() {
 
 echo "[INFO] Temporal PoC server image: ${TEMPORAL_SERVER_IMAGE}"
 echo "[INFO] Temporal PoC PostgreSQL image: ${POSTGRES_IMAGE}"
+
+(
+  cd poc/temporal
+  sha256sum --check dependency-lock.sha256
+)
+python3 -m venv "${poc_venv}"
+"${poc_python}" -m pip install \
+  --disable-pip-version-check \
+  --require-hashes \
+  --requirement poc/temporal/requirements.lock
 
 docker network create "${network}" >/dev/null
 
@@ -88,7 +100,7 @@ fi
 address="127.0.0.1:${port}"
 
 wait_for_temporal "${address}"
-python3 scripts/temporal_durable_poc.py exercise \
+"${poc_python}" scripts/temporal_durable_poc.py exercise \
   --address "${address}" \
   --state-dir "${state_dir}/run" \
   --evidence "${evidence_path}"
@@ -96,7 +108,7 @@ python3 scripts/temporal_durable_poc.py exercise \
 before_image_id="$(docker inspect --format '{{.Image}}' "${temporal_container}")"
 docker restart "${temporal_container}" >/dev/null
 wait_for_temporal "${address}"
-python3 scripts/temporal_durable_poc.py verify --address "${address}" --evidence "${evidence_path}"
+"${poc_python}" scripts/temporal_durable_poc.py verify --address "${address}" --evidence "${evidence_path}"
 after_image_id="$(docker inspect --format '{{.Image}}' "${temporal_container}")"
 
 if [[ "${before_image_id}" != "${after_image_id}" ]]; then

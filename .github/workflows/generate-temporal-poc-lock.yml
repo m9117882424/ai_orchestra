@@ -140,3 +140,9 @@ jobs:
         run: |
           set -Eeuo pipefail
           git diff --exit-code -- requirements.lock dependency-lock.sha256
+          status="$(git status --porcelain=v1 --untracked-files=all -- requirements.lock dependency-lock.sha256)"
+          if [[ -n "${status}" ]]; then
+            echo 'ERROR: generated Temporal PoC lock state differs from the commit' >&2
+            printf '%s\n' "${status}" >&2
+            exit 1
+          fi

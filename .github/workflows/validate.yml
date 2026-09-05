@@ -67,6 +67,11 @@ jobs:
           python3 -m pip install --dry-run --require-hashes --requirement control_plane/requirements.lock
           python3 -m pip install --dry-run --require-hashes --requirement control_plane/requirements-dev.lock
 
+      - name: Проверить Temporal PoC dependency lock
+        run: |
+          (cd poc/temporal && sha256sum --check dependency-lock.sha256)
+          python3 -m pip install --dry-run --require-hashes --requirement poc/temporal/requirements.lock
+
       - name: Проверить Docker Compose и границы безопасности
         run: |
           docker compose config --quiet

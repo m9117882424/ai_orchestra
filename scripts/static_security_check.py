@@ -82,6 +82,8 @@ def main() -> int:
     assert "OPENCODE_VERSION=1.18.27" in env_text
     assert "LITELLM_VERSION=1.98.0" in env_text
     assert "CONTROL_PLANE_SCHEMA_MODE=" not in env_text
+    assert "BACKUP_OFFSITE_ENCRYPTION_AT_REST_CONFIRMED=no" in env_text
+    assert "BACKUP_OFFSITE_AUTHENTICATED_TRANSPORT_CONFIRMED=no" in env_text
 
     provider_example = (ROOT / ".env.providers.example").read_text(encoding="utf-8")
     for key in ("AITUNNEL_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"):
@@ -140,6 +142,24 @@ def main() -> int:
     assert "from .db import engine" not in schema_cli_text
     assert "SKIP_PRE_MIGRATION_BACKUP" not in migrate_script
     assert "bash ./scripts/backup.sh" in migrate_script
+
+    backup_script = (ROOT / "scripts/backup.sh").read_text(encoding="utf-8")
+    verify_backup_script = (ROOT / "scripts/verify-backup.sh").read_text(encoding="utf-8")
+    restore_drill_script = (ROOT / "scripts/restore-drill.sh").read_text(encoding="utf-8")
+    offsite_script = (ROOT / "scripts/export-backup-offsite.sh").read_text(encoding="utf-8")
+    assert "export-backup-offsite.sh" not in backup_script, "Local backup must not gain implicit external effects"
+    assert "sha256sum --check --strict SHA256SUMS" in verify_backup_script
+    assert "Secret-bearing file detected inside backup" in verify_backup_script
+    assert "ai-orchestra-restore-net-" in restore_drill_script
+    assert "ai-orchestra-restore-vol-" in restore_drill_script
+    assert "--network-alias restore-postgres" in restore_drill_script
+    assert "CONTROL_PLANE_DATABASE_URL" in restore_drill_script
+    assert "observed_restore_rto_seconds" in restore_drill_script
+    assert "docker compose exec" not in restore_drill_script, "Restore drill must never execute against production Compose services"
+    assert "BACKUP_OFFSITE_ENCRYPTION_AT_REST_CONFIRMED" in offsite_script
+    assert "BACKUP_OFFSITE_AUTHENTICATED_TRANSPORT_CONFIRMED" in offsite_script
+    assert "Refusing to overwrite existing offsite backup" in offsite_script
+    assert "sha256sum" in offsite_script
 
     models_text = (ROOT / "control_plane/app/models.py").read_text(encoding="utf-8")
     for marker in PRODUCT_POLICY_MARKERS:

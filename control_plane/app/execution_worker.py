@@ -336,6 +336,15 @@ def _queued_dispatch_context(
         return session_id, title, prompt
 
 
+def _renew_before_external_side_effect(
+    manager: ExecutionLeaseManager,
+    lease: ExecutionLease,
+) -> bool:
+    """Fence an external POST with a lease renewed immediately before the call."""
+    with SessionLocal() as db:
+        return manager.heartbeat(db, lease)
+
+
 def dispatch_execution(
     manager: ExecutionLeaseManager,
     client: OpenCodeClient,
@@ -356,6 +365,12 @@ def dispatch_execution(
         if matches:
             session = matches[0]
         else:
+            # OpenCode HTTP requests time out after 30s. Production enforces a
+            # >=60s lease, and this heartbeat occurs immediately before the POST,
+            # so another generation cannot legitimately recover while this side
+            # effect is still in flight.
+            if not _renew_before_external_side_effect(manager, lease):
+                return "lost"
             session = client.create_session(
                 title,
                 metadata={EXECUTION_METADATA_KEY: lease.execution_id},
@@ -370,6 +385,8 @@ def dispatch_execution(
     message_id = execution_message_id(lease.execution_id)
     existing_message = client.message(session_id, message_id)
     if existing_message is None:
+        if not _renew_before_external_side_effect(manager, lease):
+            return "lost"
         client.prompt_async(session_id, prompt, message_id=message_id)
 
     with SessionLocal() as db:
@@ -477,7 +494,7 @@ def main() -> int:
     lease_seconds = _positive_int(
         "CONTROL_PLANE_EXECUTION_WORKER_LEASE_SECONDS",
         120,
-        minimum=30,
+        minimum=60,
         maximum=3600,
     )
     max_active = _positive_int(

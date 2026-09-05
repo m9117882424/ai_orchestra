@@ -69,6 +69,43 @@ class DurableWorkflow:
         }
 
 
+@workflow.defn
+class ApprovalWaitWorkflow:
+    def __init__(self) -> None:
+        self._approval: dict[str, Any] | None = None
+
+    @workflow.signal
+    async def approve(self, approval: dict[str, Any]) -> None:
+        candidate = dict(approval)
+        if self._approval is None:
+            self._approval = candidate
+        elif self._approval != candidate:
+            raise RuntimeError("conflicting approval signal")
+
+    @workflow.query
+    def approval_state(self) -> str:
+        return "approved" if self._approval is not None else "waiting"
+
+    @workflow.run
+    async def run(self, request_sha256: str) -> dict[str, Any]:
+        await workflow.wait_condition(lambda: self._approval is not None)
+        approval = self._approval
+        if approval is None:
+            raise RuntimeError("approval wait resumed without an approval payload")
+        if str(approval.get("request_sha256", "")) != request_sha256:
+            raise RuntimeError("approval signal is bound to a different request digest")
+        if approval.get("decision") != "approved":
+            raise RuntimeError("approval signal does not contain an approved decision")
+        approval_id = str(approval.get("approval_id", ""))
+        if not approval_id:
+            raise RuntimeError("approval signal does not contain an approval id")
+        return {
+            "approval_id": approval_id,
+            "decision": "approved",
+            "request_sha256": request_sha256,
+        }
+
+
 def canonical_sha256(value: Any) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
@@ -110,7 +147,7 @@ async def worker_main(address: str, task_queue: str, ready_file: Path) -> None:
     async with Worker(
         client,
         task_queue=task_queue,
-        workflows=[DurableWorkflow],
+        workflows=[DurableWorkflow, ApprovalWaitWorkflow],
         activities=[restart_sensitive_activity],
     ):
         ready_file.write_text(str(os.getpid()), encoding="utf-8")
@@ -194,6 +231,7 @@ async def exercise(address: str, state_dir: Path, evidence_path: Path) -> None:
     ready2 = state_dir / "worker-2.ready"
     task_queue = f"ai-orchestra-durable-poc-{uuid.uuid4()}"
     workflow_id = f"ai-orchestra-durable-poc-{uuid.uuid4()}"
+    approval_workflow_id = f"ai-orchestra-approval-wait-poc-{uuid.uuid4()}"
 
     client = await connect_with_retry(address, 30)
     worker1 = await start_worker_process(address, task_queue, ready1)
@@ -235,6 +273,38 @@ async def exercise(address: str, state_dir: Path, evidence_path: Path) -> None:
         if 1 not in observed_attempts or max(observed_attempts) < 2:
             raise RuntimeError(f"marker does not prove retry across workers: {attempts}")
 
+        approval_request = {
+            "action": "resume-temporal-poc",
+            "durable_workflow_id": workflow_id,
+            "durable_result_sha256": canonical_sha256(result),
+        }
+        approval_request_sha256 = canonical_sha256(approval_request)
+        approval_handle = await client.start_workflow(
+            ApprovalWaitWorkflow.run,
+            approval_request_sha256,
+            id=approval_workflow_id,
+            task_queue=task_queue,
+        )
+
+        approval_state = ""
+        approval_deadline = time.monotonic() + 20
+        last_query_error: Exception | None = None
+        while time.monotonic() < approval_deadline:
+            try:
+                approval_state = await approval_handle.query(
+                    ApprovalWaitWorkflow.approval_state
+                )
+                if approval_state == "waiting":
+                    break
+            except Exception as exc:
+                last_query_error = exc
+            await asyncio.sleep(0.1)
+        else:
+            raise RuntimeError(
+                "approval workflow did not reach the waiting state before restart: "
+                f"state={approval_state!r}, last_error={last_query_error}"
+            )
+
         evidence = {
             "workflow_id": workflow_id,
             "task_queue": task_queue,
@@ -244,6 +314,12 @@ async def exercise(address: str, state_dir: Path, evidence_path: Path) -> None:
             "activity_attempts": attempts,
             "result": result,
             "result_sha256": canonical_sha256(result),
+            "approval_wait": {
+                "workflow_id": approval_workflow_id,
+                "request": approval_request,
+                "request_sha256": approval_request_sha256,
+                "state_before_restart": approval_state,
+            },
             "exercise_elapsed_seconds": round(time.time() - started_at, 3),
         }
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
@@ -270,16 +346,71 @@ async def verify(address: str, evidence_path: Path) -> None:
         raise RuntimeError(f"persisted workflow result digest mismatch: {digest} != {expected}")
     if result != evidence["result"]:
         raise RuntimeError("persisted workflow result payload changed after server restart")
-    print(
-        json.dumps(
-            {
-                "workflow_id": evidence["workflow_id"],
-                "result_sha256": digest,
-                "server_restart_recovery": "verified",
-            },
-            sort_keys=True,
+
+    approval_evidence = dict(evidence["approval_wait"])
+    approval_handle = client.get_workflow_handle(str(approval_evidence["workflow_id"]))
+    ready3 = evidence_path.parent / "worker-3.ready"
+    worker3 = await start_worker_process(address, str(evidence["task_queue"]), ready3)
+    try:
+        state_after_restart = await asyncio.wait_for(
+            approval_handle.query(ApprovalWaitWorkflow.approval_state),
+            timeout=20,
         )
-    )
+        if state_after_restart != "waiting":
+            raise RuntimeError(
+                "approval workflow did not preserve its waiting state after restart: "
+                f"{state_after_restart!r}"
+            )
+
+        approval = {
+            "approval_id": f"poc-approval-{uuid.uuid4()}",
+            "decision": "approved",
+            "request_sha256": str(approval_evidence["request_sha256"]),
+        }
+        await approval_handle.signal(ApprovalWaitWorkflow.approve, approval)
+        approval_result = await asyncio.wait_for(approval_handle.result(), timeout=20)
+        expected_approval_result = {
+            "approval_id": approval["approval_id"],
+            "decision": "approved",
+            "request_sha256": approval["request_sha256"],
+        }
+        if approval_result != expected_approval_result:
+            raise RuntimeError(
+                "approval workflow returned an unexpected result: "
+                f"{approval_result!r} != {expected_approval_result!r}"
+            )
+
+        approval_evidence.update(
+            {
+                "approval": approval,
+                "result": approval_result,
+                "result_sha256": canonical_sha256(approval_result),
+                "state_after_restart_before_signal": state_after_restart,
+                "resumed_by_pid": worker3.pid,
+                "server_restart_recovery": "verified",
+            }
+        )
+        evidence["approval_wait"] = approval_evidence
+        evidence["server_restart_recovery"] = "verified"
+        evidence_path.write_text(
+            json.dumps(evidence, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        print(
+            json.dumps(
+                {
+                    "approval_result_sha256": approval_evidence["result_sha256"],
+                    "approval_wait_recovery": "verified",
+                    "result_sha256": digest,
+                    "server_restart_recovery": "verified",
+                    "workflow_id": evidence["workflow_id"],
+                },
+                sort_keys=True,
+            )
+        )
+    finally:
+        if worker3.returncode is None:
+            await terminate_process(worker3, graceful=True)
 
 
 async def wait_server(address: str, timeout_seconds: float) -> None:

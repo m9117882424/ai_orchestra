@@ -40,7 +40,7 @@ jobs:
               assert isinstance(data, dict) and isinstance(data.get('model_list'), list) and data['model_list'], path
           print('[OK] router YAML parsed')
           PY
-          python3 -m compileall -q control_plane/app control_plane/migrations control_plane/tests scripts/model_router_smoke.py scripts/static_security_check.py scripts/verify_dependency_locks.py
+          python3 -m compileall -q control_plane/app control_plane/migrations control_plane/tests scripts/model_router_smoke.py scripts/static_security_check.py scripts/verify_dependency_locks.py scripts/temporal_durable_poc.py
           node --check control_plane/app/static/app.js
 
       - name: Проверить shell-скрипты
@@ -58,6 +58,7 @@ jobs:
           bash -n scripts/restore-drill.sh
           bash -n scripts/export-backup-offsite.sh
           bash -n scripts/backup-restore-smoke.sh
+          bash -n scripts/temporal-durable-smoke.sh
           shellcheck scripts/*.sh
 
       - name: Проверить dependency locks
@@ -79,6 +80,9 @@ jobs:
 
       - name: Проверить Docker buildability with current upstream bases
         run: docker compose build --pull
+
+      - name: Проверить Temporal durable-workflow PoC
+        run: bash ./scripts/temporal-durable-smoke.sh
 
       - name: Проверить backup/restore disaster-recovery path
         run: bash ./scripts/backup-restore-smoke.sh

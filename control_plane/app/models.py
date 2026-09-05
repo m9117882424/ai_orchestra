@@ -120,7 +120,11 @@ class ExecutionRun(Base):
     )
     status: Mapped[str] = mapped_column(String(24), default="running")
     stage: Mapped[str] = mapped_column(String(40), default="department_lead")
-    opencode_session_id: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    # A queued execution is committed before any OpenCode side effect. The worker
+    # fills this after creating or reconciling the external session.
+    opencode_session_id: Mapped[str | None] = mapped_column(
+        String(120), unique=True, index=True, nullable=True
+    )
     lead_role: Mapped[str] = mapped_column(String(80), default="department-lead")
     assigned_roles: Mapped[list] = mapped_column(JSON, default=list)
     result: Mapped[str] = mapped_column(Text, default="")

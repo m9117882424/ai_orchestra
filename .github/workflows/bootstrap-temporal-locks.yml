@@ -1,0 +1,55 @@
+name: Bootstrap Temporal lock candidate
+
+on:
+  push:
+    paths:
+      - .github/workflows/bootstrap-temporal-locks.yml
+
+permissions:
+  contents: write
+
+jobs:
+  commit-locks:
+    if: github.ref == 'refs/heads/feature/g1-temporal-durable-workflow-poc'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout exact branch head
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Download and verify exact generated candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          candidate=/tmp/temporal-lock-candidate
+          mkdir -p "$candidate"
+          gh run download 33951397466 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name control-plane-lock-candidate-69334ee77ca2008fe96c5da8c6eca543f744ca9d \
+            --dir "$candidate"
+
+          test "$(sha256sum "$candidate/dependency-locks.sha256" | awk '{print $1}')" = "53f4bd1681a377036da6bbd99b8010c4ec6f23bb45725c98a9dd362445cbe779"
+          test "$(sha256sum "$candidate/requirements.lock" | awk '{print $1}')" = "39f3dce7cec5053d446b9c648adc87e89d459e06e66bf7cd8ce1346e48a9134d"
+          test "$(sha256sum "$candidate/requirements-dev.lock" | awk '{print $1}')" = "4a9e326116f2c976135a9d1d8b5816d84be2f23ff4560cf7441a1689a49fd8fc"
+
+          cp "$candidate/requirements.lock" control_plane/requirements.lock
+          cp "$candidate/requirements-dev.lock" control_plane/requirements-dev.lock
+          cp "$candidate/dependency-locks.sha256" control_plane/dependency-locks.sha256
+
+          (
+            cd control_plane
+            sha256sum --check dependency-locks.sha256
+          )
+
+      - name: Commit only the exact lock candidate
+        run: |
+          set -Eeuo pipefail
+          git diff --exit-code -- . ':!control_plane/requirements.lock' ':!control_plane/requirements-dev.lock' ':!control_plane/dependency-locks.sha256'
+          git add control_plane/requirements.lock control_plane/requirements-dev.lock control_plane/dependency-locks.sha256
+          git diff --cached --quiet && { echo 'ERROR: no lock changes to commit' >&2; exit 1; }
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Commit Temporal SDK deterministic lock candidate'
+          git push origin HEAD:feature/g1-temporal-durable-workflow-poc

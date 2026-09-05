@@ -61,7 +61,6 @@ done
 postgres_image_id="$(docker image inspect "$postgres_image" --format '{{.Id}}')"
 control_image_id="$(docker image inspect "$control_image" --format '{{.Id}}')"
 
-# Validate the PostgreSQL custom dump with the same major-version image used by the stack.
 docker run --rm -i "$postgres_image" pg_restore --list < "$dump" >/dev/null
 
 docker network create "$network_name" >/dev/null
@@ -93,32 +92,27 @@ fi
 
 echo "[INFO] Restoring backup into isolated PostgreSQL container"
 docker exec -i "$db_container" \
-  pg_restore \
-    -U "$db_user" \
-    -d "$db_name" \
-    --no-owner \
-    --no-privileges \
-    --exit-on-error \
-  < "$dump"
+  pg_restore -U "$db_user" -d "$db_name" --no-owner --no-privileges --exit-on-error < "$dump"
 
-pre_revision="$(docker exec "$db_container" psql -U "$db_user" -d "$db_name" -Atc "SELECT CASE WHEN to_regclass('public.alembic_version') IS NULL THEN 'unversioned' ELSE COALESCE((SELECT version_num FROM alembic_version LIMIT 1),'empty') END")"
+has_alembic="$(docker exec "$db_container" psql -U "$db_user" -d "$db_name" -Atc "SELECT to_regclass('public.alembic_version') IS NOT NULL")"
+if [[ "$has_alembic" == "t" ]]; then
+  pre_revision="$(docker exec "$db_container" psql -U "$db_user" -d "$db_name" -Atc "SELECT COALESCE((SELECT version_num FROM alembic_version LIMIT 1),'empty')")"
+else
+  pre_revision="unversioned"
+fi
 
 connection_url="postgresql+psycopg://${db_user}:${db_password}@restore-postgres:5432/${db_name}"
 
 echo "[INFO] Running current migration logic only against the restored copy"
-docker run --rm \
-  --network "$network_name" \
+docker run --rm --network "$network_name" \
   -e CONTROL_PLANE_ENVIRONMENT=test \
   -e "CONTROL_PLANE_DATABASE_URL=$connection_url" \
-  "$control_image" \
-  python -m app.schema_cli migrate
+  "$control_image" python -m app.schema_cli migrate
 
-docker run --rm \
-  --network "$network_name" \
+docker run --rm --network "$network_name" \
   -e CONTROL_PLANE_ENVIRONMENT=test \
   -e "CONTROL_PLANE_DATABASE_URL=$connection_url" \
-  "$control_image" \
-  python -m app.schema_cli check
+  "$control_image" python -m app.schema_cli check
 
 post_revision="$(docker exec "$db_container" psql -U "$db_user" -d "$db_name" -Atc "SELECT version_num FROM alembic_version LIMIT 1")"
 
@@ -150,7 +144,6 @@ python3 - \
   "$table_counts_file" <<'PY'
 import json
 import sys
-
 (
     evidence, archive, archive_sha, started, finished,
     backup_age, restore_seconds, pre_revision, post_revision,

@@ -107,6 +107,17 @@ wait_for_temporal "${address}"
 
 before_image_id="$(docker inspect --format '{{.Image}}' "${temporal_container}")"
 docker restart "${temporal_container}" >/dev/null
+# Docker may allocate a different ephemeral host port after a container restart.
+# Re-read the published port so the recovery check targets the restarted server,
+# not the stale pre-restart listener.
+port="$(host_port)"
+if [[ -z "${port}" ]]; then
+  echo 'ERROR: Temporal host port was not published after restart' >&2
+  docker inspect "${temporal_container}" >&2 || true
+  docker logs "${temporal_container}" >&2 || true
+  exit 1
+fi
+address="127.0.0.1:${port}"
 wait_for_temporal "${address}"
 "${poc_python}" scripts/temporal_durable_poc.py verify --address "${address}" --evidence "${evidence_path}"
 after_image_id="$(docker inspect --format '{{.Image}}' "${temporal_container}")"

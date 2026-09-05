@@ -10,9 +10,11 @@ The PoC exists to answer one narrow question with executable evidence: can AI Or
 
 As of 2026-09-05:
 
-- Temporal Server PoC image: `temporalio/auto-setup:1.31.2`;
+- Temporal Server PoC image: `temporalio/auto-setup:1.29.7`;
 - Temporal Python SDK intent: `>=1.32,<1.33`, resolved by the repository's deterministic dev lock;
 - disposable persistence backend: `postgres:16-alpine`.
+
+`1.29.7` is the latest stable tag currently published for the deprecated `temporalio/auto-setup` image line. The server release number must not be assumed to map one-to-one to an `auto-setup` image tag. `auto-setup` is used here only for an isolated CI proof of concept; it is not the intended production server topology.
 
 The Temporal server image is deliberately **not** added to the production `docker-compose.yml` in this slice.
 
@@ -24,8 +26,8 @@ The Python exercise then:
 
 1. starts a workflow and worker #1;
 2. starts a heartbeating activity;
-3. forcibly kills worker #1 with SIGKILL while attempt 1 is running;
-4. starts worker #2 on the same task queue;
+3. forcibly kills worker #1 with SIGKILL while attempt 1 is running and requires a non-zero worker exit;
+4. starts a distinct worker #2 on the same task queue;
 5. requires Temporal to detect the lost heartbeat and retry the activity;
 6. requires the workflow to complete only on attempt 2 or later;
 7. records a canonical SHA-256 of the workflow result;
@@ -61,10 +63,11 @@ The existing fail-closed capability guard remains authoritative.
 
 ## Security and supply-chain boundary
 
-`auto-setup` is suitable for development/PoC use, not the target production topology. The server image is version-tagged here but is not yet digest-pinned or admitted through an AI Orchestra SBOM/vulnerability gate.
+`auto-setup` is deprecated and suitable only for this development/PoC boundary, not the target production topology. The server image is version-tagged here but is not yet digest-pinned or admitted through an AI Orchestra SBOM/vulnerability gate.
 
 Before Temporal can enter the production trust boundary, the implementation must define and verify at least:
 
+- a supported production Temporal server deployment topology rather than `auto-setup`;
 - immutable image digests and provenance;
 - vulnerability/SBOM admission policy;
 - TLS and authenticated client/worker access;
@@ -97,6 +100,7 @@ This PoC is eligible to inform the production design only if CI repeatedly demon
 
 - attempt 1 starts on worker #1;
 - worker #1 exits non-zero after forced loss;
+- a distinct worker #2 is started;
 - the same workflow completes via attempt >= 2 on worker #2;
 - a Temporal server restart does not alter the persisted workflow result;
 - no production Compose service or volume is touched by the test;

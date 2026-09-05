@@ -337,7 +337,7 @@ async def exercise(address: str, state_dir: Path, evidence_path: Path) -> None:
 
 async def verify(address: str, evidence_path: Path) -> None:
     evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
-    client = await connect_with_retry(address, 30)
+    client = await connect_with_retry(address, 120)
     handle = client.get_workflow_handle(str(evidence["workflow_id"]))
     result = await asyncio.wait_for(handle.result(), timeout=20)
     digest = canonical_sha256(result)

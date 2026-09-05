@@ -52,6 +52,17 @@ def _run_schema_cli(database_url: str, command: str) -> subprocess.CompletedProc
     )
 
 
+def _run_alembic_upgrade(database_url: str, revision: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", revision],
+        cwd=CONTROL_PLANE_ROOT,
+        env=_schema_env(database_url),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
 def _run_production_startup(database_url: str) -> subprocess.CompletedProcess[str]:
     code = """
 from fastapi.testclient import TestClient
@@ -72,7 +83,7 @@ print('STARTED')
 
 
 def test_declared_schema_head_is_stable():
-    assert head_revision() == "20260904_0001"
+    assert head_revision() == "20260905_0002"
 
 
 def test_fresh_database_is_created_by_alembic(tmp_path):
@@ -88,11 +99,11 @@ def test_fresh_database_is_created_by_alembic(tmp_path):
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
 
     assert set(Base.metadata.tables).issubset(tables)
-    assert revision == "20260904_0001"
+    assert revision == "20260905_0002"
 
 
-def test_matching_legacy_database_is_verified_then_stamped(tmp_path):
-    database_path = tmp_path / "legacy.db"
+def test_matching_current_unversioned_database_is_verified_then_stamped(tmp_path):
+    database_path = tmp_path / "legacy-current.db"
     database_url = f"sqlite+pysqlite:///{database_path}"
     engine = create_engine(database_url)
     Base.metadata.create_all(engine)
@@ -104,7 +115,54 @@ def test_matching_legacy_database_is_verified_then_stamped(tmp_path):
 
     with engine.connect() as connection:
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert revision == "20260904_0001"
+    assert revision == "20260905_0002"
+
+
+def test_unversioned_historical_baseline_is_verified_then_migrated(tmp_path):
+    database_path = tmp_path / "legacy-baseline.db"
+    database_url = f"sqlite+pysqlite:///{database_path}"
+    created = _run_alembic_upgrade(database_url, "20260904_0001")
+    assert created.returncode == 0, created.stderr
+
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO tasks (
+                    id, title, description, project, domain, priority, status,
+                    risk_level, owner_role, created_at, updated_at
+                ) VALUES (
+                    'legacy-task', 'Legacy marker', '', 'general', 'development',
+                    'normal', 'backlog', 'low', NULL,
+                    '2026-09-05 00:00:00', '2026-09-05 00:00:00'
+                )
+                """
+            )
+        )
+        connection.exec_driver_sql("DROP TABLE alembic_version")
+
+    migrated = _run_schema_cli(database_url, "migrate")
+    assert migrated.returncode == 0, migrated.stderr
+    assert "Historical baseline 20260904_0001 verified" in migrated.stdout
+
+    with engine.connect() as connection:
+        revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        marker = connection.execute(
+            text("SELECT title FROM tasks WHERE id = 'legacy-task'")
+        ).scalar_one()
+        execution_columns = {
+            column["name"] for column in inspect(connection).get_columns("execution_runs")
+        }
+
+    assert revision == "20260905_0002"
+    assert marker == "Legacy marker"
+    assert {
+        "lease_owner",
+        "lease_generation",
+        "heartbeat_at",
+        "lease_expires_at",
+    }.issubset(execution_columns)
 
 
 def test_drifted_legacy_database_is_never_stamped(tmp_path):

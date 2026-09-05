@@ -19,13 +19,13 @@ down:
 	docker compose down
 
 restart:
-	docker compose up -d --force-recreate model-router model-gateway opencode control-plane
+	docker compose up -d --force-recreate model-router model-gateway opencode control-plane execution-worker
 
 logs:
-	docker compose logs -f --tail=200 model-router model-gateway opencode control-plane postgres
+	docker compose logs -f --tail=200 model-router model-gateway opencode control-plane execution-worker postgres
 
 manager-logs:
-	docker compose logs -f --tail=200 control-plane
+	docker compose logs -f --tail=200 control-plane execution-worker
 
 router-logs:
 	docker compose logs -f --tail=200 model-router model-gateway

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-TEMPORAL_SERVER_IMAGE="${TEMPORAL_POC_SERVER_IMAGE:-temporalio/auto-setup:1.31.2}"
+TEMPORAL_SERVER_IMAGE="${TEMPORAL_POC_SERVER_IMAGE:-temporalio/auto-setup:1.29.7}"
 POSTGRES_IMAGE="${TEMPORAL_POC_POSTGRES_IMAGE:-postgres:16-alpine}"
 POSTGRES_PASSWORD="temporal-poc-only"
 suffix="${GITHUB_RUN_ID:-local}-$$-$RANDOM"
@@ -30,12 +30,23 @@ wait_for_postgres() {
     sleep 1
   done
   echo 'ERROR: disposable PostgreSQL did not become ready' >&2
+  docker inspect "${postgres_container}" >&2 || true
   docker logs "${postgres_container}" >&2 || true
   return 1
 }
 
 host_port() {
   docker port "${temporal_container}" 7233/tcp | awk -F: 'NF {print $NF; exit}'
+}
+
+wait_for_temporal() {
+  local address="$1"
+  if ! python3 scripts/temporal_durable_poc.py wait --address "${address}" --timeout 120; then
+    echo 'ERROR: disposable Temporal server did not become ready' >&2
+    docker inspect "${temporal_container}" >&2 || true
+    docker logs "${temporal_container}" >&2 || true
+    return 1
+  fi
 }
 
 echo "[INFO] Temporal PoC server image: ${TEMPORAL_SERVER_IMAGE}"
@@ -70,11 +81,13 @@ docker run -d \
 port="$(host_port)"
 if [[ -z "${port}" ]]; then
   echo 'ERROR: Temporal host port was not published' >&2
+  docker inspect "${temporal_container}" >&2 || true
+  docker logs "${temporal_container}" >&2 || true
   exit 1
 fi
 address="127.0.0.1:${port}"
 
-python3 scripts/temporal_durable_poc.py wait --address "${address}" --timeout 120
+wait_for_temporal "${address}"
 python3 scripts/temporal_durable_poc.py exercise \
   --address "${address}" \
   --state-dir "${state_dir}/run" \
@@ -82,7 +95,7 @@ python3 scripts/temporal_durable_poc.py exercise \
 
 before_image_id="$(docker inspect --format '{{.Image}}' "${temporal_container}")"
 docker restart "${temporal_container}" >/dev/null
-python3 scripts/temporal_durable_poc.py wait --address "${address}" --timeout 120
+wait_for_temporal "${address}"
 python3 scripts/temporal_durable_poc.py verify --address "${address}" --evidence "${evidence_path}"
 after_image_id="$(docker inspect --format '{{.Image}}' "${temporal_container}")"
 

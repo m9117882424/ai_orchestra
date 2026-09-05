@@ -23,7 +23,7 @@ const approvalLabels = {
   financial_execution: "Финансовое исполнение",
 };
 
-const executionLabels = { running: "Выполняется", completed: "Готов к приемке", failed: "Ошибка", cancelled: "Остановлен" };
+const executionLabels = { queued: "В очереди", running: "Выполняется", completed: "Готов к приемке", failed: "Ошибка", cancelled: "Остановлен" };
 let progressExecutionId = null;
 let executionsByTask = new Map();
 
@@ -94,7 +94,7 @@ async function loadExecutions() {
 async function startExecution(taskId) {
   try {
     await api(`/api/tasks/${taskId}/execute`, { method: "POST" });
-    toast("AI Orchestra начал выполнение задачи");
+    toast("AI Orchestra поставил задачу в очередь выполнения");
     await refreshAll();
   } catch (error) { toast(error.message, true); }
 }
@@ -131,8 +131,13 @@ async function showExecutionProgress(id) {
 async function loadExecutionProgress(id) {
   const progress = await api(`/api/executions/${id}/progress`);
   const summary = document.getElementById("progress-summary");
+  const activityLabel = progress.status === "running"
+    ? "● активен"
+    : progress.status === "queued"
+      ? "● в очереди"
+      : executionLabels[progress.status] || progress.status;
   summary.replaceChildren(
-    node("span", "", progress.status === "running" ? "● активен" : executionLabels[progress.status] || progress.status),
+    node("span", "", activityLabel),
     node("span", "", `Этап: ${progress.stage}`),
     node("span", "", `OpenCode: ${progress.session_state}`),
     node("span", "", `Время: ${formatElapsed(progress.elapsed_seconds)}`)
@@ -140,7 +145,10 @@ async function loadExecutionProgress(id) {
   const feed = document.getElementById("progress-feed");
   feed.replaceChildren();
   if (!progress.items.length) {
-    feed.append(node("p", "empty", "OpenCode работает, но текстовых сообщений пока нет."));
+    const emptyText = progress.status === "queued"
+      ? "Запуск сохранен и ожидает dispatch worker."
+      : "OpenCode работает, но текстовых сообщений пока нет.";
+    feed.append(node("p", "empty", emptyText));
     return;
   }
   progress.items.forEach((item) => {
@@ -209,7 +217,7 @@ async function loadTasks() {
       executionCell.append(start);
     } else if (run) {
       executionCell.append(node("span", `pill ${run.status}`, executionLabels[run.status] || run.status));
-      if (run.status === "running") {
+      if (["queued", "running"].includes(run.status)) {
         const actions = node("div", "stack-actions");
         const progress = node("button", "text-button", "Ход работы");
         const refresh = node("button", "text-button", "Обновить");
@@ -361,9 +369,10 @@ document.getElementById("task-form").addEventListener("submit", async (event) =>
 refreshAll();
 
 setInterval(async () => {
-  const running = [...executionsByTask.values()].filter((run) => run.status === "running");
-  if (!running.length) return;
-  for (const run of running) {
+  const active = [...executionsByTask.values()].filter((run) => ["queued", "running"].includes(run.status));
+  if (!active.length) return;
+  for (const run of active) {
+    if (run.status !== "running") continue;
     try { await api(`/api/executions/${run.id}/refresh`, { method: "POST" }); } catch (_) { /* transient */ }
   }
   await refreshAll();

@@ -7,14 +7,10 @@ from control_plane.app.production import app as production_app
 class FakeOpenCode:
     def __init__(self):
         self.status = "busy"
-
-    def create_session(self, title):
-        return {"id": "production-observer-session"}
-
-    def prompt_async(self, session_id, prompt):
-        return None
+        self.status_calls = 0
 
     def session_statuses(self):
+        self.status_calls += 1
         return {"production-observer-session": {"type": self.status}}
 
     def messages(self, session_id):
@@ -61,8 +57,10 @@ def test_production_refresh_is_observer_only(auth, mutation_headers):
         assert isinstance(refreshed.json(), list)
         run = next(item for item in executions if item["id"] == execution_id)
         task = next(item for item in tasks if item["id"] == task_id)
-        assert run["status"] == "running"
+        assert run["status"] == "queued"
+        assert run["stage"] == "dispatch_pending"
         assert run["result"] == ""
         assert task["status"] == "in_progress"
+        assert fake.status_calls == 0
     finally:
         core_app.dependency_overrides.pop(get_opencode_client, None)

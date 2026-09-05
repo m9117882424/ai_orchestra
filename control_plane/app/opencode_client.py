@@ -12,6 +12,10 @@ class OpenCodeError(RuntimeError):
     pass
 
 
+class OpenCodeNotFound(OpenCodeError):
+    pass
+
+
 def infer_session_state(messages: list[dict]) -> str:
     """Infer state only when OpenCode omits a session from /session/status.
 
@@ -42,12 +46,8 @@ def infer_session_state(messages: list[dict]) -> str:
     finish = str(info.get("finish") or "").lower()
     if finish in {"stop", "end_turn", "length", "complete", "completed"}:
         return "idle"
-
-    # A completed assistant message ending in tool-calls normally expects another
-    # model turn. Treat it as busy rather than declaring false success.
     if finish == "tool-calls":
         return "busy"
-
     return "unknown"
 
 
@@ -128,19 +128,54 @@ class OpenCodeClient:
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 raw = response.read().decode("utf-8", errors="replace")
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise OpenCodeNotFound(str(exc)) from exc
+            raise OpenCodeError(str(exc)) from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
             raise OpenCodeError(str(exc)) from exc
         return json.loads(raw) if raw else None
 
-    def create_session(self, title: str) -> dict:
-        return self._request("POST", "/session", {"title": title})
+    def create_session(self, title: str, *, metadata: dict | None = None) -> dict:
+        payload: dict = {"title": title}
+        if metadata:
+            payload["metadata"] = metadata
+        result = self._request("POST", "/session", payload)
+        if not isinstance(result, dict):
+            raise OpenCodeError("OpenCode /session вернул неожиданный формат")
+        return result
 
-    def prompt_async(self, session_id: str, prompt: str) -> None:
-        self._request(
-            "POST",
-            f"/session/{session_id}/prompt_async",
-            {"agent": "department-lead", "parts": [{"type": "text", "text": prompt}]},
-        )
+    def list_sessions(self, *, limit: int = 200) -> list[dict]:
+        result = self._request("GET", f"/session?limit={limit}") or []
+        if not isinstance(result, list):
+            raise OpenCodeError("OpenCode /session вернул неожиданный формат")
+        return [item for item in result if isinstance(item, dict)]
+
+    def sessions_for_execution(self, execution_id: str) -> list[dict]:
+        matches = []
+        for session in self.list_sessions():
+            metadata = session.get("metadata") or {}
+            if isinstance(metadata, dict) and metadata.get("ai_orchestra_execution_id") == execution_id:
+                matches.append(session)
+        return matches
+
+    def message(self, session_id: str, message_id: str) -> dict | None:
+        try:
+            result = self._request("GET", f"/session/{session_id}/message/{message_id}")
+        except OpenCodeNotFound:
+            return None
+        if not isinstance(result, dict):
+            raise OpenCodeError("OpenCode message lookup вернул неожиданный формат")
+        return result
+
+    def prompt_async(self, session_id: str, prompt: str, *, message_id: str | None = None) -> None:
+        payload: dict = {
+            "agent": "department-lead",
+            "parts": [{"type": "text", "text": prompt}],
+        }
+        if message_id:
+            payload["messageID"] = message_id
+        self._request("POST", f"/session/{session_id}/prompt_async", payload)
 
     def session_statuses(self) -> dict:
         statuses = self._request("GET", "/session/status") or {}
@@ -157,9 +192,6 @@ class OpenCodeClient:
         if session_id not in self._last_statuses:
             inferred = infer_session_state(messages)
             if inferred != "unknown":
-                # session_statuses() returns this same dict object. Mutating it here
-                # lets the caller safely consume an inferred state after fetching
-                # messages, while explicit OpenCode status always wins.
                 self._last_statuses[session_id] = {"type": inferred, "inferred": True}
 
         return decorate_progress_messages(messages)

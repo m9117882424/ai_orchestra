@@ -83,7 +83,7 @@ print('STARTED')
 
 
 def test_declared_schema_head_is_stable():
-    assert head_revision() == "20260905_0002"
+    assert head_revision() == "20260905_0003"
 
 
 def test_fresh_database_is_created_by_alembic(tmp_path):
@@ -97,9 +97,15 @@ def test_fresh_database_is_created_by_alembic(tmp_path):
     with engine.connect() as connection:
         tables = set(inspect(connection).get_table_names())
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        session_column = next(
+            column
+            for column in inspect(connection).get_columns("execution_runs")
+            if column["name"] == "opencode_session_id"
+        )
 
     assert set(Base.metadata.tables).issubset(tables)
-    assert revision == "20260905_0002"
+    assert revision == "20260905_0003"
+    assert session_column["nullable"] is True
 
 
 def test_matching_current_unversioned_database_is_verified_then_stamped(tmp_path):
@@ -115,7 +121,7 @@ def test_matching_current_unversioned_database_is_verified_then_stamped(tmp_path
 
     with engine.connect() as connection:
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert revision == "20260905_0002"
+    assert revision == "20260905_0003"
 
 
 def test_unversioned_historical_baseline_is_verified_then_migrated(tmp_path):
@@ -154,8 +160,13 @@ def test_unversioned_historical_baseline_is_verified_then_migrated(tmp_path):
         execution_columns = {
             column["name"] for column in inspect(connection).get_columns("execution_runs")
         }
+        session_column = next(
+            column
+            for column in inspect(connection).get_columns("execution_runs")
+            if column["name"] == "opencode_session_id"
+        )
 
-    assert revision == "20260905_0002"
+    assert revision == "20260905_0003"
     assert marker == "Legacy marker"
     assert {
         "lease_owner",
@@ -163,6 +174,36 @@ def test_unversioned_historical_baseline_is_verified_then_migrated(tmp_path):
         "heartbeat_at",
         "lease_expires_at",
     }.issubset(execution_columns)
+    assert session_column["nullable"] is True
+
+
+def test_versioned_0002_database_upgrades_to_queued_dispatch_schema(tmp_path):
+    database_path = tmp_path / "revision-0002.db"
+    database_url = f"sqlite+pysqlite:///{database_path}"
+    created = _run_alembic_upgrade(database_url, "20260905_0002")
+    assert created.returncode == 0, created.stderr
+
+    engine = create_engine(database_url)
+    with engine.connect() as connection:
+        before = next(
+            column
+            for column in inspect(connection).get_columns("execution_runs")
+            if column["name"] == "opencode_session_id"
+        )
+    assert before["nullable"] is False
+
+    migrated = _run_schema_cli(database_url, "migrate")
+    assert migrated.returncode == 0, migrated.stderr
+
+    with engine.connect() as connection:
+        revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        after = next(
+            column
+            for column in inspect(connection).get_columns("execution_runs")
+            if column["name"] == "opencode_session_id"
+        )
+    assert revision == "20260905_0003"
+    assert after["nullable"] is True
 
 
 def test_drifted_legacy_database_is_never_stamped(tmp_path):

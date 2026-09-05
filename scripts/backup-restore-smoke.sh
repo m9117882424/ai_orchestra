@@ -82,9 +82,9 @@ if [[ "$source_revision" != "20260904_0001" ]]; then
   exit 1
 fi
 
-# Production before PR14/15 adoption could contain the baseline shape without an
-# Alembic marker. Reproduce that exact state so restore exercises fail-closed legacy
-# recognition: verify 0001 shape -> stamp 0001 -> upgrade to head 0002.
+# Production before Alembic adoption could contain the baseline shape without a
+# marker. Reproduce that exact state so restore exercises fail-closed recognition:
+# verify 0001 shape -> stamp 0001 -> upgrade through lease 0002 to dispatch 0003.
 docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U ai_orchestra -d ai_orchestra \
   -c 'DROP TABLE alembic_version' >/dev/null
 
@@ -121,12 +121,12 @@ sha = hashlib.sha256(archive.read_bytes()).hexdigest()
 assert payload["result"] == "success"
 assert payload["source_backup_sha256"] == sha
 assert payload["pre_migration_revision"] == "unversioned"
-assert payload["post_migration_revision"] == "20260905_0002"
+assert payload["post_migration_revision"] == "20260905_0003"
 assert payload["restored_table_counts"].get("audit_events", 0) >= 1
 assert payload["restored_table_counts"].get("alembic_version", 0) == 1
 assert payload["observed_restore_rto_seconds"] >= 0
 assert payload["observed_backup_age_seconds"] >= 0
-print("[OK] Historical 0001 backup was restored, adopted to 0002 and retained the seeded audit marker")
+print("[OK] Historical 0001 backup was restored, adopted to 0003 and retained the seeded audit marker")
 PY
 
 echo "[OK] Backup/restore smoke passed"

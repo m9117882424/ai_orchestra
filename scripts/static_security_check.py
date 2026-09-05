@@ -160,6 +160,10 @@ def main() -> int:
     main_text = (ROOT / "control_plane/app/main.py").read_text(encoding="utf-8")
     assert "Base.metadata.create_all" not in main_text
     assert ".metadata.create_all(" not in main_text
+    assert "opencode.create_session" not in main_text, "HTTP execute boundary must persist before OpenCode side effects"
+    assert "opencode.prompt_async" not in main_text, "HTTP execute boundary must not dispatch prompts"
+    assert 'status="queued"' in main_text
+    assert 'stage="dispatch_pending"' in main_text
 
     db_text = (ROOT / "control_plane/app/db.py").read_text(encoding="utf-8")
     schema_cli_text = (ROOT / "control_plane/app/schema_cli.py").read_text(encoding="utf-8")
@@ -202,6 +206,11 @@ def main() -> int:
     assert "run.lease_generation" in worker_text
     assert "expires_at <= now" in worker_text
     assert "Rejected stale execution observation" in worker_text
+    assert 'ACTIVE_EXECUTION_STATUSES = ("queued", "running")' in worker_text
+    assert "sessions_for_execution" in worker_text
+    assert "execution_message_id" in worker_text
+    assert "_renew_before_external_side_effect" in worker_text
+    assert 'minimum=60' in worker_text, "Runtime execution lease must exceed the 30s OpenCode HTTP timeout"
 
     shared = (ROOT / "config/model-router.shared.yaml").read_text(encoding="utf-8")
     direct = (ROOT / "config/model-router.separate.yaml").read_text(encoding="utf-8")

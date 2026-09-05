@@ -70,6 +70,7 @@ DbSession = Annotated[Session, Depends(get_db)]
 Manager = Annotated[str, Depends(require_manager)]
 Mutation = Annotated[None, Depends(require_control_request)]
 
+
 def get_opencode_client() -> OpenCodeClient:
     settings = get_settings()
     return OpenCodeClient(
@@ -77,6 +78,7 @@ def get_opencode_client() -> OpenCodeClient:
         settings.opencode_username,
         settings.opencode_password,
     )
+
 
 OpenCode = Annotated[OpenCodeClient, Depends(get_opencode_client)]
 
@@ -326,30 +328,6 @@ def get_capability_guard(db: DbSession, _: Manager) -> CapabilityGuard:
     return guard
 
 
-def execution_prompt(task: Task) -> str:
-    return f"""Ты руководитель виртуального отдела разработки AI Orchestra.
-
-Выполни задачу как руководитель отдела: декомпозируй, при необходимости делегируй профильным агентам, организуй независимую QA-проверку и верни руководителю итог.
-
-Задача: {task.title}
-Проект: {task.project}
-Направление: {task.domain}
-Приоритет: {task.priority}
-Риск: {task.risk_level}
-
-Описание и критерии приемки:
-{task.description or "Дополнительное описание не задано."}
-
-Ограничения:
-- не выполняй production deploy;
-- не делай git push;
-- не запрашивай и не раскрывай секреты;
-- не выполняй внешнюю запись или финансовые операции;
-- если действие требует такого разрешения, остановись и явно укажи требуемое согласование;
-- в финале дай краткое резюме, выполненные проверки, измененные файлы/артефакты и открытые риски.
-"""
-
-
 @app.get("/api/executions", response_model=list[ExecutionRead])
 def list_executions(
     db: DbSession,
@@ -367,8 +345,8 @@ def start_execution(
     db: DbSession,
     manager: Manager,
     _: Mutation,
-    opencode: OpenCode,
 ) -> ExecutionRun:
+    """Persist execution intent transactionally; the worker owns external dispatch."""
     task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
     if task is None:
         raise HTTPException(status_code=404, detail="Задача не найдена")
@@ -379,25 +357,17 @@ def start_execution(
     active = db.scalar(
         select(ExecutionRun).where(
             ExecutionRun.task_id == task.id,
-            ExecutionRun.status == "running",
+            ExecutionRun.status.in_(("queued", "running")),
         )
     )
     if active is not None:
         raise HTTPException(status_code=409, detail="Для задачи уже есть активный запуск")
-    try:
-        session = opencode.create_session(f"AI Orchestra · {task.title[:80]}")
-        session_id = str(session.get("id") or session.get("sessionID") or "")
-        if not session_id:
-            raise OpenCodeError("OpenCode не вернул session id")
-        opencode.prompt_async(session_id, execution_prompt(task))
-    except OpenCodeError as exc:
-        raise HTTPException(status_code=502, detail=f"OpenCode недоступен: {exc}") from exc
 
     run = ExecutionRun(
         task_id=task.id,
-        status="running",
-        stage="department_lead",
-        opencode_session_id=session_id,
+        status="queued",
+        stage="dispatch_pending",
+        opencode_session_id=None,
         assigned_roles=["department-lead"],
     )
     db.add(run)
@@ -408,10 +378,10 @@ def start_execution(
     write_audit(
         db,
         actor=manager,
-        action="execution.started",
+        action="execution.queued",
         entity_type="execution",
         entity_id=run.id,
-        details={"task_id": task.id, "session_id": session_id},
+        details={"task_id": task.id},
     )
     db.commit()
     db.refresh(run)
@@ -429,7 +399,7 @@ def refresh_execution(
     run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == execution_id).with_for_update())
     if run is None:
         raise HTTPException(status_code=404, detail="Запуск не найден")
-    if run.status != "running":
+    if run.status != "running" or not run.opencode_session_id:
         return run
     try:
         statuses = opencode.session_statuses()
@@ -474,14 +444,36 @@ def abort_execution(
     run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == execution_id).with_for_update())
     if run is None:
         raise HTTPException(status_code=404, detail="Запуск не найден")
+    if run.status == "queued":
+        run.status = "cancelled"
+        run.stage = "stopped"
+        run.lease_owner = None
+        run.lease_expires_at = None
+        run.finished_at = datetime.now(timezone.utc)
+        run.updated_at = datetime.now(timezone.utc)
+        write_audit(
+            db,
+            actor=manager,
+            action="execution.cancelled",
+            entity_type="execution",
+            entity_id=run.id,
+            details={"task_id": run.task_id, "phase": "dispatch"},
+        )
+        db.commit()
+        db.refresh(run)
+        return run
     if run.status != "running":
         return run
+    if not run.opencode_session_id:
+        raise HTTPException(status_code=409, detail="Активный запуск не имеет OpenCode session id")
     try:
         opencode.abort(run.opencode_session_id)
     except OpenCodeError as exc:
         raise HTTPException(status_code=502, detail=f"Не удалось остановить OpenCode: {exc}") from exc
     run.status = "cancelled"
     run.stage = "stopped"
+    run.lease_owner = None
+    run.lease_expires_at = None
     run.finished_at = datetime.now(timezone.utc)
     run.updated_at = datetime.now(timezone.utc)
     write_audit(
@@ -490,7 +482,7 @@ def abort_execution(
         action="execution.cancelled",
         entity_type="execution",
         entity_id=run.id,
-        details={"task_id": run.task_id},
+        details={"task_id": run.task_id, "phase": "running"},
     )
     db.commit()
     db.refresh(run)
@@ -530,6 +522,16 @@ def _progress_items(messages: list[dict]) -> list[dict]:
     return items[-12:]
 
 
+def _execution_elapsed_seconds(run: ExecutionRun) -> int:
+    now = run.finished_at or datetime.now(timezone.utc)
+    created = run.created_at
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return max(0, int((now - created).total_seconds()))
+
+
 @app.get("/api/executions/{execution_id}/progress", response_model=ExecutionProgressRead)
 def execution_progress(
     execution_id: str,
@@ -540,6 +542,15 @@ def execution_progress(
     run = db.get(ExecutionRun, execution_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Запуск не найден")
+    if not run.opencode_session_id:
+        return {
+            "execution_id": run.id,
+            "status": run.status,
+            "stage": run.stage,
+            "session_state": "queued" if run.status == "queued" else "unknown",
+            "elapsed_seconds": _execution_elapsed_seconds(run),
+            "items": [],
+        }
     try:
         statuses = opencode.session_statuses()
         messages = opencode.messages(run.opencode_session_id)
@@ -547,17 +558,11 @@ def execution_progress(
         raise HTTPException(status_code=502, detail=f"Не удалось получить прогресс OpenCode: {exc}") from exc
     state = statuses.get(run.opencode_session_id) or {}
     state_type = state.get("type") if isinstance(state, dict) else str(state)
-    now = run.finished_at or datetime.now(timezone.utc)
-    created = run.created_at
-    if created.tzinfo is None:
-        created = created.replace(tzinfo=timezone.utc)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
     return {
         "execution_id": run.id,
         "status": run.status,
         "stage": run.stage,
-        "session_state": state_type or "unknown",
-        "elapsed_seconds": max(0, int((now - created).total_seconds())),
+        "session_state": state_type or ("dispatching" if run.status == "queued" else "unknown"),
+        "elapsed_seconds": _execution_elapsed_seconds(run),
         "items": _progress_items(messages),
     }

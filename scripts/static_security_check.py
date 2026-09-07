@@ -90,6 +90,7 @@ def main() -> int:
     assert worker.get("read_only") is True
     assert worker.get("command") == ["python", "-m", "app.execution_worker"]
     assert worker.get("image") == services["control-plane"].get("image")
+    assert worker.get("healthcheck"), "Execution worker must expose process liveness"
 
     # OpenCode talks only to the inference gateway with a non-admin client credential.
     gateway = json.loads((ROOT / "config/opencode.gateway.json").read_text(encoding="utf-8"))
@@ -106,6 +107,7 @@ def main() -> int:
     assert "OPENCODE_VERSION=1.18.27" in env_text
     assert "LITELLM_VERSION=1.98.0" in env_text
     assert "CONTROL_PLANE_SCHEMA_MODE=" not in env_text
+    assert "CONTROL_PLANE_EXECUTION_TIMEOUT_SECONDS=7200" in env_text
     assert "BACKUP_OFFSITE_ENCRYPTION_AT_REST_CONFIRMED=no" in env_text
     assert "BACKUP_OFFSITE_AUTHENTICATED_TRANSPORT_CONFIRMED=no" in env_text
 
@@ -164,6 +166,10 @@ def main() -> int:
     assert "opencode.prompt_async" not in main_text, "HTTP execute boundary must not dispatch prompts"
     assert 'status="queued"' in main_text
     assert 'stage="dispatch_pending"' in main_text
+    assert "/api/executions/{execution_id}/refresh" not in main_text
+    assert "deadline_at=" in main_text
+    assert 'action="execution.cancel_requested"' in main_text
+    assert "opencode.abort" not in main_text
 
     db_text = (ROOT / "control_plane/app/db.py").read_text(encoding="utf-8")
     schema_cli_text = (ROOT / "control_plane/app/schema_cli.py").read_text(encoding="utf-8")
@@ -198,7 +204,14 @@ def main() -> int:
     models_text = (ROOT / "control_plane/app/models.py").read_text(encoding="utf-8")
     for marker in PRODUCT_POLICY_MARKERS:
         assert marker not in models_text, f"Product policy leaked into Orchestra core: {marker}"
-    for marker in ("lease_owner", "lease_generation", "heartbeat_at", "lease_expires_at"):
+    for marker in (
+        "lease_owner",
+        "lease_generation",
+        "heartbeat_at",
+        "lease_expires_at",
+        "deadline_at",
+        "cancel_requested_at",
+    ):
         assert marker in models_text, f"Execution fencing state missing: {marker}"
 
     worker_text = (ROOT / "control_plane/app/execution_worker.py").read_text(encoding="utf-8")
@@ -209,7 +222,14 @@ def main() -> int:
     assert 'ACTIVE_EXECUTION_STATUSES = ("queued", "running")' in worker_text
     assert "sessions_for_execution" in worker_text
     assert "execution_message_id" in worker_text
+    assert "execution_part_id" in worker_text
     assert "_renew_before_external_side_effect" in worker_text
+    assert "timeout_execution" in worker_text
+    assert "mark_timeout_pending" in worker_text
+    assert "cancel_execution" in worker_text
+    assert "mark_cancel_pending" in worker_text
+    assert "delete_session" in worker_text
+    assert "write_worker_health" in worker_text
     assert 'minimum=60' in worker_text, "Runtime execution lease must exceed the 30s OpenCode HTTP timeout"
 
     shared = (ROOT / "config/model-router.shared.yaml").read_text(encoding="utf-8")

@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
 
@@ -30,7 +30,7 @@ from .schemas import (
     UsageRead,
 )
 from .services import current_month_cost, seed_defaults, write_audit
-from .opencode_client import OpenCodeClient, OpenCodeError, extract_last_assistant_text
+from .opencode_client import OpenCodeClient, OpenCodeError
 from .settings import get_settings
 
 
@@ -56,7 +56,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="AI Orchestra Control Plane",
-    version="0.4.1",
+    version="0.6.1",
     docs_url=None,
     redoc_url=None,
     lifespan=lifespan,
@@ -363,17 +363,19 @@ def start_execution(
     if active is not None:
         raise HTTPException(status_code=409, detail="Для задачи уже есть активный запуск")
 
+    now = datetime.now(timezone.utc)
     run = ExecutionRun(
         task_id=task.id,
         status="queued",
         stage="dispatch_pending",
         opencode_session_id=None,
         assigned_roles=["department-lead"],
+        deadline_at=now + timedelta(seconds=get_settings().execution_timeout_seconds),
     )
     db.add(run)
     if task.status in {"backlog", "planned", "failed"}:
         task.status = "in_progress"
-    task.updated_at = datetime.now(timezone.utc)
+    task.updated_at = now
     db.flush()
     write_audit(
         db,
@@ -388,101 +390,35 @@ def start_execution(
     return run
 
 
-@app.post("/api/executions/{execution_id}/refresh", response_model=ExecutionRead)
-def refresh_execution(
-    execution_id: str,
-    db: DbSession,
-    manager: Manager,
-    _: Mutation,
-    opencode: OpenCode,
-) -> ExecutionRun:
-    run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == execution_id).with_for_update())
-    if run is None:
-        raise HTTPException(status_code=404, detail="Запуск не найден")
-    if run.status != "running" or not run.opencode_session_id:
-        return run
-    try:
-        statuses = opencode.session_statuses()
-        messages = opencode.messages(run.opencode_session_id)
-    except OpenCodeError as exc:
-        raise HTTPException(status_code=502, detail=f"Не удалось получить статус OpenCode: {exc}") from exc
-
-    state = statuses.get(run.opencode_session_id) or {}
-    state_type = state.get("type") if isinstance(state, dict) else str(state)
-    result = extract_last_assistant_text(messages)
-    if state_type == "idle" and result:
-        run.status = "completed"
-        run.stage = "manager_review"
-        run.result = result
-        run.finished_at = datetime.now(timezone.utc)
-        task = db.get(Task, run.task_id)
-        if task and task.status in {"in_progress", "waiting_approval"}:
-            task.status = "qa"
-            task.updated_at = datetime.now(timezone.utc)
-        write_audit(
-            db,
-            actor=manager,
-            action="execution.completed",
-            entity_type="execution",
-            entity_id=run.id,
-            details={"task_id": run.task_id},
-        )
-    run.updated_at = datetime.now(timezone.utc)
-    db.commit()
-    db.refresh(run)
-    return run
-
-
 @app.post("/api/executions/{execution_id}/abort", response_model=ExecutionRead)
 def abort_execution(
     execution_id: str,
     db: DbSession,
     manager: Manager,
     _: Mutation,
-    opencode: OpenCode,
 ) -> ExecutionRun:
     run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == execution_id).with_for_update())
     if run is None:
         raise HTTPException(status_code=404, detail="Запуск не найден")
-    if run.status == "queued":
-        run.status = "cancelled"
-        run.stage = "stopped"
-        run.lease_owner = None
-        run.lease_expires_at = None
-        run.finished_at = datetime.now(timezone.utc)
-        run.updated_at = datetime.now(timezone.utc)
-        write_audit(
-            db,
-            actor=manager,
-            action="execution.cancelled",
-            entity_type="execution",
-            entity_id=run.id,
-            details={"task_id": run.task_id, "phase": "dispatch"},
-        )
-        db.commit()
-        db.refresh(run)
+    if run.status not in {"queued", "running"} or run.cancel_requested_at is not None:
         return run
-    if run.status != "running":
-        return run
-    if not run.opencode_session_id:
-        raise HTTPException(status_code=409, detail="Активный запуск не имеет OpenCode session id")
-    try:
-        opencode.abort(run.opencode_session_id)
-    except OpenCodeError as exc:
-        raise HTTPException(status_code=502, detail=f"Не удалось остановить OpenCode: {exc}") from exc
-    run.status = "cancelled"
-    run.stage = "stopped"
+
+    now = datetime.now(timezone.utc)
+    run.cancel_requested_at = now
+    run.stage = "cancel_requested"
+    run.error = ""
+    # Immediately fence a worker that may still hold the previous generation.
+    run.lease_generation = int(run.lease_generation or 0) + 1
     run.lease_owner = None
     run.lease_expires_at = None
-    run.finished_at = datetime.now(timezone.utc)
-    run.updated_at = datetime.now(timezone.utc)
+    run.updated_at = now
     write_audit(
         db,
         actor=manager,
-        action="execution.cancelled",
+        action="execution.cancel_requested",
         entity_type="execution",
         entity_id=run.id,
-        details={"task_id": run.task_id, "phase": "running"},
+        details={"task_id": run.task_id, "status": run.status},
     )
     db.commit()
     db.refresh(run)
@@ -542,6 +478,20 @@ def execution_progress(
     run = db.get(ExecutionRun, execution_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Запуск не найден")
+    if run.status not in {"queued", "running"}:
+        return {
+            "execution_id": run.id,
+            "status": run.status,
+            "stage": run.stage,
+            "session_state": run.status,
+            "elapsed_seconds": _execution_elapsed_seconds(run),
+            "heartbeat_at": run.heartbeat_at,
+            "deadline_at": run.deadline_at,
+            "cancel_requested_at": run.cancel_requested_at,
+            "lease_generation": run.lease_generation,
+            "error": run.error,
+            "items": [],
+        }
     if not run.opencode_session_id:
         return {
             "execution_id": run.id,
@@ -549,13 +499,30 @@ def execution_progress(
             "stage": run.stage,
             "session_state": "queued" if run.status == "queued" else "unknown",
             "elapsed_seconds": _execution_elapsed_seconds(run),
+            "heartbeat_at": run.heartbeat_at,
+            "deadline_at": run.deadline_at,
+            "cancel_requested_at": run.cancel_requested_at,
+            "lease_generation": run.lease_generation,
+            "error": run.error,
             "items": [],
         }
     try:
         statuses = opencode.session_statuses()
         messages = opencode.messages(run.opencode_session_id)
     except OpenCodeError as exc:
-        raise HTTPException(status_code=502, detail=f"Не удалось получить прогресс OpenCode: {exc}") from exc
+        return {
+            "execution_id": run.id,
+            "status": run.status,
+            "stage": run.stage,
+            "session_state": "unavailable",
+            "elapsed_seconds": _execution_elapsed_seconds(run),
+            "heartbeat_at": run.heartbeat_at,
+            "deadline_at": run.deadline_at,
+            "cancel_requested_at": run.cancel_requested_at,
+            "lease_generation": run.lease_generation,
+            "error": str(exc)[:500],
+            "items": [],
+        }
     state = statuses.get(run.opencode_session_id) or {}
     state_type = state.get("type") if isinstance(state, dict) else str(state)
     return {
@@ -564,5 +531,10 @@ def execution_progress(
         "stage": run.stage,
         "session_state": state_type or ("dispatching" if run.status == "queued" else "unknown"),
         "elapsed_seconds": _execution_elapsed_seconds(run),
+        "heartbeat_at": run.heartbeat_at,
+        "deadline_at": run.deadline_at,
+        "cancel_requested_at": run.cancel_requested_at,
+        "lease_generation": run.lease_generation,
+        "error": run.error,
         "items": _progress_items(messages),
     }

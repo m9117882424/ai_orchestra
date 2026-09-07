@@ -22,6 +22,8 @@ _REVISION_EXCLUDED_COLUMNS = {
             ("execution_runs", "lease_generation"),
             ("execution_runs", "heartbeat_at"),
             ("execution_runs", "lease_expires_at"),
+            ("execution_runs", "deadline_at"),
+            ("execution_runs", "cancel_requested_at"),
         }
     )
 }
@@ -29,6 +31,7 @@ _REVISION_EXCLUDED_INDEXES = {
     LEGACY_BASELINE_REVISION: frozenset(
         {
             ("execution_runs", ("lease_expires_at",), False),
+            ("execution_runs", ("status", "deadline_at"), False),
         }
     )
 }

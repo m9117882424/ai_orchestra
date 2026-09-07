@@ -42,6 +42,8 @@ def infer_session_state(messages: list[dict]) -> str:
     time_info = info.get("time") or {}
     if not isinstance(time_info, dict) or not time_info.get("completed"):
         return "busy"
+    if info.get("error"):
+        return "error"
 
     finish = str(info.get("finish") or "").lower()
     if finish in {"stop", "end_turn", "length", "complete", "completed"}:
@@ -134,7 +136,12 @@ class OpenCodeClient:
             raise OpenCodeError(str(exc)) from exc
         except (urllib.error.URLError, TimeoutError) as exc:
             raise OpenCodeError(str(exc)) from exc
-        return json.loads(raw) if raw else None
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise OpenCodeError("OpenCode вернул невалидный JSON") from exc
 
     def create_session(self, title: str, *, metadata: dict | None = None) -> dict:
         payload: dict = {"title": title}
@@ -168,13 +175,19 @@ class OpenCodeClient:
             raise OpenCodeError("OpenCode message lookup вернул неожиданный формат")
         return result
 
-    def prompt_async(self, session_id: str, prompt: str, *, message_id: str | None = None) -> None:
+    def prompt_async(
+        self,
+        session_id: str,
+        prompt: str,
+        *,
+        message_id: str,
+        part_id: str,
+    ) -> None:
         payload: dict = {
             "agent": "department-lead",
-            "parts": [{"type": "text", "text": prompt}],
+            "parts": [{"id": part_id, "type": "text", "text": prompt}],
+            "messageID": message_id,
         }
-        if message_id:
-            payload["messageID"] = message_id
         self._request("POST", f"/session/{session_id}/prompt_async", payload)
 
     def session_statuses(self) -> dict:
@@ -199,12 +212,17 @@ class OpenCodeClient:
     def abort(self, session_id: str) -> None:
         self._request("POST", f"/session/{session_id}/abort", {})
 
+    def delete_session(self, session_id: str) -> None:
+        self._request("DELETE", f"/session/{session_id}")
+
 
 def extract_last_assistant_text(messages: list[dict]) -> str:
     for item in reversed(messages):
         info = item.get("info") or {}
         if info.get("role") != "assistant":
             continue
+        if info.get("error"):
+            return ""
         chunks = [
             str(part["text"])
             for part in (item.get("parts") or [])

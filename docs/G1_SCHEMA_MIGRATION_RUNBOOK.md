@@ -2,14 +2,14 @@
 
 ## Purpose
 
-This runbook is the only supported path for moving the existing Control Plane PostgreSQL database onto the Alembic baseline introduced in G1.
+This runbook is the only supported path for moving the existing Control Plane PostgreSQL database through the G1 Alembic chain. The current repository head is `20260907_0004`.
 
 The first migration is special because production already contains tables created historically by SQLAlchemy `Base.metadata.create_all()`.
 
 The migration tooling therefore supports two fail-closed paths:
 
 1. **fresh database** — Alembic creates the complete schema;
-2. **legacy existing database** — the tool verifies that tables, columns, types/nullability, primary keys, foreign keys and explicit indexes match the declared ORM baseline, then stamps the database at the baseline revision without changing application data.
+2. **legacy existing database** — the tool verifies that tables, columns, types/nullability, primary keys, foreign keys and explicit indexes match the declared historical `20260904_0001` shape, stamps that exact revision, and upgrades through `0002` (lease/fencing), `0003` (durable queued dispatch), and `0004` (deadline/cancellation intent).
 
 If legacy schema differs, the tool refuses to stamp it.
 
@@ -27,38 +27,46 @@ From `/opt/ai_orchestra` after updating the repository:
 
 ```bash
 make preflight
-
-docker compose build control-plane opencode
-
+make build
 docker compose up -d postgres
-
+docker compose stop control-plane execution-worker
 make migrate
-
 make schema-check
-
-docker compose up -d --no-deps control-plane
-docker compose up -d --no-deps opencode
-
+make up
 docker compose ps
 make smoke
 ```
 
-`make migrate` creates the normal project backup before any schema action.
+`make migrate` creates the normal project backup before any schema action. The old
+Control Plane is stopped first so it cannot write lifecycle state while the schema
+and application image move together. Model Router, Gateway and OpenCode may remain
+available during this maintenance window.
+
+Do not reverse `make migrate` and `make up`: both `control-plane` and
+`execution-worker` verify the exact schema at startup and must fail closed on an old
+revision.
 
 ## Expected first production migration
 
-For the current production database the expected message is equivalent to:
+For a versioned `20260904_0001` database the expected message is equivalent to:
 
 ```text
-[OK] Existing schema verified and stamped at 20260904_0001; data unchanged
+[OK] Schema migrated to 20260907_0004
 ```
 
-This means the legacy database shape matched the migration baseline and only `alembic_version` metadata was added.
+For an unversioned database that exactly matches the historical baseline:
+
+```text
+[OK] Historical baseline 20260904_0001 verified, migrated to 20260907_0004; data unchanged
+```
+
+Active executions present during `0004` receive a fresh two-hour deadline grace
+period. Terminal execution history receives no deadline and is otherwise unchanged.
 
 If the database is already migrated, the expected message is:
 
 ```text
-[OK] Schema already at head: 20260904_0001
+[OK] Schema already at head: 20260907_0004
 ```
 
 ## Failure: legacy schema mismatch
@@ -100,7 +108,9 @@ This is defense in depth. The long-term G1/G2 target is a separate database role
 
 ## Rollback
 
-The initial baseline migration does not alter business data in the existing database; it only adds Alembic revision metadata after schema verification.
+The initial baseline stamp does not alter business data. Later G1 revisions add
+execution lifecycle columns and relax `opencode_session_id` nullability; `0004`
+backfills deadlines only for active rows.
 
 If application rollout fails after a successful baseline stamp:
 

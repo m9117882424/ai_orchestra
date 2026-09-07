@@ -12,10 +12,9 @@ class ObserverOnlyExecutionLifecycle:
     """Keep legacy manager UI refresh calls read-only in production.
 
     Older UI builds POST to /refresh while polling. Production rewrites those calls
-    to the authenticated execution-list GET before FastAPI routing, so a browser
-    cannot complete an execution or bypass worker lease/fencing. The legacy route
-    remains in the core app only as a compatibility/testing surface until removed in
-    a later API cleanup.
+    to the authenticated execution-list GET before FastAPI routing, so cached clients
+    keep working without owning lifecycle state. The mutating core route has been
+    removed; only `execution-worker` can commit completion.
     """
 
     def __init__(self, wrapped):

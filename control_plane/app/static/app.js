@@ -99,18 +99,11 @@ async function startExecution(taskId) {
   } catch (error) { toast(error.message, true); }
 }
 
-async function refreshExecution(id) {
-  try {
-    await api(`/api/executions/${id}/refresh`, { method: "POST" });
-    await refreshAll();
-  } catch (error) { toast(error.message, true); }
-}
-
 async function abortExecution(id) {
   if (!window.confirm("Остановить выполнение этой задачи?")) return;
   try {
     await api(`/api/executions/${id}/abort`, { method: "POST" });
-    toast("Выполнение остановлено");
+    toast("Запрос на остановку сохранен");
     await refreshAll();
   } catch (error) { toast(error.message, true); }
 }
@@ -131,23 +124,31 @@ async function showExecutionProgress(id) {
 async function loadExecutionProgress(id) {
   const progress = await api(`/api/executions/${id}/progress`);
   const summary = document.getElementById("progress-summary");
-  const activityLabel = progress.status === "running"
-    ? "● активен"
-    : progress.status === "queued"
-      ? "● в очереди"
-      : executionLabels[progress.status] || progress.status;
-  summary.replaceChildren(
+  const activityLabel = progress.cancel_requested_at
+    ? "● остановка запрошена"
+    : progress.status === "running"
+      ? "● активен"
+      : progress.status === "queued"
+        ? "● в очереди"
+        : executionLabels[progress.status] || progress.status;
+  const summaryItems = [
     node("span", "", activityLabel),
     node("span", "", `Этап: ${progress.stage}`),
     node("span", "", `OpenCode: ${progress.session_state}`),
-    node("span", "", `Время: ${formatElapsed(progress.elapsed_seconds)}`)
-  );
+    node("span", "", `Время: ${formatElapsed(progress.elapsed_seconds)}`),
+    node("span", "", `Lease generation: ${progress.lease_generation}`),
+  ];
+  if (progress.heartbeat_at) summaryItems.push(node("span", "", `Heartbeat: ${formatDate(progress.heartbeat_at)}`));
+  if (progress.deadline_at) summaryItems.push(node("span", "", `Deadline: ${formatDate(progress.deadline_at)}`));
+  if (progress.error) summaryItems.push(node("span", "", `Ошибка: ${progress.error}`));
+  summary.replaceChildren(...summaryItems);
   const feed = document.getElementById("progress-feed");
   feed.replaceChildren();
   if (!progress.items.length) {
-    const emptyText = progress.status === "queued"
-      ? "Запуск сохранен и ожидает dispatch worker."
-      : "OpenCode работает, но текстовых сообщений пока нет.";
+    const emptyText = progress.error
+      || (progress.status === "queued"
+        ? "Запуск сохранен и ожидает dispatch worker."
+        : "Текстовых сообщений пока нет.");
     feed.append(node("p", "empty", emptyText));
     return;
   }
@@ -221,17 +222,25 @@ async function loadTasks() {
         const actions = node("div", "stack-actions");
         const progress = node("button", "text-button", "Ход работы");
         const refresh = node("button", "text-button", "Обновить");
-        const stop = node("button", "text-button", "Остановить");
-        refresh.addEventListener("click", () => refreshExecution(run.id));
-        stop.addEventListener("click", () => abortExecution(run.id));
+        refresh.addEventListener("click", refreshAll);
         progress.addEventListener("click", () => showExecutionProgress(run.id));
-        actions.append(progress, refresh, stop);
+        actions.append(progress, refresh);
+        if (!run.cancel_requested_at) {
+          const stop = node("button", "text-button", "Остановить");
+          stop.addEventListener("click", () => abortExecution(run.id));
+          actions.append(stop);
+        }
         executionCell.append(actions);
       }
       if (run.result) {
         const result = node("button", "text-button", "Результат");
         result.addEventListener("click", () => showExecutionResult(run.result));
         executionCell.append(result);
+      }
+      if (!["queued", "running"].includes(run.status) && task.status !== "done") {
+        const restart = node("button", "text-button", "Запустить снова");
+        restart.addEventListener("click", () => startExecution(task.id));
+        executionCell.append(restart);
       }
     } else {
       executionCell.append(node("span", "task-meta", "V1: development"));
@@ -371,10 +380,6 @@ refreshAll();
 setInterval(async () => {
   const active = [...executionsByTask.values()].filter((run) => ["queued", "running"].includes(run.status));
   if (!active.length) return;
-  for (const run of active) {
-    if (run.status !== "running") continue;
-    try { await api(`/api/executions/${run.id}/refresh`, { method: "POST" }); } catch (_) { /* transient */ }
-  }
   await refreshAll();
 }, 10000);
 

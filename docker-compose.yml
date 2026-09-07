@@ -30,7 +30,7 @@ services:
   control-plane:
     build:
       context: ./control_plane
-    image: ai-development-department/control-plane:0.6.0
+    image: ai-development-department/control-plane:0.6.1
     restart: unless-stopped
     init: true
     read_only: true
@@ -49,6 +49,7 @@ services:
       CONTROL_PLANE_OPENCODE_INTERNAL_URL: http://opencode:4096
       CONTROL_PLANE_OPENCODE_USERNAME: ${OPENCODE_SERVER_USERNAME}
       CONTROL_PLANE_OPENCODE_PASSWORD: ${OPENCODE_SERVER_PASSWORD}
+      CONTROL_PLANE_EXECUTION_TIMEOUT_SECONDS: ${CONTROL_PLANE_EXECUTION_TIMEOUT_SECONDS:-7200}
       CONTROL_PLANE_DEFAULT_MONTHLY_BUDGET: ${CONTROL_PLANE_DEFAULT_MONTHLY_BUDGET:-25000}
     ports:
       - "127.0.0.1:${CONTROL_PLANE_PORT:-8088}:8080"
@@ -80,7 +81,7 @@ services:
   execution-worker:
     build:
       context: ./control_plane
-    image: ai-development-department/control-plane:0.6.0
+    image: ai-development-department/control-plane:0.6.1
     restart: unless-stopped
     init: true
     read_only: true
@@ -99,9 +100,11 @@ services:
       CONTROL_PLANE_OPENCODE_INTERNAL_URL: http://opencode:4096
       CONTROL_PLANE_OPENCODE_USERNAME: ${OPENCODE_SERVER_USERNAME}
       CONTROL_PLANE_OPENCODE_PASSWORD: ${OPENCODE_SERVER_PASSWORD}
+      CONTROL_PLANE_EXECUTION_TIMEOUT_SECONDS: ${CONTROL_PLANE_EXECUTION_TIMEOUT_SECONDS:-7200}
       CONTROL_PLANE_EXECUTION_WORKER_LEASE_SECONDS: ${CONTROL_PLANE_EXECUTION_WORKER_LEASE_SECONDS:-120}
       CONTROL_PLANE_EXECUTION_WORKER_MAX_ACTIVE: ${CONTROL_PLANE_EXECUTION_WORKER_MAX_ACTIVE:-4}
       CONTROL_PLANE_EXECUTION_WORKER_POLL_SECONDS: ${CONTROL_PLANE_EXECUTION_WORKER_POLL_SECONDS:-5}
+      CONTROL_PLANE_EXECUTION_WORKER_HEALTH_PATH: /tmp/ai-orchestra-execution-worker.heartbeat
     networks:
       - control-db
       - model-net
@@ -116,6 +119,16 @@ services:
       - ALL
     mem_limit: 256m
     cpus: 0.35
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,time; p='/tmp/ai-orchestra-execution-worker.heartbeat'; assert os.path.isfile(p) and time.time()-os.path.getmtime(p) < 180"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     logging:
       driver: json-file
       options:

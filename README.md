@@ -4,13 +4,14 @@ AI Orchestra — самостоятельный AI-отдел, который п
 
 **AI Orchestra не является частью Trading Platform.** Trading Platform, Arvento, Wialon, Fuel Monitor, BI и другие системы — отдельные продукты, которые отдел может разрабатывать.
 
-> Статус: pilot 0.3 hardening. `git push`, merge, production deploy, доступ к product secrets, запись во внешние production-системы и финансовое исполнение технически не входят в разрешенный контур отдела.
+> Статус репозитория: pilot 0.6.1, G1 Durable Core closure candidate. Это не означает автоматический rollout на сервер. `git push`, merge, production deploy, доступ к product secrets, запись во внешние production-системы и финансовое исполнение технически не входят в разрешенный контур отдела.
 
 ## Ключевые свойства
 
 - OpenCode Web как рабочее место AI-руководителя и специалистов;
 - кабинет руководителя на FastAPI;
 - PostgreSQL для задач, согласований, бюджетов и audit trail;
+- отдельный `execution-worker`: durable queue, lease/heartbeat, fencing, deadline и recovery без участия браузера;
 - обязательные QA и independent review;
 - одна задача — одна ветка/worktree — один агент-редактор;
 - inference-only Model Gateway между OpenCode и Model Router;
@@ -22,7 +23,7 @@ AI Orchestra — самостоятельный AI-отдел, который п
 - pinned runtime versions, resource limits и localhost-only web ports;
 - backup без `.env`, `.env.providers` и OpenCode credential store.
 
-Подробные границы описаны в [`docs/ARCHITECTURE_V1.md`](docs/ARCHITECTURE_V1.md).
+Подробные границы описаны в [`docs/ARCHITECTURE_V1.md`](docs/ARCHITECTURE_V1.md), а lifecycle выполнения — в [`docs/G1_EXECUTION_LIFECYCLE.md`](docs/G1_EXECUTION_LIFECYCLE.md).
 
 ## Архитектура
 
@@ -409,13 +410,21 @@ curl -u "opencode:ПАРОЛЬ" http://127.0.0.1:4096/global/health
 
 ## Обновление
 
+Для обновления, содержащего schema migration, нельзя запускать новый Control Plane
+до `make migrate`. Полный порядок и stop conditions описаны в
+[`docs/G1_SCHEMA_MIGRATION_RUNBOOK.md`](docs/G1_SCHEMA_MIGRATION_RUNBOOK.md).
+
 ```bash
 make backup
 git pull --ff-only
 make init
 make preflight
 make build
+docker compose stop control-plane execution-worker
+docker compose up -d postgres
+make migrate
 make up
+make schema-check
 make smoke
 ```
 

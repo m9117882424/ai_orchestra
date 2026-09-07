@@ -7,6 +7,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Callable
 from uuid import uuid4
 
@@ -17,11 +18,17 @@ from .db import SessionLocal
 from .execution_protocol import (
     EXECUTION_METADATA_KEY,
     execution_message_id,
+    execution_part_id,
     execution_prompt,
     execution_session_title,
 )
 from .models import ExecutionRun, Task
-from .opencode_client import OpenCodeClient, OpenCodeError, extract_last_assistant_text
+from .opencode_client import (
+    OpenCodeClient,
+    OpenCodeError,
+    OpenCodeNotFound,
+    extract_last_assistant_text,
+)
 from .schema import assert_database_shape
 from .services import write_audit
 from .settings import get_settings
@@ -71,6 +78,8 @@ class ExecutionLease:
     generation: int
     status: str
     opencode_session_id: str | None
+    deadline_at: datetime
+    cancel_requested_at: datetime | None
 
 
 class ExecutionLeaseManager:
@@ -81,11 +90,20 @@ class ExecutionLeaseManager:
     only when the caller still owns the exact unexpired generation.
     """
 
-    def __init__(self, worker_id: str, *, lease_seconds: int = 120):
+    def __init__(
+        self,
+        worker_id: str,
+        *,
+        lease_seconds: int = 120,
+        execution_timeout_seconds: int = 7200,
+    ):
         if lease_seconds < 30:
             raise ValueError("lease_seconds must be at least 30")
+        if not 60 <= execution_timeout_seconds <= 604800:
+            raise ValueError("execution_timeout_seconds must be between 60 and 604800")
         self.worker_id = worker_id
         self.lease_seconds = lease_seconds
+        self.execution_timeout_seconds = execution_timeout_seconds
 
     @property
     def audit_actor(self) -> str:
@@ -121,6 +139,10 @@ class ExecutionLeaseManager:
         )
         leases: list[ExecutionLease] = []
         for run in rows:
+            if run.deadline_at is None:
+                # Migration 0004 backfills every active production row. This
+                # fallback also bounds rows created by old fixtures/manual tools.
+                run.deadline_at = now + timedelta(seconds=self.execution_timeout_seconds)
             previous_generation = int(run.lease_generation or 0)
             previous_owner = run.lease_owner
             previous_expiry = _as_utc(run.lease_expires_at)
@@ -133,9 +155,13 @@ class ExecutionLeaseManager:
                 db,
                 actor=self.audit_actor,
                 action=(
-                    "execution.lease_recovered"
-                    if previous_generation > 0
-                    else "execution.lease_claimed"
+                    "execution.cancel_claimed"
+                    if run.cancel_requested_at is not None
+                    else (
+                        "execution.lease_recovered"
+                        if previous_generation > 0
+                        else "execution.lease_claimed"
+                    )
                 ),
                 entity_type="execution",
                 entity_id=run.id,
@@ -154,6 +180,8 @@ class ExecutionLeaseManager:
                     generation=run.lease_generation,
                     status=run.status,
                     opencode_session_id=run.opencode_session_id,
+                    deadline_at=_as_utc(run.deadline_at) or now,
+                    cancel_requested_at=_as_utc(run.cancel_requested_at),
                 )
             )
         db.commit()
@@ -188,10 +216,14 @@ class ExecutionLeaseManager:
         lease: ExecutionLease,
         *,
         now: datetime | None = None,
+        allow_cancel_requested: bool = False,
     ) -> bool:
         now = now or utc_now()
         run = self._locked_owned_run(db, lease, now)
         if run is None:
+            db.rollback()
+            return False
+        if run.cancel_requested_at is not None and not allow_cancel_requested:
             db.rollback()
             return False
         run.heartbeat_at = now
@@ -213,6 +245,9 @@ class ExecutionLeaseManager:
         if run is None or run.status != "queued":
             db.rollback()
             return False
+        if run.cancel_requested_at is not None:
+            db.rollback()
+            return False
         if run.opencode_session_id and run.opencode_session_id != session_id:
             db.rollback()
             return False
@@ -230,12 +265,16 @@ class ExecutionLeaseManager:
         lease: ExecutionLease,
         session_id: str,
         message_id: str,
+        part_id: str,
         *,
         now: datetime | None = None,
     ) -> bool:
         now = now or utc_now()
         run = self._locked_owned_run(db, lease, now)
         if run is None or run.status != "queued":
+            db.rollback()
+            return False
+        if run.cancel_requested_at is not None:
             db.rollback()
             return False
         if run.opencode_session_id != session_id:
@@ -259,6 +298,7 @@ class ExecutionLeaseManager:
                 "generation": lease.generation,
                 "session_id": session_id,
                 "message_id": message_id,
+                "part_id": part_id,
             },
         )
         db.commit()
@@ -278,6 +318,18 @@ class ExecutionLeaseManager:
         if run is None or run.status != "running":
             db.rollback()
             return "lost"
+
+        if run.cancel_requested_at is not None:
+            db.rollback()
+            return "cancel_requested"
+
+        deadline_at = _as_utc(run.deadline_at)
+        if deadline_at is not None and deadline_at <= now:
+            run.heartbeat_at = now
+            run.lease_expires_at = self._deadline(now)
+            run.updated_at = now
+            db.commit()
+            return "deadline"
 
         if state_type == "idle" and result.strip():
             run.status = "completed"
@@ -313,6 +365,173 @@ class ExecutionLeaseManager:
         db.commit()
         return "running"
 
+    def mark_timeout_pending(
+        self,
+        db: Session,
+        lease: ExecutionLease,
+        error: str,
+        *,
+        now: datetime | None = None,
+    ) -> str:
+        """Keep an overdue execution active until external abort is confirmed."""
+        now = now or utc_now()
+        run = self._locked_owned_run(db, lease, now)
+        if run is None:
+            db.rollback()
+            return "lost"
+        first_attempt = run.stage != "timeout_abort_pending"
+        run.stage = "timeout_abort_pending"
+        run.error = (
+            "Execution deadline exceeded; OpenCode abort is not yet confirmed: "
+            + error[:1000]
+        )
+        run.heartbeat_at = now
+        run.lease_expires_at = self._deadline(now)
+        run.updated_at = now
+        if first_attempt:
+            write_audit(
+                db,
+                actor=self.audit_actor,
+                action="execution.timeout_abort_pending",
+                entity_type="execution",
+                entity_id=run.id,
+                details={
+                    "task_id": run.task_id,
+                    "generation": lease.generation,
+                    "deadline_at": (
+                        _as_utc(run.deadline_at).isoformat() if run.deadline_at else None
+                    ),
+                },
+            )
+        db.commit()
+        return "running"
+
+    def mark_timed_out(
+        self,
+        db: Session,
+        lease: ExecutionLease,
+        *,
+        aborted_session_ids: list[str],
+        now: datetime | None = None,
+    ) -> str:
+        """Commit timeout only while this exact lease generation still owns the row."""
+        now = now or utc_now()
+        run = self._locked_owned_run(db, lease, now)
+        if run is None:
+            db.rollback()
+            return "lost"
+        previous_status = run.status
+        deadline_at = _as_utc(run.deadline_at)
+        run.status = "failed"
+        run.stage = "timed_out"
+        run.error = (
+            "Execution exceeded its durable deadline"
+            + (f" ({deadline_at.isoformat()})" if deadline_at else "")
+        )
+        run.finished_at = now
+        run.heartbeat_at = now
+        run.lease_owner = None
+        run.lease_expires_at = None
+        run.updated_at = now
+        task = db.get(Task, run.task_id)
+        if task and task.status in {"in_progress", "waiting_approval"}:
+            task.status = "failed"
+            task.updated_at = now
+        write_audit(
+            db,
+            actor=self.audit_actor,
+            action="execution.timed_out",
+            entity_type="execution",
+            entity_id=run.id,
+            details={
+                "task_id": run.task_id,
+                "generation": lease.generation,
+                "previous_status": previous_status,
+                "deadline_at": deadline_at.isoformat() if deadline_at else None,
+                "aborted_session_ids": aborted_session_ids,
+            },
+        )
+        db.commit()
+        return "timed_out"
+
+    def mark_cancel_pending(
+        self,
+        db: Session,
+        lease: ExecutionLease,
+        error: str,
+        *,
+        now: datetime | None = None,
+    ) -> str:
+        """Retain durable cancellation intent until cleanup is confirmed."""
+        now = now or utc_now()
+        run = self._locked_owned_run(db, lease, now)
+        if run is None or run.cancel_requested_at is None:
+            db.rollback()
+            return "lost"
+        first_attempt = run.stage != "cancel_cleanup_pending"
+        run.stage = "cancel_cleanup_pending"
+        run.error = "Cancellation cleanup is not yet confirmed: " + error[:1000]
+        run.heartbeat_at = now
+        run.lease_expires_at = self._deadline(now)
+        run.updated_at = now
+        if first_attempt:
+            write_audit(
+                db,
+                actor=self.audit_actor,
+                action="execution.cancel_cleanup_pending",
+                entity_type="execution",
+                entity_id=run.id,
+                details={
+                    "task_id": run.task_id,
+                    "generation": lease.generation,
+                    "cancel_requested_at": _as_utc(run.cancel_requested_at).isoformat(),
+                },
+            )
+        db.commit()
+        return "running"
+
+    def mark_cancelled(
+        self,
+        db: Session,
+        lease: ExecutionLease,
+        *,
+        cleaned_session_ids: list[str],
+        now: datetime | None = None,
+    ) -> str:
+        now = now or utc_now()
+        run = self._locked_owned_run(db, lease, now)
+        if run is None or run.cancel_requested_at is None:
+            db.rollback()
+            return "lost"
+        previous_status = run.status
+        run.status = "cancelled"
+        run.stage = "stopped"
+        run.error = ""
+        run.finished_at = now
+        run.heartbeat_at = now
+        run.lease_owner = None
+        run.lease_expires_at = None
+        run.updated_at = now
+        task = db.get(Task, run.task_id)
+        if task and task.status in {"in_progress", "waiting_approval"}:
+            task.status = "failed"
+            task.updated_at = now
+        write_audit(
+            db,
+            actor=self.audit_actor,
+            action="execution.cancelled",
+            entity_type="execution",
+            entity_id=run.id,
+            details={
+                "task_id": run.task_id,
+                "generation": lease.generation,
+                "previous_status": previous_status,
+                "cleaned_session_ids": cleaned_session_ids,
+            },
+        )
+        db.commit()
+        return "cancelled"
+
 
 def _queued_dispatch_context(
     manager: ExecutionLeaseManager,
@@ -343,6 +562,152 @@ def _renew_before_external_side_effect(
     """Fence an external POST with a lease renewed immediately before the call."""
     with SessionLocal() as db:
         return manager.heartbeat(db, lease)
+
+
+def _renew_before_cleanup_side_effect(
+    manager: ExecutionLeaseManager,
+    lease: ExecutionLease,
+) -> bool:
+    with SessionLocal() as db:
+        return manager.heartbeat(db, lease, allow_cancel_requested=True)
+
+
+def _deadline_elapsed(
+    lease: ExecutionLease,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    deadline_at = _as_utc(lease.deadline_at)
+    return deadline_at is not None and deadline_at <= (now or utc_now())
+
+
+def cancel_execution(
+    manager: ExecutionLeaseManager,
+    client: OpenCodeClient,
+    lease: ExecutionLease,
+) -> str:
+    """Reconcile durable cancellation and then commit the terminal state."""
+    with SessionLocal() as db:
+        now = utc_now()
+        run = manager._locked_owned_run(db, lease, now)
+        if run is None or run.cancel_requested_at is None:
+            db.rollback()
+            return "lost"
+        session_id = run.opencode_session_id
+        status = run.status
+        db.rollback()
+
+    try:
+        session_ids: list[str] = []
+        if session_id:
+            session_ids.append(session_id)
+        else:
+            for session in client.sessions_for_execution(lease.execution_id):
+                recovered_id = str(session.get("id") or session.get("sessionID") or "")
+                if not recovered_id:
+                    raise OpenCodeError(
+                        "OpenCode returned a matching execution session without an id"
+                    )
+                if recovered_id not in session_ids:
+                    session_ids.append(recovered_id)
+
+        for current_session_id in session_ids:
+            if not _renew_before_cleanup_side_effect(manager, lease):
+                return "lost"
+            try:
+                if status == "queued":
+                    # A queued row can already have an accepted prompt whose DB
+                    # transition was interrupted. Abort first, remove its durable
+                    # session, then abort once more so a prompt that crossed the
+                    # delete boundary cannot retain an in-memory runner.
+                    client.abort(current_session_id)
+                    if not _renew_before_cleanup_side_effect(manager, lease):
+                        return "lost"
+                    client.delete_session(current_session_id)
+                    if not _renew_before_cleanup_side_effect(manager, lease):
+                        return "lost"
+                    client.abort(current_session_id)
+                else:
+                    client.abort(current_session_id)
+            except OpenCodeNotFound:
+                pass
+    except OpenCodeError as exc:
+        LOGGER.warning(
+            "Cancellation cleanup pending execution=%s generation=%s: %s",
+            lease.execution_id,
+            lease.generation,
+            exc,
+        )
+        with SessionLocal() as db:
+            return manager.mark_cancel_pending(db, lease, str(exc))
+
+    with SessionLocal() as db:
+        return manager.mark_cancelled(
+            db,
+            lease,
+            cleaned_session_ids=session_ids,
+        )
+
+
+def timeout_execution(
+    manager: ExecutionLeaseManager,
+    client: OpenCodeClient,
+    lease: ExecutionLease,
+) -> str:
+    """Abort every reconciled OpenCode session before committing a timeout.
+
+    A failed or ambiguous abort leaves the execution active in
+    ``timeout_abort_pending``. That is deliberate: the database must not claim a
+    terminal timeout while external work may still be running.
+    """
+    with SessionLocal() as db:
+        now = utc_now()
+        run = manager._locked_owned_run(db, lease, now)
+        if run is None:
+            db.rollback()
+            return "lost"
+        session_id = run.opencode_session_id
+        db.rollback()
+
+    try:
+        session_ids: list[str] = []
+        if session_id:
+            session_ids.append(session_id)
+        else:
+            for session in client.sessions_for_execution(lease.execution_id):
+                recovered_id = str(session.get("id") or session.get("sessionID") or "")
+                if not recovered_id:
+                    raise OpenCodeError(
+                        "OpenCode returned a matching execution session without an id"
+                    )
+                if recovered_id not in session_ids:
+                    session_ids.append(recovered_id)
+
+        for current_session_id in session_ids:
+            if not _renew_before_external_side_effect(manager, lease):
+                return "lost"
+            try:
+                client.abort(current_session_id)
+            except OpenCodeNotFound:
+                # A missing session cannot continue executing, so 404 is a
+                # confirmed terminal state for timeout cleanup.
+                pass
+    except OpenCodeError as exc:
+        LOGGER.warning(
+            "Timeout abort pending execution=%s generation=%s: %s",
+            lease.execution_id,
+            lease.generation,
+            exc,
+        )
+        with SessionLocal() as db:
+            return manager.mark_timeout_pending(db, lease, str(exc))
+
+    with SessionLocal() as db:
+        return manager.mark_timed_out(
+            db,
+            lease,
+            aborted_session_ids=session_ids,
+        )
 
 
 def dispatch_execution(
@@ -382,15 +747,27 @@ def dispatch_execution(
             if not manager.persist_dispatch_session(db, lease, session_id):
                 return "lost"
 
+    if _deadline_elapsed(lease):
+        return timeout_execution(manager, client, lease)
+
     message_id = execution_message_id(lease.execution_id)
+    part_id = execution_part_id(lease.execution_id)
     existing_message = client.message(session_id, message_id)
     if existing_message is None:
         if not _renew_before_external_side_effect(manager, lease):
             return "lost"
-        client.prompt_async(session_id, prompt, message_id=message_id)
+        client.prompt_async(
+            session_id,
+            prompt,
+            message_id=message_id,
+            part_id=part_id,
+        )
+
+    if _deadline_elapsed(lease):
+        return timeout_execution(manager, client, lease)
 
     with SessionLocal() as db:
-        if not manager.mark_dispatched(db, lease, session_id, message_id):
+        if not manager.mark_dispatched(db, lease, session_id, message_id, part_id):
             return "lost"
     return "dispatched"
 
@@ -402,6 +779,10 @@ def poll_execution(
 ) -> str:
     try:
         client = client_factory()
+        if lease.cancel_requested_at is not None:
+            return cancel_execution(manager, client, lease)
+        if _deadline_elapsed(lease):
+            return timeout_execution(manager, client, lease)
         if lease.status == "queued":
             return dispatch_execution(manager, client, lease)
         if not lease.opencode_session_id:
@@ -413,6 +794,8 @@ def poll_execution(
         state = statuses.get(lease.opencode_session_id) or {}
         state_type = state.get("type") if isinstance(state, dict) else str(state)
         result = extract_last_assistant_text(messages)
+        if _deadline_elapsed(lease):
+            return timeout_execution(manager, client, lease)
     except OpenCodeError as exc:
         LOGGER.warning(
             "OpenCode operation failed execution=%s generation=%s status=%s: %s",
@@ -431,6 +814,10 @@ def poll_execution(
             state_type=state_type or "unknown",
             result=result,
         )
+    if outcome == "cancel_requested":
+        return cancel_execution(manager, client, lease)
+    if outcome == "deadline":
+        return timeout_execution(manager, client, lease)
     if outcome == "lost":
         LOGGER.warning(
             "Rejected stale execution observation execution=%s generation=%s",
@@ -440,12 +827,17 @@ def poll_execution(
     return outcome
 
 
+def write_worker_health(path: Path) -> None:
+    path.touch(exist_ok=True)
+
+
 def run_forever(
     manager: ExecutionLeaseManager,
     client_factory: Callable[[], OpenCodeClient],
     *,
     poll_seconds: float,
     max_active: int,
+    health_path: Path | None = None,
 ) -> None:
     active: dict[str, ExecutionLease] = {}
     with ThreadPoolExecutor(
@@ -453,6 +845,8 @@ def run_forever(
         thread_name_prefix="execution-poll",
     ) as pool:
         while True:
+            if health_path is not None:
+                write_worker_health(health_path)
             slots = max_active - len(active)
             if slots > 0:
                 with SessionLocal() as db:
@@ -508,11 +902,23 @@ def main() -> int:
         5.0,
         minimum=0.5,
     )
+    if poll_seconds > 30:
+        raise RuntimeError("CONTROL_PLANE_EXECUTION_WORKER_POLL_SECONDS must be <= 30")
+    health_path = Path(
+        os.getenv(
+            "CONTROL_PLANE_EXECUTION_WORKER_HEALTH_PATH",
+            "/tmp/ai-orchestra-execution-worker.heartbeat",
+        )
+    )
 
     with SessionLocal() as db:
         assert_database_shape(db.get_bind())
 
-    manager = ExecutionLeaseManager(worker_id, lease_seconds=lease_seconds)
+    manager = ExecutionLeaseManager(
+        worker_id,
+        lease_seconds=lease_seconds,
+        execution_timeout_seconds=settings.execution_timeout_seconds,
+    )
 
     def client_factory() -> OpenCodeClient:
         return OpenCodeClient(
@@ -533,6 +939,7 @@ def main() -> int:
         client_factory,
         poll_seconds=poll_seconds,
         max_active=max_active,
+        health_path=health_path,
     )
     return 0
 

@@ -32,6 +32,12 @@ if [[ -z "$worker_id" ]]; then
   docker compose logs --tail=100 execution-worker >&2 || true
   exit 1
 fi
-echo "[OK] Execution Worker запущен"
+worker_health="$(docker inspect --format '{{.State.Health.Status}}' "$worker_id" 2>/dev/null || true)"
+if [[ "$worker_health" != "healthy" ]]; then
+  echo "[FAIL] Execution Worker не прошёл liveness: $worker_health" >&2
+  docker compose logs --tail=100 execution-worker >&2 || true
+  exit 1
+fi
+echo "[OK] Execution Worker запущен и healthy"
 
 echo "[OK] Smoke test завершен"

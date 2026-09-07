@@ -5,6 +5,7 @@ import pytest
 from control_plane.app.db import SessionLocal
 from control_plane.app.main import app
 from control_plane.app.models import ExecutionRun, Task
+from control_plane.app.opencode_client import OpenCodeError
 from control_plane.app.settings import Settings
 
 
@@ -169,6 +170,12 @@ class FakeOpenCode:
         return None
 
 
+class FailingOpenCode(FakeOpenCode):
+    def session_statuses(self):
+        self.status_calls += 1
+        raise OpenCodeError("simulated OpenCode outage")
+
+
 def _create_development_task(client, auth, mutation_headers, title="Сделать тестовый модуль"):
     created = client.post(
         "/api/tasks",
@@ -212,6 +219,9 @@ def test_development_execution_is_durably_queued_before_opencode(auth, mutation_
     assert started.json()["status"] == "queued"
     assert started.json()["stage"] == "dispatch_pending"
     assert started.json()["opencode_session_id"] is None
+    assert started.json()["lease_generation"] == 0
+    assert started.json()["heartbeat_at"] is None
+    assert started.json()["deadline_at"] > started.json()["created_at"]
     assert next(t for t in tasks if t["id"] == task_id)["status"] == "in_progress"
     assert audit[0]["action"] == "execution.queued"
 
@@ -233,6 +243,45 @@ def test_second_execute_is_rejected_while_first_is_queued(auth, mutation_headers
     assert first.status_code == 201
     assert second.status_code == 409
     assert "активный запуск" in second.json()["detail"]
+
+
+def test_abort_persists_idempotent_cancel_intent_without_opencode_call(auth, mutation_headers):
+    from control_plane.app.main import get_opencode_client
+
+    fake = FakeOpenCode()
+    app.dependency_overrides[get_opencode_client] = lambda: fake
+    try:
+        with TestClient(app) as client:
+            task_id = _create_development_task(client, auth, mutation_headers)
+            started = client.post(
+                f"/api/tasks/{task_id}/execute",
+                auth=auth,
+                headers=mutation_headers,
+            ).json()
+            first = client.post(
+                f"/api/executions/{started['id']}/abort",
+                auth=auth,
+                headers=mutation_headers,
+            )
+            second = client.post(
+                f"/api/executions/{started['id']}/abort",
+                auth=auth,
+                headers=mutation_headers,
+            )
+            audit = client.get("/api/audit", auth=auth).json()
+
+        assert first.status_code == 200
+        assert first.json()["status"] == "queued"
+        assert first.json()["stage"] == "cancel_requested"
+        assert first.json()["cancel_requested_at"] is not None
+        assert first.json()["lease_generation"] == 1
+        assert second.json()["cancel_requested_at"] == first.json()["cancel_requested_at"]
+        assert second.json()["lease_generation"] == first.json()["lease_generation"]
+        assert sum(event["action"] == "execution.cancel_requested" for event in audit) == 1
+        assert fake.status_calls == 0
+        assert fake.message_calls == 0
+    finally:
+        app.dependency_overrides.pop(get_opencode_client, None)
 
 
 def test_queued_progress_does_not_call_opencode(auth, mutation_headers):
@@ -262,11 +311,10 @@ def test_queued_progress_does_not_call_opencode(auth, mutation_headers):
         app.dependency_overrides.pop(get_opencode_client, None)
 
 
-def test_running_execution_can_reach_manager_review(auth, mutation_headers):
+def test_core_api_has_no_browser_owned_refresh_lifecycle(auth, mutation_headers):
     from control_plane.app.main import get_opencode_client
 
     fake = FakeOpenCode()
-    fake.status = "idle"
     app.dependency_overrides[get_opencode_client] = lambda: fake
     try:
         with TestClient(app) as client:
@@ -277,12 +325,13 @@ def test_running_execution_can_reach_manager_review(auth, mutation_headers):
                 auth=auth,
                 headers=mutation_headers,
             )
+            executions = client.get("/api/executions", auth=auth).json()
             tasks = client.get("/api/tasks", auth=auth).json()
 
-        assert refreshed.status_code == 200
-        assert refreshed.json()["status"] == "completed"
-        assert "QA пройден" in refreshed.json()["result"]
-        assert next(t for t in tasks if t["id"] == task_id)["status"] == "qa"
+        assert refreshed.status_code == 404
+        assert next(r for r in executions if r["id"] == run_id)["status"] == "running"
+        assert next(t for t in tasks if t["id"] == task_id)["status"] == "in_progress"
+        assert fake.status_calls == 0
     finally:
         app.dependency_overrides.pop(get_opencode_client, None)
 
@@ -306,5 +355,68 @@ def test_execution_progress_exposes_live_messages_after_dispatch(auth, mutation_
         assert payload["session_state"] == "busy"
         assert payload["elapsed_seconds"] >= 0
         assert payload["items"][-1]["text"] == "QA пройден. Результат готов."
+    finally:
+        app.dependency_overrides.pop(get_opencode_client, None)
+
+
+def test_execution_progress_is_read_only_when_opencode_is_unavailable(auth, mutation_headers):
+    from control_plane.app.main import get_opencode_client
+
+    fake = FailingOpenCode()
+    app.dependency_overrides[get_opencode_client] = lambda: fake
+    try:
+        with TestClient(app) as client:
+            task_id = _create_development_task(client, auth, mutation_headers)
+            run_id = _seed_running_execution(task_id)
+            progress = client.get(
+                f"/api/executions/{run_id}/progress",
+                auth=auth,
+            )
+            executions = client.get("/api/executions", auth=auth).json()
+
+        assert progress.status_code == 200
+        assert progress.json()["session_state"] == "unavailable"
+        assert progress.json()["error"] == "simulated OpenCode outage"
+        assert progress.json()["items"] == []
+        assert next(r for r in executions if r["id"] == run_id)["status"] == "running"
+        assert fake.status_calls == 1
+        assert fake.message_calls == 0
+    finally:
+        app.dependency_overrides.pop(get_opencode_client, None)
+
+
+def test_terminal_progress_without_session_does_not_call_opencode(auth, mutation_headers):
+    from control_plane.app.main import get_opencode_client
+
+    fake = FakeOpenCode()
+    app.dependency_overrides[get_opencode_client] = lambda: fake
+    try:
+        with TestClient(app) as client:
+            task_id = _create_development_task(client, auth, mutation_headers)
+            with SessionLocal() as db:
+                task = db.get(Task, task_id)
+                assert task is not None
+                task.status = "failed"
+                run = ExecutionRun(
+                    task_id=task_id,
+                    status="cancelled",
+                    stage="stopped",
+                    opencode_session_id=None,
+                    assigned_roles=["department-lead"],
+                )
+                db.add(run)
+                db.commit()
+                run_id = run.id
+
+            progress = client.get(
+                f"/api/executions/{run_id}/progress",
+                auth=auth,
+            )
+
+        assert progress.status_code == 200
+        assert progress.json()["status"] == "cancelled"
+        assert progress.json()["session_state"] == "cancelled"
+        assert fake.status_calls == 0
+        assert fake.message_calls == 0
     finally:
         app.dependency_overrides.pop(get_opencode_client, None)

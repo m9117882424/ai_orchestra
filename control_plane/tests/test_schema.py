@@ -83,7 +83,7 @@ print('STARTED')
 
 
 def test_declared_schema_head_is_stable():
-    assert head_revision() == "20260905_0003"
+    assert head_revision() == "20260907_0004"
 
 
 def test_fresh_database_is_created_by_alembic(tmp_path):
@@ -102,10 +102,20 @@ def test_fresh_database_is_created_by_alembic(tmp_path):
             for column in inspect(connection).get_columns("execution_runs")
             if column["name"] == "opencode_session_id"
         )
+        execution_columns = {
+            column["name"] for column in inspect(connection).get_columns("execution_runs")
+        }
+        execution_indexes = {
+            tuple(index["column_names"])
+            for index in inspect(connection).get_indexes("execution_runs")
+        }
 
     assert set(Base.metadata.tables).issubset(tables)
-    assert revision == "20260905_0003"
+    assert revision == "20260907_0004"
     assert session_column["nullable"] is True
+    assert "deadline_at" in execution_columns
+    assert "cancel_requested_at" in execution_columns
+    assert ("status", "deadline_at") in execution_indexes
 
 
 def test_matching_current_unversioned_database_is_verified_then_stamped(tmp_path):
@@ -121,7 +131,7 @@ def test_matching_current_unversioned_database_is_verified_then_stamped(tmp_path
 
     with engine.connect() as connection:
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert revision == "20260905_0003"
+    assert revision == "20260907_0004"
 
 
 def test_unversioned_historical_baseline_is_verified_then_migrated(tmp_path):
@@ -166,18 +176,20 @@ def test_unversioned_historical_baseline_is_verified_then_migrated(tmp_path):
             if column["name"] == "opencode_session_id"
         )
 
-    assert revision == "20260905_0003"
+    assert revision == "20260907_0004"
     assert marker == "Legacy marker"
     assert {
         "lease_owner",
         "lease_generation",
         "heartbeat_at",
         "lease_expires_at",
+        "deadline_at",
+        "cancel_requested_at",
     }.issubset(execution_columns)
     assert session_column["nullable"] is True
 
 
-def test_versioned_0002_database_upgrades_to_queued_dispatch_schema(tmp_path):
+def test_versioned_0002_database_upgrades_to_current_execution_schema(tmp_path):
     database_path = tmp_path / "revision-0002.db"
     database_url = f"sqlite+pysqlite:///{database_path}"
     created = _run_alembic_upgrade(database_url, "20260905_0002")
@@ -202,8 +214,74 @@ def test_versioned_0002_database_upgrades_to_queued_dispatch_schema(tmp_path):
             for column in inspect(connection).get_columns("execution_runs")
             if column["name"] == "opencode_session_id"
         )
-    assert revision == "20260905_0003"
+        execution_columns = {
+            column["name"] for column in inspect(connection).get_columns("execution_runs")
+        }
+    assert revision == "20260907_0004"
     assert after["nullable"] is True
+    assert "deadline_at" in execution_columns
+    assert "cancel_requested_at" in execution_columns
+
+
+def test_versioned_0003_backfills_only_active_execution_deadlines(tmp_path):
+    database_path = tmp_path / "revision-0003.db"
+    database_url = f"sqlite+pysqlite:///{database_path}"
+    created = _run_alembic_upgrade(database_url, "20260905_0003")
+    assert created.returncode == 0, created.stderr
+
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO tasks (
+                    id, title, description, project, domain, priority, status,
+                    risk_level, owner_role, created_at, updated_at
+                ) VALUES (
+                    'deadline-task', 'Deadline migration', '', 'general',
+                    'development', 'normal', 'in_progress', 'low', NULL,
+                    '2026-09-07 00:00:00', '2026-09-07 00:00:00'
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO execution_runs (
+                    id, task_id, status, stage, opencode_session_id, lead_role,
+                    assigned_roles, result, error, lease_generation,
+                    created_at, updated_at, finished_at
+                ) VALUES
+                (
+                    'queued-run', 'deadline-task', 'queued', 'dispatch_pending',
+                    NULL, 'department-lead', '[]', '', '', 0,
+                    '2026-09-07 00:00:00', '2026-09-07 00:00:00', NULL
+                ),
+                (
+                    'completed-run', 'deadline-task', 'completed', 'manager_review',
+                    'completed-session', 'department-lead', '[]', 'done', '', 0,
+                    '2026-09-07 00:00:00', '2026-09-07 00:05:00',
+                    '2026-09-07 00:05:00'
+                )
+                """
+            )
+        )
+
+    migrated = _run_schema_cli(database_url, "migrate")
+    assert migrated.returncode == 0, migrated.stderr
+
+    with engine.connect() as connection:
+        revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        deadlines = dict(
+            connection.execute(
+                text("SELECT id, deadline_at FROM execution_runs ORDER BY id")
+            ).all()
+        )
+
+    assert revision == "20260907_0004"
+    assert deadlines["queued-run"] is not None
+    assert deadlines["completed-run"] is None
 
 
 def test_drifted_legacy_database_is_never_stamped(tmp_path):

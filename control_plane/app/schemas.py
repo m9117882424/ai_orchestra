@@ -140,6 +140,10 @@ class ExecutionRead(BaseModel):
     assigned_roles: list[str]
     result: str
     error: str
+    lease_generation: int
+    heartbeat_at: datetime | None
+    deadline_at: datetime | None
+    cancel_requested_at: datetime | None
     created_at: datetime
     updated_at: datetime
     finished_at: datetime | None
@@ -158,4 +162,9 @@ class ExecutionProgressRead(BaseModel):
     stage: str
     session_state: str
     elapsed_seconds: int
+    heartbeat_at: datetime | None
+    deadline_at: datetime | None
+    cancel_requested_at: datetime | None
+    lease_generation: int
+    error: str
     items: list[ExecutionProgressItem]

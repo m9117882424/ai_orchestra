@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL
 
@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     opencode_internal_url: str = "http://opencode:4096"
     opencode_username: str = "opencode"
     opencode_password: str = ""
+    execution_timeout_seconds: int = Field(default=7200, ge=60, le=604800)
     default_monthly_budget: float = 25000.0
 
     model_config = SettingsConfigDict(

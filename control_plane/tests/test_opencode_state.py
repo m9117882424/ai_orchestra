@@ -1,8 +1,25 @@
+import pytest
+
 from control_plane.app.opencode_client import (
     OpenCodeClient,
+    OpenCodeError,
     extract_last_assistant_text,
     infer_session_state,
 )
+
+
+class _Response:
+    def __init__(self, body: str):
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return None
+
+    def read(self):
+        return self.body.encode()
 
 
 def assistant_with_running_tool():
@@ -44,12 +61,33 @@ def assistant_completed():
     ]
 
 
+def assistant_failed_with_partial_text():
+    return [
+        {
+            "info": {
+                "role": "assistant",
+                "finish": "stop",
+                "error": {"name": "ProviderError", "data": {"message": "upstream failed"}},
+                "time": {"created": 1788517494585, "completed": 1788517495585},
+            },
+            "parts": [{"type": "text", "text": "partial result"}],
+        }
+    ]
+
+
 def test_running_tool_is_inferred_busy():
     assert infer_session_state(assistant_with_running_tool()) == "busy"
 
 
 def test_completed_stop_is_inferred_idle():
     assert infer_session_state(assistant_completed()) == "idle"
+
+
+def test_failed_assistant_is_never_promoted_to_success():
+    messages = assistant_failed_with_partial_text()
+
+    assert infer_session_state(messages) == "error"
+    assert extract_last_assistant_text(messages) == ""
 
 
 def test_messages_backfill_missing_status_and_expose_tool_progress():
@@ -87,3 +125,47 @@ def test_progress_decoration_does_not_replace_final_result():
     assert statuses["ses-done"]["type"] == "idle"
     assert extract_last_assistant_text(messages) == "Готовый итоговый отчет"
     assert messages[0]["info"]["created_at"].endswith("+00:00")
+
+
+def test_prompt_async_sends_stable_message_and_part_ids():
+    client = OpenCodeClient("http://opencode", "user", "password")
+    requests = []
+    client._request = lambda method, path, payload=None: requests.append(  # type: ignore[method-assign]
+        (method, path, payload)
+    )
+
+    client.prompt_async(
+        "ses-test",
+        "Do the work",
+        message_id="msg_orchestra_123",
+        part_id="prt_orchestra_123",
+    )
+
+    assert requests == [
+        (
+            "POST",
+            "/session/ses-test/prompt_async",
+            {
+                "agent": "department-lead",
+                "parts": [
+                    {
+                        "id": "prt_orchestra_123",
+                        "type": "text",
+                        "text": "Do the work",
+                    }
+                ],
+                "messageID": "msg_orchestra_123",
+            },
+        )
+    ]
+
+
+def test_invalid_opencode_json_is_normalized_as_client_error(monkeypatch):
+    client = OpenCodeClient("http://opencode", "user", "password")
+    monkeypatch.setattr(
+        "control_plane.app.opencode_client.urllib.request.urlopen",
+        lambda request, timeout: _Response("not-json"),
+    )
+
+    with pytest.raises(OpenCodeError, match="невалидный JSON"):
+        client.session_statuses()

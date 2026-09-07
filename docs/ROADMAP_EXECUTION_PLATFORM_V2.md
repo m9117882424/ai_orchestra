@@ -36,24 +36,30 @@
 
 ---
 
-# G0 — Current Lab
+# G0 — Historical Lab baseline
 
 Существуют Control Plane, Model Gateway/Router, OpenCode, execution V1 и базовые approvals/audit.
 
-Ограничения:
-- browser polling всё ещё участвует в lifecycle;
-- нет общего durable workflow engine;
-- нет полноценного repository lifecycle;
-- execution workspace не гарантируется preflight;
-- DB migration process ещё не production-grade;
-- build/dependency reproducibility ограничена;
+Эта исходная точка больше не описывает repository head: browser-owned completion,
+runtime schema creation and unlocked Python dependencies have been removed.
+
+Сохраняющиеся ограничения платформы:
+
+- Temporal доказан только изолированным PoC и не входит в production topology;
+- нет полноценного repository lifecycle и workspace preflight;
+- execution sandbox ещё не отделён от OpenCode runtime;
 - Git write/release autonomy отключена.
 
 ---
 
 # G1 — Durable Core
 
-Это следующий обязательный этап.
+Статус: **repository closure candidate**. Миграции, exact dependency locks,
+backup/restore drill, Temporal restart/approval PoC, server-side execution worker,
+idempotent prompt dispatch, lease/fencing, deadline, durable cancellation и worker
+liveness реализованы. Gate считается фактически закрытым только после зелёного CI,
+review/merge и отдельного migration-first production rollout с post-deploy smoke;
+состояние репозитория не подменяет состояние сервера.
 
 ### Database / state
 - Alembic baseline;
@@ -91,6 +97,8 @@
 ---
 
 # G2 — Repository & Workspace Platform
+
+Это следующий engineering gate после приёмки G1.
 
 ### Repository Registry
 Для любого Git repository:

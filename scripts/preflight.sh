@@ -67,6 +67,16 @@ if [[ -f .env && -f .env.providers ]]; then
   CONTROL_PLANE_DB_PASSWORD="${CONTROL_PLANE_DB_PASSWORD:-}"
   MODEL_ROUTER_MASTER_KEY="${MODEL_ROUTER_MASTER_KEY:-}"
   MODEL_ROUTER_CLIENT_KEY="${MODEL_ROUTER_CLIENT_KEY:-}"
+  execution_timeout_seconds="${CONTROL_PLANE_EXECUTION_TIMEOUT_SECONDS:-7200}"
+
+  if [[ "$execution_timeout_seconds" =~ ^[0-9]+$ \
+    && "${#execution_timeout_seconds}" -le 6 ]] \
+    && (( 10#$execution_timeout_seconds >= 60 \
+      && 10#$execution_timeout_seconds <= 604800 )); then
+    pass "Deadline выполнения задан: ${execution_timeout_seconds}s"
+  else
+    fail "CONTROL_PLANE_EXECUTION_TIMEOUT_SECONDS должен быть целым числом от 60 до 604800"
+  fi
 
   case "${KEY_MODE:-}" in
     shared)
@@ -174,14 +184,21 @@ def nets(name):
 
 assert nets("postgres")=={"control-db"}, nets("postgres")
 assert nets("control-plane")=={"control-db","control-access","model-net"}, nets("control-plane")
+assert nets("execution-worker")=={"control-db","model-net"}, nets("execution-worker")
 assert nets("opencode")=={"model-net"}, nets("opencode")
 assert nets("model-gateway")=={"model-net","router-backend"}, nets("model-gateway")
 assert nets("model-router")=={"router-backend","provider-egress"}, nets("model-router")
 assert not (nets("opencode") & nets("model-router")), "OpenCode must not share a network with router admin service"
+worker=services["execution-worker"]
+assert not worker.get("ports"), "Execution worker must not publish ports"
+assert not worker.get("volumes"), "Execution worker must not receive repository volumes"
+worker_env=set((worker.get("environment") or {}).keys())
+forbidden_worker={"AITUNNEL_API_KEY","OPENAI_API_KEY","ANTHROPIC_API_KEY","GOOGLE_GENERATIVE_AI_API_KEY","MODEL_ROUTER_MASTER_KEY","MODEL_ROUTER_CLIENT_KEY"}
+assert not (worker_env & forbidden_worker), "Execution worker receives model/provider credentials"
 ' >/dev/null; then
-  pass "Секреты, admin router и Docker-сети изолированы от OpenCode"
+  pass "Секреты, admin router и Docker-сети изолированы от OpenCode/Execution Worker"
 else
-  fail "Нарушена изоляция OpenCode / Model Gateway / Model Router / control-plane"
+  fail "Нарушена изоляция OpenCode / Execution Worker / Model Gateway / Model Router / control-plane"
 fi
 
 if (( failures > 0 )); then

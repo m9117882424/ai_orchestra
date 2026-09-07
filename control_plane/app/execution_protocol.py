@@ -12,6 +12,12 @@ def execution_message_id(execution_id: str) -> str:
     return f"msg_orchestra_{compact}"
 
 
+def execution_part_id(execution_id: str) -> str:
+    """Return a stable OpenCode text-part id for one logical dispatch."""
+    compact = execution_id.replace("-", "")
+    return f"prt_orchestra_{compact}"
+
+
 def execution_session_title(task: Task, execution_id: str) -> str:
     return f"AI Orchestra · {task.title[:70]} · {execution_id}"
 

@@ -60,7 +60,7 @@ wait_postgres
 # Applying that SQL with psql inside the PostgreSQL container keeps this fixture
 # independent of cross-container password authentication while still proving that
 # the source schema is exactly what revision 0001 declares.
-docker compose run --rm --no-deps \
+docker compose run --rm -T --no-deps \
   -e CONTROL_PLANE_ENVIRONMENT=test \
   -e CONTROL_PLANE_DATABASE_URL=postgresql+psycopg://ai_orchestra:offline-only@postgres:5432/ai_orchestra \
   control-plane python -m alembic -c alembic.ini upgrade 20260904_0001 --sql \

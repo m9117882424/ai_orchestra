@@ -97,7 +97,7 @@ jobs:
 
       - name: Проверить базовый OpenCode toolchain
         run: |
-          docker compose run --rm --no-deps --entrypoint sh opencode -lc '
+          docker compose run --rm -T --no-deps --entrypoint sh opencode -lc '
             command -v git >/dev/null &&
             command -v rg >/dev/null &&
             command -v jq >/dev/null &&

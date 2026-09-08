@@ -58,7 +58,7 @@ migrate:
 	bash ./scripts/migrate-control-plane.sh
 
 schema-check:
-	docker compose run --rm --no-deps control-plane python -m app.schema_cli check
+	docker compose run --rm -T --no-deps control-plane python -m app.schema_cli check
 
 dependency-check:
 	python3 scripts/verify_dependency_locks.py

@@ -22,7 +22,7 @@ wait_postgres() {
 }
 
 schema_cli() {
-  docker compose run --rm --no-deps \
+  docker compose run --rm -T --no-deps \
     -e CONTROL_PLANE_ENVIRONMENT=production \
     -e CONTROL_PLANE_SERVER_PASSWORD=ci-only-manager-password-000000 \
     -e CONTROL_PLANE_OPENCODE_PASSWORD=ci-only-opencode-password-000000 \
@@ -33,7 +33,7 @@ echo "[INFO] PostgreSQL legacy-adoption smoke"
 docker compose up -d postgres >/dev/null
 wait_postgres
 
-docker compose run --rm --no-deps \
+docker compose run --rm -T --no-deps \
   -e CONTROL_PLANE_ENVIRONMENT=test \
   control-plane python - <<'PY'
 from app.database_base import Base

@@ -13,9 +13,9 @@ echo "[INFO] Создаю обязательную резервную копию
 bash ./scripts/backup.sh
 
 echo "[INFO] Запускаю управляемую миграцию Control Plane"
-docker compose run --rm --no-deps control-plane python -m app.schema_cli migrate
+docker compose run --rm -T --no-deps control-plane python -m app.schema_cli migrate
 
 echo "[INFO] Проверяю итоговую revision и physical schema shape"
-docker compose run --rm --no-deps control-plane python -m app.schema_cli check
+docker compose run --rm -T --no-deps control-plane python -m app.schema_cli check
 
 echo "[OK] Control Plane schema готова"

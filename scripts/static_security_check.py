@@ -56,6 +56,19 @@ def assert_actions_pinned(path: Path, text: str) -> None:
         assert FULL_SHA_RE.fullmatch(ref), f"Mutable GitHub Action ref in {path}: @{ref}"
 
 
+def assert_compose_runs_disable_tty(path: Path, text: str) -> None:
+    """Keep scripted Compose runs safe when stdin is a pipe, heredoc or scheduler."""
+    logical_text = text.replace("\\\n", " ")
+    marker = "docker compose run"
+    for line_number, line in enumerate(logical_text.splitlines(), start=1):
+        if marker not in line:
+            continue
+        arguments = line.split(marker, 1)[1]
+        assert re.search(r"(?:^|\s)(?:-T|--no-TTY)(?=\s|$)", arguments), (
+            f"Non-interactive Compose run must disable TTY in {path}:{line_number}"
+        )
+
+
 def main() -> int:
     cfg = resolved_compose()
     services = cfg["services"]
@@ -159,6 +172,14 @@ def main() -> int:
     assert "Docker buildability with current upstream bases" in validate_workflow
     assert_actions_pinned(validate_workflow_path, validate_workflow)
 
+    compose_command_paths = [
+        ROOT / "Makefile",
+        validate_workflow_path,
+        *sorted((ROOT / "scripts").glob("*.sh")),
+    ]
+    for path in compose_command_paths:
+        assert_compose_runs_disable_tty(path, path.read_text(encoding="utf-8"))
+
     main_text = (ROOT / "control_plane/app/main.py").read_text(encoding="utf-8")
     assert "Base.metadata.create_all" not in main_text
     assert ".metadata.create_all(" not in main_text
@@ -182,6 +203,7 @@ def main() -> int:
     assert "from .db import engine" not in schema_cli_text
     assert "SKIP_PRE_MIGRATION_BACKUP" not in migrate_script
     assert "bash ./scripts/backup.sh" in migrate_script
+    assert migrate_script.count("docker compose run --rm -T --no-deps") == 2
 
     backup_script = (ROOT / "scripts/backup.sh").read_text(encoding="utf-8")
     verify_backup_script = (ROOT / "scripts/verify-backup.sh").read_text(encoding="utf-8")

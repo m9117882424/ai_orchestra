@@ -4,7 +4,13 @@ AI Orchestra — самостоятельный AI-отдел, который п
 
 **AI Orchestra не является частью Trading Platform.** Trading Platform, Arvento, Wialon, Fuel Monitor, BI и другие системы — отдельные продукты, которые отдел может разрабатывать.
 
-> Статус репозитория: pilot 0.6.1, G1 Durable Core closure candidate. Это не означает автоматический rollout на сервер. `git push`, merge, production deploy, доступ к product secrets, запись во внешние production-системы и финансовое исполнение технически не входят в разрешенный контур отдела.
+> Статус репозитория: pilot 0.6.1. G1 Durable Core принят для pilot после rollout
+> `05bafd9` от 2026-09-07; проверяемая сводка находится в
+> [`docs/G1_PRODUCTION_ACCEPTANCE_2026-09-07.md`](docs/G1_PRODUCTION_ACCEPTANCE_2026-09-07.md).
+> Следующий engineering gate — G2 Repository & Workspace Platform. Приёмка G1 не
+> означает автоматический rollout: `git push`, merge, production deploy, доступ к
+> product secrets, запись во внешние production-системы и финансовое исполнение
+> технически не входят в разрешенный контур отдела.
 
 ## Ключевые свойства
 
@@ -427,6 +433,9 @@ make up
 make schema-check
 make smoke
 ```
+
+`make migrate` и `make schema-check` отключают Compose TTY и поэтому одинаково
+работают из интерактивного терминала, SSH heredoc и автоматизированного runner.
 
 ## Безопасная эксплуатация
 

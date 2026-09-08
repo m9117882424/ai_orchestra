@@ -20,6 +20,8 @@ If legacy schema differs, the tool refuses to stamp it.
 - Never set `SKIP_PRE_MIGRATION_BACKUP=1` in production.
 - Runtime Control Plane is not an authorized schema migration path.
 - Unknown schema state is a stop condition.
+- Every scripted `docker compose run` disables pseudo-TTY allocation with `-T`, so
+  the same reviewed commands work from an interactive shell, heredoc or CI runner.
 
 ## Deployment sequence
 
@@ -132,3 +134,6 @@ For each production migration retain:
 - `docker compose ps` output;
 - smoke-test result;
 - operator and timestamp.
+
+The first accepted pilot rollout is recorded in
+[`G1_PRODUCTION_ACCEPTANCE_2026-09-07.md`](G1_PRODUCTION_ACCEPTANCE_2026-09-07.md).

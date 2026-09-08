@@ -54,12 +54,14 @@ runtime schema creation and unlocked Python dependencies have been removed.
 
 # G1 — Durable Core
 
-Статус: **repository closure candidate**. Миграции, exact dependency locks,
+Статус: **принят для pilot 2026-09-07**. Миграции, exact dependency locks,
 backup/restore drill, Temporal restart/approval PoC, server-side execution worker,
 idempotent prompt dispatch, lease/fencing, deadline, durable cancellation и worker
-liveness реализованы. Gate считается фактически закрытым только после зелёного CI,
-review/merge и отдельного migration-first production rollout с post-deploy smoke;
-состояние репозитория не подменяет состояние сервера.
+liveness прошли зелёный CI, review/merge и migration-first production rollout с
+post-deploy smoke. Фактические identifiers и ограничения приёмки зафиксированы в
+[`G1_PRODUCTION_ACCEPTANCE_2026-09-07.md`](G1_PRODUCTION_ACCEPTANCE_2026-09-07.md).
+Приёмка относится к pilot scope и не вводит production Temporal, Git autonomy или
+гарантии следующих gates.
 
 ### Database / state
 - Alembic baseline;
@@ -98,7 +100,7 @@ review/merge и отдельного migration-first production rollout с post-
 
 # G2 — Repository & Workspace Platform
 
-Это следующий engineering gate после приёмки G1.
+Статус: **следующий активный engineering gate** после приёмки G1.
 
 ### Repository Registry
 Для любого Git repository:

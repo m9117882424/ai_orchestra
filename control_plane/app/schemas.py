@@ -2,7 +2,14 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from .repository_policy import (
+    normalize_profile_reference,
+    normalize_repository_name,
+    normalize_repository_remote,
+    validate_assurance_configuration,
+)
 
 
 TaskDomain = Literal["development", "analytics", "trading"]
@@ -20,6 +27,110 @@ ApprovalKind = Literal[
     "financial_execution",
 ]
 ApprovalDecision = Literal["approved", "rejected"]
+RepositoryProvider = Literal["github", "gitlab", "bitbucket", "generic"]
+RepositoryStatus = Literal["pending_validation", "ready", "unavailable", "invalid"]
+ExecutionProfile = Literal["development"]
+AssuranceTier = Literal[
+    "general-standard", "general-high-assurance", "regulated-critical"
+]
+
+
+class RepositoryCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=120)
+    remote_url: str = Field(min_length=1, max_length=1024)
+    auth_profile_ref: str | None = None
+    enabled: bool = Field(default=True, strict=True)
+    execution_profile: ExecutionProfile = "development"
+    assurance_tier: AssuranceTier = "general-standard"
+    assurance_profile: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        return normalize_repository_name(value)
+
+    @field_validator("remote_url")
+    @classmethod
+    def normalize_remote(cls, value: str) -> str:
+        return normalize_repository_remote(value).url
+
+    @field_validator("auth_profile_ref")
+    @classmethod
+    def normalize_auth_profile(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_profile_reference(value, field_name="auth_profile_ref")
+
+    @field_validator("assurance_profile")
+    @classmethod
+    def normalize_assurance_profile(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_profile_reference(value, field_name="assurance_profile")
+
+    @model_validator(mode="after")
+    def validate_assurance(self) -> "RepositoryCreate":
+        validate_assurance_configuration(self.assurance_tier, self.assurance_profile)
+        return self
+
+
+class RepositoryUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=1, strict=True)
+    auth_profile_ref: str | None = None
+    enabled: bool | None = Field(default=None, strict=True)
+    execution_profile: ExecutionProfile | None = None
+    assurance_tier: AssuranceTier | None = None
+    assurance_profile: str | None = None
+
+    @field_validator("auth_profile_ref")
+    @classmethod
+    def normalize_auth_profile(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_profile_reference(value, field_name="auth_profile_ref")
+
+    @field_validator("assurance_profile")
+    @classmethod
+    def normalize_assurance_profile(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_profile_reference(value, field_name="assurance_profile")
+
+    @model_validator(mode="after")
+    def require_change(self) -> "RepositoryUpdate":
+        changed_fields = self.model_fields_set - {"expected_version"}
+        if not changed_fields:
+            raise ValueError("Repository update не содержит изменений")
+        for field_name in ("enabled", "execution_profile", "assurance_tier"):
+            if field_name in changed_fields and getattr(self, field_name) is None:
+                raise ValueError(f"{field_name} нельзя установить в null")
+        return self
+
+
+class RepositoryRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    remote_url: str
+    remote_host: str
+    provider: RepositoryProvider
+    auth_profile_ref: str | None
+    default_branch: str | None
+    enabled: bool
+    status: RepositoryStatus
+    last_known_commit: str | None
+    last_fetched_at: datetime | None
+    execution_profile: ExecutionProfile
+    assurance_tier: AssuranceTier
+    assurance_profile: str | None
+    version: int
+    created_at: datetime
+    updated_at: datetime
 
 
 class TaskCreate(BaseModel):

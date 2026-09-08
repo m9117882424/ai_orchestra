@@ -5,7 +5,7 @@ from pathlib import Path
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import inspect
+from sqlalchemy import CheckConstraint, inspect
 from sqlalchemy.engine import Connection, Engine
 
 from .database_base import Base
@@ -26,6 +26,9 @@ _REVISION_EXCLUDED_COLUMNS = {
             ("execution_runs", "cancel_requested_at"),
         }
     )
+}
+_REVISION_ABSENT_TABLES = {
+    LEGACY_BASELINE_REVISION: frozenset({"repositories"}),
 }
 _REVISION_EXCLUDED_INDEXES = {
     LEGACY_BASELINE_REVISION: frozenset(
@@ -80,6 +83,7 @@ def _compiled_type(column_type, dialect) -> str:
 def _schema_diff(
     bind: Engine | Connection,
     *,
+    expected_absent_tables: frozenset[str] = frozenset(),
     excluded_columns: frozenset[tuple[str, str]] = frozenset(),
     excluded_indexes: frozenset[tuple[str, tuple[str, ...], bool]] = frozenset(),
     nullable_overrides: dict[tuple[str, str], bool] | None = None,
@@ -93,7 +97,7 @@ def _schema_diff(
     nullable_overrides = nullable_overrides or {}
     inspector = inspect(bind)
     actual_tables = set(inspector.get_table_names()) - {"alembic_version"}
-    expected_tables = set(Base.metadata.tables)
+    expected_tables = set(Base.metadata.tables) - expected_absent_tables
 
     for missing in sorted(expected_tables - actual_tables):
         differences.append(f"missing table: {missing}")
@@ -161,6 +165,22 @@ def _schema_diff(
         if actual_fks != expected_fks:
             differences.append(f"{table_name}: foreign keys differ")
 
+        expected_checks = {
+            constraint.name
+            for constraint in table.constraints
+            if isinstance(constraint, CheckConstraint) and constraint.name
+        }
+        actual_checks = {
+            constraint.get("name")
+            for constraint in inspector.get_check_constraints(table_name)
+            if constraint.get("name")
+        }
+        if actual_checks != expected_checks:
+            differences.append(
+                f"{table_name}: check constraints {sorted(actual_checks)} "
+                f"!= {sorted(expected_checks)}"
+            )
+
         expected_indexes = {
             (tuple(column.name for column in index.columns), bool(index.unique))
             for index in table.indexes
@@ -191,6 +211,7 @@ def schema_diff_for_revision(bind: Engine | Connection, revision: str) -> list[s
         raise RuntimeError(f"Unsupported historical schema revision: {revision}")
     return _schema_diff(
         bind,
+        expected_absent_tables=_REVISION_ABSENT_TABLES.get(revision, frozenset()),
         excluded_columns=_REVISION_EXCLUDED_COLUMNS[revision],
         excluded_indexes=_REVISION_EXCLUDED_INDEXES[revision],
         nullable_overrides=_REVISION_NULLABLE_OVERRIDES.get(revision),

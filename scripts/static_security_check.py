@@ -236,6 +236,39 @@ def main() -> int:
     ):
         assert marker in models_text, f"Execution fencing state missing: {marker}"
 
+    repository_model = models_text.split("class Repository(Base):", 1)[1].split(
+        "\n\nclass Task(Base):", 1
+    )[0]
+    assert "auth_profile_ref" in repository_model
+    for forbidden_column in (
+        "access_token",
+        "auth_token",
+        "credential",
+        "password",
+        "private_key",
+        "secret",
+    ):
+        assert not re.search(
+            rf"^\s+{forbidden_column}:\s+Mapped",
+            repository_model,
+            re.MULTILINE,
+        ), f"Repository Registry must not store Git credential column: {forbidden_column}"
+    assert 'status="pending_validation"' in main_text
+    assert '@app.delete("/api/repositories' not in main_text
+
+    repository_policy = (ROOT / "control_plane/app/repository_policy.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'parsed.scheme.lower() != "https"' in repository_policy
+    assert "parsed.username is not None or parsed.password is not None" in repository_policy
+    assert "ip_address(host)" in repository_policy
+    assert "SECRET_LIKE_PREFIXES" in repository_policy
+    for network_marker in ("subprocess", "socket.", "requests.", "httpx."):
+        assert network_marker not in repository_policy, (
+            "Repository Registry policy must remain validation-only; "
+            f"unexpected network/process marker: {network_marker}"
+        )
+
     worker_text = (ROOT / "control_plane/app/execution_worker.py").read_text(encoding="utf-8")
     assert "with_for_update(skip_locked=True)" in worker_text
     assert "run.lease_generation" in worker_text

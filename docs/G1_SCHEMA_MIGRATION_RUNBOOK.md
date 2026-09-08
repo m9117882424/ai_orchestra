@@ -1,15 +1,15 @@
-# G1 Control Plane Schema Migration Runbook
+# Control Plane Schema Migration Runbook
 
 ## Purpose
 
-This runbook is the only supported path for moving the existing Control Plane PostgreSQL database through the G1 Alembic chain. The current repository head is `20260907_0004`.
+This runbook is the only supported path for moving the existing Control Plane PostgreSQL database through its reviewed Alembic chain. The current repository head is `20260908_0005`.
 
 The first migration is special because production already contains tables created historically by SQLAlchemy `Base.metadata.create_all()`.
 
 The migration tooling therefore supports two fail-closed paths:
 
 1. **fresh database** — Alembic creates the complete schema;
-2. **legacy existing database** — the tool verifies that tables, columns, types/nullability, primary keys, foreign keys and explicit indexes match the declared historical `20260904_0001` shape, stamps that exact revision, and upgrades through `0002` (lease/fencing), `0003` (durable queued dispatch), and `0004` (deadline/cancellation intent).
+2. **legacy existing database** — the tool verifies that tables, columns, types/nullability, primary keys, foreign keys, named checks and explicit indexes match the declared historical `20260904_0001` shape, stamps that exact revision, and upgrades through `0002` (lease/fencing), `0003` (durable queued dispatch), `0004` (deadline/cancellation intent), and `0005` (Repository Registry).
 
 If legacy schema differs, the tool refuses to stamp it.
 
@@ -53,22 +53,24 @@ revision.
 For a versioned `20260904_0001` database the expected message is equivalent to:
 
 ```text
-[OK] Schema migrated to 20260907_0004
+[OK] Schema migrated to 20260908_0005
 ```
 
 For an unversioned database that exactly matches the historical baseline:
 
 ```text
-[OK] Historical baseline 20260904_0001 verified, migrated to 20260907_0004; data unchanged
+[OK] Historical baseline 20260904_0001 verified, migrated to 20260908_0005; data unchanged
 ```
 
 Active executions present during `0004` receive a fresh two-hour deadline grace
 period. Terminal execution history receives no deadline and is otherwise unchanged.
+Migration `0005` creates an empty repository registry and does not mutate existing
+tasks, executions, approvals, budgets, usage or audit rows.
 
 If the database is already migrated, the expected message is:
 
 ```text
-[OK] Schema already at head: 20260907_0004
+[OK] Schema already at head: 20260908_0005
 ```
 
 ## Failure: legacy schema mismatch
@@ -112,7 +114,7 @@ This is defense in depth. The long-term G1/G2 target is a separate database role
 
 The initial baseline stamp does not alter business data. Later G1 revisions add
 execution lifecycle columns and relax `opencode_session_id` nullability; `0004`
-backfills deadlines only for active rows.
+backfills deadlines only for active rows. G2 revision `0005` adds a new empty table.
 
 If application rollout fails after a successful baseline stamp:
 

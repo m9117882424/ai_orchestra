@@ -8,11 +8,26 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .auth import require_control_request, require_manager
 from .db import get_db
-from .models import Approval, AuditEvent, Budget, CapabilityGuard, ExecutionRun, Task, UsageEvent
+from .models import (
+    Approval,
+    AuditEvent,
+    Budget,
+    CapabilityGuard,
+    ExecutionRun,
+    Repository,
+    Task,
+    UsageEvent,
+)
+from .repository_policy import (
+    RepositoryPolicyError,
+    normalize_repository_remote,
+    validate_assurance_configuration,
+)
 from .schemas import (
     ApprovalCreate,
     ApprovalDecisionRequest,
@@ -23,6 +38,11 @@ from .schemas import (
     CapabilityGuardRead,
     ExecutionRead,
     ExecutionProgressRead,
+    RepositoryCreate,
+    RepositoryProvider,
+    RepositoryRead,
+    RepositoryStatus,
+    RepositoryUpdate,
     TaskCreate,
     TaskRead,
     TaskStatusUpdate,
@@ -56,7 +76,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="AI Orchestra Control Plane",
-    version="0.6.1",
+    version="0.7.0",
     docs_url=None,
     redoc_url=None,
     lifespan=lifespan,
@@ -81,6 +101,23 @@ def get_opencode_client() -> OpenCodeClient:
 
 
 OpenCode = Annotated[OpenCodeClient, Depends(get_opencode_client)]
+
+
+def _repository_conflict_detail(exc: IntegrityError) -> str | None:
+    constraint_name = getattr(getattr(exc.orig, "diag", None), "constraint_name", None)
+    if constraint_name == "ux_repositories_name":
+        return "Имя репозитория уже зарегистрировано"
+    if constraint_name == "ux_repositories_remote_identity":
+        return "Git remote уже зарегистрирован"
+
+    # SQLite does not expose a structured constraint name. This branch is also
+    # exercised by the API test suite, while production PostgreSQL uses diag.
+    message = str(exc.orig).lower()
+    if "unique constraint failed: repositories.name" in message:
+        return "Имя репозитория уже зарегистрировано"
+    if "unique constraint failed: repositories.remote_identity" in message:
+        return "Git remote уже зарегистрирован"
+    return None
 
 
 @app.get("/health")
@@ -116,6 +153,157 @@ def summary(db: DbSession, _: Manager) -> dict:
         "month_cost": str(current_month_cost(db)),
         "configured_budget": str(total_budget or 0),
     }
+
+
+@app.get("/api/repositories", response_model=list[RepositoryRead])
+def list_repositories(
+    db: DbSession,
+    _: Manager,
+    enabled: Annotated[bool | None, Query()] = None,
+    repository_status: Annotated[RepositoryStatus | None, Query(alias="status")] = None,
+    provider: Annotated[RepositoryProvider | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+) -> list[Repository]:
+    statement = select(Repository)
+    if enabled is not None:
+        statement = statement.where(Repository.enabled.is_(enabled))
+    if repository_status is not None:
+        statement = statement.where(Repository.status == repository_status)
+    if provider is not None:
+        statement = statement.where(Repository.provider == provider)
+    return list(db.scalars(statement.order_by(Repository.name).limit(limit)))
+
+
+@app.get("/api/repositories/{repository_id}", response_model=RepositoryRead)
+def get_repository(repository_id: str, db: DbSession, _: Manager) -> Repository:
+    repository = db.get(Repository, repository_id)
+    if repository is None:
+        raise HTTPException(status_code=404, detail="Репозиторий не найден")
+    return repository
+
+
+@app.post(
+    "/api/repositories",
+    response_model=RepositoryRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_repository(
+    payload: RepositoryCreate,
+    db: DbSession,
+    manager: Manager,
+    _: Mutation,
+) -> Repository:
+    remote = normalize_repository_remote(payload.remote_url)
+    if db.scalar(select(Repository.id).where(Repository.name == payload.name)) is not None:
+        raise HTTPException(status_code=409, detail="Имя репозитория уже зарегистрировано")
+    if (
+        db.scalar(
+            select(Repository.id).where(Repository.remote_identity == remote.identity)
+        )
+        is not None
+    ):
+        raise HTTPException(status_code=409, detail="Git remote уже зарегистрирован")
+
+    repository = Repository(
+        name=payload.name,
+        remote_url=remote.url,
+        remote_identity=remote.identity,
+        remote_host=remote.host,
+        provider=remote.provider,
+        auth_profile_ref=payload.auth_profile_ref,
+        enabled=payload.enabled,
+        status="pending_validation",
+        execution_profile=payload.execution_profile,
+        assurance_tier=payload.assurance_tier,
+        assurance_profile=payload.assurance_profile,
+        version=1,
+    )
+    db.add(repository)
+    try:
+        db.flush()
+        write_audit(
+            db,
+            actor=manager,
+            action="repository.registered",
+            entity_type="repository",
+            entity_id=repository.id,
+            details={
+                "name": repository.name,
+                "provider": repository.provider,
+                "remote_host": repository.remote_host,
+                "enabled": repository.enabled,
+                "assurance_tier": repository.assurance_tier,
+            },
+        )
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        detail = _repository_conflict_detail(exc)
+        if detail is None:
+            raise
+        raise HTTPException(status_code=409, detail=detail) from exc
+    db.refresh(repository)
+    return repository
+
+
+@app.patch("/api/repositories/{repository_id}", response_model=RepositoryRead)
+def update_repository(
+    repository_id: str,
+    payload: RepositoryUpdate,
+    db: DbSession,
+    manager: Manager,
+    _: Mutation,
+) -> Repository:
+    repository = db.scalar(
+        select(Repository).where(Repository.id == repository_id).with_for_update()
+    )
+    if repository is None:
+        raise HTTPException(status_code=404, detail="Репозиторий не найден")
+    if repository.version != payload.expected_version:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Запись репозитория уже изменена: "
+                f"expected_version={payload.expected_version}, current_version={repository.version}"
+            ),
+        )
+
+    updates = payload.model_dump(exclude_unset=True)
+    updates.pop("expected_version")
+    next_tier = updates.get("assurance_tier", repository.assurance_tier)
+    next_profile = updates.get("assurance_profile", repository.assurance_profile)
+    try:
+        validate_assurance_configuration(next_tier, next_profile)
+    except RepositoryPolicyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    changes: dict[str, dict[str, object]] = {}
+    for field_name, value in updates.items():
+        previous = getattr(repository, field_name)
+        if previous == value:
+            continue
+        setattr(repository, field_name, value)
+        if field_name == "auth_profile_ref":
+            changes[field_name] = {"changed": True}
+        else:
+            changes[field_name] = {"from": previous, "to": value}
+
+    if not changes:
+        return repository
+
+    repository.version += 1
+    repository.updated_at = datetime.now(timezone.utc)
+    write_audit(
+        db,
+        actor=manager,
+        action="repository.updated",
+        entity_type="repository",
+        entity_id=repository.id,
+        details={"version": repository.version, "changes": changes},
+    )
+    db.commit()
+    db.refresh(repository)
+    return repository
 
 
 @app.get("/api/tasks", response_model=list[TaskRead])

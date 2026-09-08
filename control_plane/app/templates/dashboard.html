@@ -26,10 +26,30 @@
           <h1>От задач до решений — в одном окне</h1>
           <p>Контроль загрузки отдела, согласований, расходов и системных ограничений.</p>
         </div>
-        <button class="button button-primary" id="show-task-form">+ Новая задача</button>
+        <div class="intro-actions">
+          <button class="button button-secondary" id="show-repository-form">+ Репозиторий</button>
+          <button class="button button-primary" id="show-task-form">+ Новая задача</button>
+        </div>
       </section>
 
-      <section class="task-form panel hidden" id="task-form-panel">
+      <section class="entry-form panel hidden" id="repository-form-panel">
+        <div class="panel-heading">
+          <div><p class="eyebrow">G2 Repository Registry</p><h2>Новый репозиторий</h2></div>
+          <button class="icon-button" id="hide-repository-form" aria-label="Закрыть">×</button>
+        </div>
+        <form id="repository-form">
+          <label>Имя<input name="name" minlength="1" maxlength="120" required placeholder="arvento-report"></label>
+          <label class="wide">HTTPS remote<input name="remote_url" type="url" maxlength="1024" required placeholder="https://github.com/owner/repository.git"></label>
+          <label>Auth profile reference<input name="auth_profile_ref" maxlength="80" placeholder="git-readonly-primary"></label>
+          <label>Уровень надёжности<select name="assurance_tier"><option value="general-standard">General standard</option><option value="general-high-assurance">High assurance</option><option value="regulated-critical">Regulated critical</option></select></label>
+          <label>Domain assurance profile<input name="assurance_profile" maxlength="80" placeholder="Только для regulated-critical"></label>
+          <label class="checkbox-label"><input name="enabled" type="checkbox" checked>Разрешён после проверки</label>
+          <div class="wide form-actions"><span class="form-status" id="repository-form-status"></span><button class="button button-primary" type="submit">Зарегистрировать</button></div>
+        </form>
+        <p class="panel-note">Credentials сюда не вводятся. Запись останется pending validation до проверки Repo Manager.</p>
+      </section>
+
+      <section class="entry-form panel hidden" id="task-form-panel">
         <div class="panel-heading">
           <div><p class="eyebrow">Постановка</p><h2>Новая задача</h2></div>
           <button class="icon-button" id="hide-task-form" aria-label="Закрыть">×</button>
@@ -53,6 +73,11 @@
       </section>
 
       <div class="layout">
+        <section class="panel span-two">
+          <div class="panel-heading"><div><p class="eyebrow">G2 Repository Registry</p><h2>Репозитории</h2></div><button class="text-button" data-refresh>Обновить</button></div>
+          <div class="table-wrap"><table><thead><tr><th>Репозиторий</th><th>Provider</th><th>Проверка</th><th>Надёжность</th><th>Доступ</th></tr></thead><tbody id="repositories-body"><tr><td colspan="5" class="empty">Загрузка…</td></tr></tbody></table></div>
+        </section>
+
         <section class="panel span-two">
           <div class="panel-heading"><div><p class="eyebrow">Портфель</p><h2>Задачи отдела</h2></div><button class="text-button" data-refresh>Обновить</button></div>
           <div class="table-wrap"><table><thead><tr><th>Задача</th><th>Направление</th><th>Риск</th><th>Статус</th><th>Исполнение</th></tr></thead><tbody id="tasks-body"><tr><td colspan="5" class="empty">Загрузка…</td></tr></tbody></table></div>

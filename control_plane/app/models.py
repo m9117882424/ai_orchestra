@@ -2,7 +2,18 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, Text
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .database_base import Base
@@ -14,6 +25,62 @@ def utc_now() -> datetime:
 
 def new_id() -> str:
     return str(uuid4())
+
+
+class Repository(Base):
+    __tablename__ = "repositories"
+    __table_args__ = (
+        CheckConstraint(
+            "provider IN ('github', 'gitlab', 'bitbucket', 'generic')",
+            name="ck_repositories_provider",
+        ),
+        CheckConstraint(
+            "status IN ('pending_validation', 'ready', 'unavailable', 'invalid')",
+            name="ck_repositories_status",
+        ),
+        CheckConstraint(
+            "execution_profile = 'development'",
+            name="ck_repositories_execution_profile",
+        ),
+        CheckConstraint(
+            "assurance_tier IN "
+            "('general-standard', 'general-high-assurance', 'regulated-critical')",
+            name="ck_repositories_assurance_tier",
+        ),
+        CheckConstraint(
+            "((assurance_tier = 'regulated-critical' AND assurance_profile IS NOT NULL "
+            "AND length(assurance_profile) BETWEEN 1 AND 80) "
+            "OR (assurance_tier <> 'regulated-critical' AND assurance_profile IS NULL))",
+            name="ck_repositories_assurance_profile",
+        ),
+        CheckConstraint("version >= 1", name="ck_repositories_version"),
+        Index("ux_repositories_name", "name", unique=True),
+        Index("ux_repositories_remote_identity", "remote_identity", unique=True),
+        Index("ix_repositories_enabled_status", "enabled", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(120))
+    remote_url: Mapped[str] = mapped_column(String(1024))
+    remote_identity: Mapped[str] = mapped_column(String(1024))
+    remote_host: Mapped[str] = mapped_column(String(253))
+    provider: Mapped[str] = mapped_column(String(24))
+    auth_profile_ref: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    default_branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending_validation")
+    last_known_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_fetched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    execution_profile: Mapped[str] = mapped_column(String(40), default="development")
+    assurance_tier: Mapped[str] = mapped_column(String(40), default="general-standard")
+    assurance_profile: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
 
 
 class Task(Base):

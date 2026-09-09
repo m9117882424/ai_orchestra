@@ -100,7 +100,10 @@ post-deploy smoke. Фактические identifiers и ограничения 
 
 # G2 — Repository & Workspace Platform
 
-Статус: **следующий активный engineering gate** после приёмки G1.
+Статус: **активный engineering gate**. Первый инкремент — fail-closed Repository
+Registry; gate остаётся открытым до Repo Manager, task worktrees и обязательного
+workspace preflight. Контракт Registry описан в
+[`G2_REPOSITORY_REGISTRY.md`](G2_REPOSITORY_REGISTRY.md).
 
 ### Repository Registry
 Для любого Git repository:

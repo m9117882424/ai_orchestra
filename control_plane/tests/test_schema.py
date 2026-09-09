@@ -83,7 +83,7 @@ print('STARTED')
 
 
 def test_declared_schema_head_is_stable():
-    assert head_revision() == "20260907_0004"
+    assert head_revision() == "20260908_0005"
 
 
 def test_fresh_database_is_created_by_alembic(tmp_path):
@@ -109,13 +109,45 @@ def test_fresh_database_is_created_by_alembic(tmp_path):
             tuple(index["column_names"])
             for index in inspect(connection).get_indexes("execution_runs")
         }
+        repository_columns = {
+            column["name"] for column in inspect(connection).get_columns("repositories")
+        }
+        repository_indexes = {
+            (tuple(index["column_names"]), bool(index["unique"]))
+            for index in inspect(connection).get_indexes("repositories")
+        }
+        repository_checks = {
+            constraint["name"]
+            for constraint in inspect(connection).get_check_constraints("repositories")
+        }
 
     assert set(Base.metadata.tables).issubset(tables)
-    assert revision == "20260907_0004"
+    assert revision == "20260908_0005"
     assert session_column["nullable"] is True
     assert "deadline_at" in execution_columns
     assert "cancel_requested_at" in execution_columns
     assert ("status", "deadline_at") in execution_indexes
+    assert {
+        "remote_identity",
+        "remote_host",
+        "auth_profile_ref",
+        "last_known_commit",
+        "last_fetched_at",
+        "assurance_tier",
+        "assurance_profile",
+        "version",
+    }.issubset(repository_columns)
+    assert (("name",), True) in repository_indexes
+    assert (("remote_identity",), True) in repository_indexes
+    assert (("enabled", "status"), False) in repository_indexes
+    assert repository_checks == {
+        "ck_repositories_assurance_profile",
+        "ck_repositories_assurance_tier",
+        "ck_repositories_execution_profile",
+        "ck_repositories_provider",
+        "ck_repositories_status",
+        "ck_repositories_version",
+    }
 
 
 def test_matching_current_unversioned_database_is_verified_then_stamped(tmp_path):
@@ -131,7 +163,7 @@ def test_matching_current_unversioned_database_is_verified_then_stamped(tmp_path
 
     with engine.connect() as connection:
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert revision == "20260907_0004"
+    assert revision == "20260908_0005"
 
 
 def test_unversioned_historical_baseline_is_verified_then_migrated(tmp_path):
@@ -176,7 +208,7 @@ def test_unversioned_historical_baseline_is_verified_then_migrated(tmp_path):
             if column["name"] == "opencode_session_id"
         )
 
-    assert revision == "20260907_0004"
+    assert revision == "20260908_0005"
     assert marker == "Legacy marker"
     assert {
         "lease_owner",
@@ -187,6 +219,7 @@ def test_unversioned_historical_baseline_is_verified_then_migrated(tmp_path):
         "cancel_requested_at",
     }.issubset(execution_columns)
     assert session_column["nullable"] is True
+    assert "repositories" in inspect(engine).get_table_names()
 
 
 def test_versioned_0002_database_upgrades_to_current_execution_schema(tmp_path):
@@ -217,7 +250,7 @@ def test_versioned_0002_database_upgrades_to_current_execution_schema(tmp_path):
         execution_columns = {
             column["name"] for column in inspect(connection).get_columns("execution_runs")
         }
-    assert revision == "20260907_0004"
+    assert revision == "20260908_0005"
     assert after["nullable"] is True
     assert "deadline_at" in execution_columns
     assert "cancel_requested_at" in execution_columns
@@ -279,9 +312,46 @@ def test_versioned_0003_backfills_only_active_execution_deadlines(tmp_path):
             ).all()
         )
 
-    assert revision == "20260907_0004"
+    assert revision == "20260908_0005"
     assert deadlines["queued-run"] is not None
     assert deadlines["completed-run"] is None
+
+
+def test_versioned_0004_adds_registry_without_mutating_existing_data(tmp_path):
+    database_path = tmp_path / "revision-0004.db"
+    database_url = f"sqlite+pysqlite:///{database_path}"
+    created = _run_alembic_upgrade(database_url, "20260907_0004")
+    assert created.returncode == 0, created.stderr
+
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        assert "repositories" not in inspect(connection).get_table_names()
+        connection.execute(
+            text(
+                """
+                INSERT INTO audit_events (
+                    id, actor, action, entity_type, entity_id, details, created_at
+                ) VALUES (
+                    'registry-migration-marker', 'test', 'marker', 'test',
+                    'registry-migration-marker', '{}', '2026-09-08 00:00:00'
+                )
+                """
+            )
+        )
+
+    migrated = _run_schema_cli(database_url, "migrate")
+    assert migrated.returncode == 0, migrated.stderr
+
+    with engine.connect() as connection:
+        revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        marker = connection.execute(
+            text("SELECT action FROM audit_events WHERE id = 'registry-migration-marker'")
+        ).scalar_one()
+        tables = set(inspect(connection).get_table_names())
+
+    assert revision == "20260908_0005"
+    assert marker == "marker"
+    assert "repositories" in tables
 
 
 def test_drifted_legacy_database_is_never_stamped(tmp_path):
@@ -381,4 +451,21 @@ def test_production_application_detects_index_drift_with_valid_revision(tmp_path
     started = _run_production_startup(database_url)
     assert started.returncode != 0
     assert "schema drift detected" in started.stderr
+    assert "indexes" in started.stderr
+
+
+def test_production_application_detects_repository_identity_index_drift(tmp_path):
+    database_path = tmp_path / "repository-index-drift.db"
+    database_url = f"sqlite+pysqlite:///{database_path}"
+    migrated = _run_schema_cli(database_url, "migrate")
+    assert migrated.returncode == 0, migrated.stderr
+
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DROP INDEX ux_repositories_remote_identity")
+
+    started = _run_production_startup(database_url)
+    assert started.returncode != 0
+    assert "schema drift detected" in started.stderr
+    assert "repositories" in started.stderr
     assert "indexes" in started.stderr

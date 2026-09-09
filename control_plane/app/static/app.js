@@ -24,6 +24,18 @@ const approvalLabels = {
 };
 
 const executionLabels = { queued: "В очереди", running: "Выполняется", completed: "Готов к приемке", failed: "Ошибка", cancelled: "Остановлен" };
+const repositoryStatusLabels = {
+  pending_validation: "Ожидает проверки",
+  ready: "Готов",
+  unavailable: "Недоступен",
+  invalid: "Отклонён",
+};
+const repositoryProviderLabels = { github: "GitHub", gitlab: "GitLab", bitbucket: "Bitbucket", generic: "Generic Git" };
+const assuranceLabels = {
+  "general-standard": "Standard",
+  "general-high-assurance": "High assurance",
+  "regulated-critical": "Regulated critical",
+};
 let progressExecutionId = null;
 let executionsByTask = new Map();
 
@@ -45,7 +57,11 @@ async function api(path, options = {}) {
   const response = await fetch(path, { ...options, headers });
   if (!response.ok) {
     let message = `Ошибка ${response.status}`;
-    try { message = (await response.json()).detail || message; } catch (_) { /* noop */ }
+    try {
+      const detail = (await response.json()).detail;
+      if (typeof detail === "string") message = detail;
+      else if (Array.isArray(detail)) message = detail.map((item) => item.msg || "Некорректные данные").join("; ");
+    } catch (_) { /* noop */ }
     throw new Error(message);
   }
   return response.json();
@@ -88,6 +104,51 @@ async function loadExecutions() {
   executionsByTask = new Map();
   runs.forEach((run) => {
     if (!executionsByTask.has(run.task_id)) executionsByTask.set(run.task_id, run);
+  });
+}
+
+async function setRepositoryEnabled(repository) {
+  try {
+    await api(`/api/repositories/${repository.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ expected_version: repository.version, enabled: !repository.enabled }),
+    });
+    toast(repository.enabled ? "Репозиторий отключён" : "Репозиторий включён");
+    await refreshAll();
+  } catch (error) { toast(error.message, true); }
+}
+
+async function loadRepositories() {
+  const repositories = await api("/api/repositories?limit=100");
+  const body = document.getElementById("repositories-body");
+  body.replaceChildren();
+  if (!repositories.length) {
+    const row = node("tr");
+    const cell = node("td", "empty", "Репозитории ещё не зарегистрированы.");
+    cell.colSpan = 5;
+    row.append(cell);
+    body.append(row);
+    return;
+  }
+  repositories.forEach((repository) => {
+    const row = node("tr");
+    const nameCell = node("td");
+    nameCell.append(node("span", "task-title", repository.name));
+    nameCell.append(node("span", "task-meta", repository.remote_url));
+    const providerCell = node("td");
+    providerCell.append(node("span", "pill", repositoryProviderLabels[repository.provider] || repository.provider));
+    const statusCell = node("td");
+    statusCell.append(node("span", `pill ${repository.status}`, repositoryStatusLabels[repository.status] || repository.status));
+    const assuranceCell = node("td");
+    assuranceCell.append(node("span", "pill", assuranceLabels[repository.assurance_tier] || repository.assurance_tier));
+    if (repository.assurance_profile) assuranceCell.append(node("span", "task-meta", ` · ${repository.assurance_profile}`));
+    const accessCell = node("td");
+    accessCell.append(node("span", `pill ${repository.enabled ? "done" : "failed"}`, repository.enabled ? "Включён" : "Отключён"));
+    const toggle = node("button", "text-button", repository.enabled ? "Отключить" : "Включить");
+    toggle.addEventListener("click", () => setRepositoryEnabled(repository));
+    accessCell.append(toggle);
+    row.append(nameCell, providerCell, statusCell, assuranceCell, accessCell);
+    body.append(row);
   });
 }
 
@@ -349,7 +410,7 @@ async function loadAudit() {
 async function refreshAll() {
   try {
     await loadExecutions();
-    await Promise.all([loadSummary(), loadTasks(), loadCapabilityGuard(), loadApprovals(), loadBudgets(), loadAudit()]);
+    await Promise.all([loadSummary(), loadRepositories(), loadTasks(), loadCapabilityGuard(), loadApprovals(), loadBudgets(), loadAudit()]);
   } catch (error) { toast(error.message, true); }
 }
 
@@ -358,7 +419,32 @@ document.getElementById("close-progress").addEventListener("click", () => { prog
 
 document.getElementById("show-task-form").addEventListener("click", () => document.getElementById("task-form-panel").classList.remove("hidden"));
 document.getElementById("hide-task-form").addEventListener("click", () => document.getElementById("task-form-panel").classList.add("hidden"));
+document.getElementById("show-repository-form").addEventListener("click", () => document.getElementById("repository-form-panel").classList.remove("hidden"));
+document.getElementById("hide-repository-form").addEventListener("click", () => document.getElementById("repository-form-panel").classList.add("hidden"));
 document.querySelectorAll("[data-refresh]").forEach((button) => button.addEventListener("click", refreshAll));
+document.getElementById("repository-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const status = document.getElementById("repository-form-status");
+  const values = Object.fromEntries(new FormData(form).entries());
+  const payload = {
+    name: values.name,
+    remote_url: values.remote_url,
+    enabled: form.elements.enabled.checked,
+    execution_profile: "development",
+    assurance_tier: values.assurance_tier,
+  };
+  if (values.auth_profile_ref?.trim()) payload.auth_profile_ref = values.auth_profile_ref.trim();
+  if (values.assurance_profile?.trim()) payload.assurance_profile = values.assurance_profile.trim();
+  try {
+    status.textContent = "";
+    await api("/api/repositories", { method: "POST", body: JSON.stringify(payload) });
+    form.reset();
+    document.getElementById("repository-form-panel").classList.add("hidden");
+    toast("Репозиторий зарегистрирован и ожидает проверки");
+    await refreshAll();
+  } catch (error) { status.textContent = error.message; }
+});
 document.getElementById("task-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;

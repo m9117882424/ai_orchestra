@@ -4,10 +4,11 @@ AI Orchestra — самостоятельный AI-отдел, который п
 
 **AI Orchestra не является частью Trading Platform.** Trading Platform, Arvento, Wialon, Fuel Monitor, BI и другие системы — отдельные продукты, которые отдел может разрабатывать.
 
-> Статус репозитория: pilot 0.6.1. G1 Durable Core принят для pilot после rollout
-> `05bafd9` от 2026-09-07; проверяемая сводка находится в
+> Статус repository head: pilot 0.7.0, G2 в реализации. G1 Durable Core принят
+> для pilot после rollout `05bafd9` от 2026-09-07; проверяемая сводка находится в
 > [`docs/G1_PRODUCTION_ACCEPTANCE_2026-09-07.md`](docs/G1_PRODUCTION_ACCEPTANCE_2026-09-07.md).
-> Следующий engineering gate — G2 Repository & Workspace Platform. Приёмка G1 не
+> Первый инкремент G2 — fail-closed
+> [`Repository Registry`](docs/G2_REPOSITORY_REGISTRY.md). Приёмка G1 не
 > означает автоматический rollout: `git push`, merge, production deploy, доступ к
 > product secrets, запись во внешние production-системы и финансовое исполнение
 > технически не входят в разрешенный контур отдела.
@@ -17,6 +18,7 @@ AI Orchestra — самостоятельный AI-отдел, который п
 - OpenCode Web как рабочее место AI-руководителя и специалистов;
 - кабинет руководителя на FastAPI;
 - PostgreSQL для задач, согласований, бюджетов и audit trail;
+- versioned Repository Registry без Git credentials и сетевых side effects;
 - отдельный `execution-worker`: durable queue, lease/heartbeat, fencing, deadline и recovery без участия браузера;
 - обязательные QA и independent review;
 - одна задача — одна ветка/worktree — один агент-редактор;
@@ -340,6 +342,12 @@ Owner
 ```
 
 ## Рабочие репозитории
+
+G2.1 добавляет управляемый реестр через `GET/POST /api/repositories` и
+`GET/PATCH /api/repositories/{id}`. Новая запись всегда получает
+`pending_validation`; регистрация ещё не выполняет `clone/fetch` и не разрешает
+execution. Контракт и оставшиеся границы G2 описаны в
+[`docs/G2_REPOSITORY_REGISTRY.md`](docs/G2_REPOSITORY_REGISTRY.md).
 
 Проекты клонируются на host в `/opt/ai_orchestra/repos/`. Не передавайте GitHub write token OpenCode-контейнеру.
 

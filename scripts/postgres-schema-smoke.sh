@@ -48,13 +48,41 @@ PY
 schema_cli migrate
 schema_cli check
 
+echo "[INFO] PostgreSQL Repository Registry constraint smoke"
+if docker compose exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U ai_orchestra -d ai_orchestra \
+  -c "INSERT INTO repositories (
+        id, name, remote_url, remote_identity, remote_host, provider,
+        enabled, status, execution_profile, assurance_tier, version
+      ) VALUES (
+        'invalid-registry-row', 'invalid-registry-row',
+        'https://github.com/example/invalid.git',
+        'github.com/example/invalid', 'github.com', 'github',
+        TRUE, 'trusted_without_validation', 'development',
+        'general-standard', 1
+      );" >/dev/null 2>&1; then
+  echo "[FAIL] PostgreSQL accepted forged Repository Registry status" >&2
+  exit 1
+fi
+
+invalid_rows="$(docker compose exec -T postgres \
+  psql -U ai_orchestra -d ai_orchestra -Atc \
+  "SELECT count(*) FROM repositories WHERE id = 'invalid-registry-row'")"
+if [[ "$invalid_rows" != "0" ]]; then
+  echo "[FAIL] Rejected Repository Registry row was not rolled back" >&2
+  exit 1
+fi
+
 echo "[INFO] PostgreSQL drift refusal smoke"
 docker compose exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U ai_orchestra -d ai_orchestra \
   -c 'DROP INDEX ix_execution_runs_task_id;' >/dev/null
+docker compose exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U ai_orchestra -d ai_orchestra \
+  -c 'ALTER TABLE repositories DROP CONSTRAINT ck_repositories_status;' >/dev/null
 
 if schema_cli check; then
-  echo "[FAIL] schema check accepted deliberately removed index" >&2
+  echo "[FAIL] schema check accepted deliberately removed index/constraint" >&2
   exit 1
 fi
 

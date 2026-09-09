@@ -77,7 +77,7 @@ done
 
 (
   cd "$root"
-  sha256sum --check --strict SHA256SUMS
+  sha256sum --check --strict --quiet SHA256SUMS
 )
 
 if [[ ! -s "$root/control-plane.pgdump" ]]; then
@@ -85,7 +85,7 @@ if [[ ! -s "$root/control-plane.pgdump" ]]; then
   exit 1
 fi
 
-if find "$root" -type f \( -name '.env' -o -name '.env.providers' -o -name 'auth.json' \) -print -quit | grep -q .; then
+if find "$root" -type f \( -name '.env' -o -name '.env.providers' -o -name '.env.repositories' -o -name 'auth.json' \) -print -quit | grep -q .; then
   echo "[FAIL] Secret-bearing file detected inside backup" >&2
   exit 1
 fi

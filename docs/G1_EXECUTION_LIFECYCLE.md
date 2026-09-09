@@ -123,6 +123,7 @@ PoC regression, worker health, and the OpenCode toolchain.
 ## Remaining boundary after G1
 
 G1 makes the existing development execution lifecycle recoverable; it does not make
-the platform repository-safe. The next gate is G2: Repository Registry, a trusted
-Repo Manager, Git URL hardening, task-specific worktrees, and workspace preflight
-before the first model call. Git credentials must remain outside OpenCode.
+the platform repository-safe. G2.1 Registry and G2.2 trusted Repo Manager now close
+registration, read-only fetch and Git credential isolation. The gate remains open
+for task-specific worktrees, immutable execution binding and workspace preflight
+before the first model call. Git credentials remain outside OpenCode.

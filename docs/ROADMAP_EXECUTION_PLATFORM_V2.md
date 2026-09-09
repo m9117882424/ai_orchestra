@@ -100,10 +100,11 @@ post-deploy smoke. Фактические identifiers и ограничения 
 
 # G2 — Repository & Workspace Platform
 
-Статус: **активный engineering gate**. Первый инкремент — fail-closed Repository
-Registry; gate остаётся открытым до Repo Manager, task worktrees и обязательного
-workspace preflight. Контракт Registry описан в
-[`G2_REPOSITORY_REGISTRY.md`](G2_REPOSITORY_REGISTRY.md).
+Статус: **активный engineering gate**. G2.1 fail-closed Registry и G2.2 trusted
+Repo Manager реализованы; gate остаётся открытым до task worktrees, immutable
+execution binding и обязательного workspace preflight. Контракты описаны в
+[`G2_REPOSITORY_REGISTRY.md`](G2_REPOSITORY_REGISTRY.md) и
+[`G2_TRUSTED_REPO_MANAGER.md`](G2_TRUSTED_REPO_MANAGER.md).
 
 ### Repository Registry
 Для любого Git repository:
@@ -117,9 +118,11 @@ workspace preflight. Контракт Registry описан в
 
 ### Repo Manager
 Отдельный trusted service:
-- register/validate;
-- clone/fetch/prune;
-- default branch detection;
+- [x] register/validate;
+- [x] read-only bare mirror fetch/prune;
+- [x] default branch detection и commit reconciliation;
+- [x] DNS/IP/TLS validation, redirect deny и отдельная credential boundary;
+- [x] durable lease/fencing, retry/recovery и audit;
 - task branch/worktree;
 - status/diff/tree identity;
 - cleanup;

@@ -26,6 +26,7 @@ const approvalLabels = {
 const executionLabels = { queued: "В очереди", running: "Выполняется", completed: "Готов к приемке", failed: "Ошибка", cancelled: "Остановлен" };
 const repositoryStatusLabels = {
   pending_validation: "Ожидает проверки",
+  validating: "Проверяется",
   ready: "Готов",
   unavailable: "Недоступен",
   invalid: "Отклонён",
@@ -118,6 +119,17 @@ async function setRepositoryEnabled(repository) {
   } catch (error) { toast(error.message, true); }
 }
 
+async function validateRepository(repository) {
+  try {
+    await api(`/api/repositories/${repository.id}/validate`, {
+      method: "POST",
+      body: JSON.stringify({ expected_version: repository.version }),
+    });
+    toast("Проверка репозитория поставлена в надёжную очередь");
+    await refreshAll();
+  } catch (error) { toast(error.message, true); }
+}
+
 async function loadRepositories() {
   const repositories = await api("/api/repositories?limit=100");
   const body = document.getElementById("repositories-body");
@@ -139,6 +151,12 @@ async function loadRepositories() {
     providerCell.append(node("span", "pill", repositoryProviderLabels[repository.provider] || repository.provider));
     const statusCell = node("td");
     statusCell.append(node("span", `pill ${repository.status}`, repositoryStatusLabels[repository.status] || repository.status));
+    if (repository.default_branch && repository.last_known_commit) {
+      statusCell.append(node("span", "task-meta", `${repository.default_branch} · ${repository.last_known_commit.slice(0, 12)}`));
+    }
+    if (repository.last_sync_error_code) {
+      statusCell.append(node("span", "task-meta", `Код: ${repository.last_sync_error_code}`));
+    }
     const assuranceCell = node("td");
     assuranceCell.append(node("span", "pill", assuranceLabels[repository.assurance_tier] || repository.assurance_tier));
     if (repository.assurance_profile) assuranceCell.append(node("span", "task-meta", ` · ${repository.assurance_profile}`));
@@ -147,6 +165,12 @@ async function loadRepositories() {
     const toggle = node("button", "text-button", repository.enabled ? "Отключить" : "Включить");
     toggle.addEventListener("click", () => setRepositoryEnabled(repository));
     accessCell.append(toggle);
+    if (repository.enabled) {
+      const validate = node("button", "text-button", "Проверить");
+      validate.disabled = repository.status === "validating";
+      validate.addEventListener("click", () => validateRepository(repository));
+      accessCell.append(validate);
+    }
     row.append(nameCell, providerCell, statusCell, assuranceCell, accessCell);
     body.append(row);
   });

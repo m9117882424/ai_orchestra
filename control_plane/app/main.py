@@ -43,6 +43,7 @@ from .schemas import (
     RepositoryRead,
     RepositoryStatus,
     RepositoryUpdate,
+    RepositoryValidationRequest,
     TaskCreate,
     TaskRead,
     TaskStatusUpdate,
@@ -76,7 +77,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="AI Orchestra Control Plane",
-    version="0.7.0",
+    version="0.8.0",
     docs_url=None,
     redoc_url=None,
     lifespan=lifespan,
@@ -193,6 +194,7 @@ def create_repository(
     manager: Manager,
     _: Mutation,
 ) -> Repository:
+    now = datetime.now(timezone.utc)
     remote = normalize_repository_remote(payload.remote_url)
     if db.scalar(select(Repository.id).where(Repository.name == payload.name)) is not None:
         raise HTTPException(status_code=409, detail="Имя репозитория уже зарегистрировано")
@@ -216,6 +218,8 @@ def create_repository(
         execution_profile=payload.execution_profile,
         assurance_tier=payload.assurance_tier,
         assurance_profile=payload.assurance_profile,
+        sync_requested_at=now,
+        sync_next_at=now if payload.enabled else None,
         version=1,
     )
     db.add(repository)
@@ -292,7 +296,13 @@ def update_repository(
         return repository
 
     repository.version += 1
-    repository.updated_at = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    if "auth_profile_ref" in changes or "enabled" in changes:
+        repository.status = "pending_validation"
+        repository.sync_requested_at = now
+        repository.sync_next_at = now if repository.enabled else None
+        repository.last_sync_error_code = None
+    repository.updated_at = now
     write_audit(
         db,
         actor=manager,
@@ -300,6 +310,56 @@ def update_repository(
         entity_type="repository",
         entity_id=repository.id,
         details={"version": repository.version, "changes": changes},
+    )
+    db.commit()
+    db.refresh(repository)
+    return repository
+
+
+@app.post(
+    "/api/repositories/{repository_id}/validate",
+    response_model=RepositoryRead,
+)
+def request_repository_validation(
+    repository_id: str,
+    payload: RepositoryValidationRequest,
+    db: DbSession,
+    manager: Manager,
+    _: Mutation,
+) -> Repository:
+    repository = db.scalar(
+        select(Repository).where(Repository.id == repository_id).with_for_update()
+    )
+    if repository is None:
+        raise HTTPException(status_code=404, detail="Репозиторий не найден")
+    if repository.version != payload.expected_version:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Запись репозитория уже изменена: "
+                f"expected_version={payload.expected_version}, current_version={repository.version}"
+            ),
+        )
+    if not repository.enabled:
+        raise HTTPException(
+            status_code=409,
+            detail="Отключенный репозиторий нельзя проверить; сначала включите его",
+        )
+
+    now = datetime.now(timezone.utc)
+    repository.status = "pending_validation"
+    repository.sync_requested_at = now
+    repository.sync_next_at = now
+    repository.last_sync_error_code = None
+    repository.version += 1
+    repository.updated_at = now
+    write_audit(
+        db,
+        actor=manager,
+        action="repository.validation_requested",
+        entity_type="repository",
+        entity_id=repository.id,
+        details={"version": repository.version},
     )
     db.commit()
     db.refresh(repository)

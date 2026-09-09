@@ -73,6 +73,59 @@ if [[ "$invalid_rows" != "0" ]]; then
   exit 1
 fi
 
+if docker compose exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U ai_orchestra -d ai_orchestra \
+  -c "INSERT INTO repositories (
+        id, name, remote_url, remote_identity, remote_host, provider,
+        enabled, status, execution_profile, assurance_tier, version,
+        sync_generation, sync_failure_count
+      ) VALUES (
+        'invalid-ready-row', 'invalid-ready-row',
+        'https://github.com/example/invalid-ready.git',
+        'github.com/example/invalid-ready', 'github.com', 'github',
+        TRUE, 'ready', 'development', 'general-standard', 1, 0, 0
+      );" >/dev/null 2>&1; then
+  echo "[FAIL] PostgreSQL accepted ready repository without trusted sync evidence" >&2
+  exit 1
+fi
+
+echo "[INFO] PostgreSQL Repo Manager lease-pair constraint smoke"
+if docker compose exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U ai_orchestra -d ai_orchestra \
+  -c "INSERT INTO repositories (
+        id, name, remote_url, remote_identity, remote_host, provider,
+        enabled, status, execution_profile, assurance_tier, version,
+        sync_generation, sync_failure_count, sync_lease_owner
+      ) VALUES (
+        'invalid-lease-row', 'invalid-lease-row',
+        'https://github.com/example/invalid-lease.git',
+        'github.com/example/invalid-lease', 'github.com', 'github',
+        TRUE, 'validating', 'development', 'general-standard', 1,
+        1, 0, 'worker-without-expiry'
+      );" >/dev/null 2>&1; then
+  echo "[FAIL] PostgreSQL accepted half-populated Repo Manager lease" >&2
+  exit 1
+fi
+
+echo "[INFO] PostgreSQL Repo Manager validating-state constraint smoke"
+if docker compose exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U ai_orchestra -d ai_orchestra \
+  -c "INSERT INTO repositories (
+        id, name, remote_url, remote_identity, remote_host, provider,
+        enabled, status, execution_profile, assurance_tier, version,
+        sync_generation, sync_failure_count, sync_lease_owner,
+        sync_lease_expires_at
+      ) VALUES (
+        'invalid-validating-row', 'invalid-validating-row',
+        'https://github.com/example/invalid-validating.git',
+        'github.com/example/invalid-validating', 'github.com', 'github',
+        TRUE, 'validating', 'development', 'general-standard', 1,
+        1, 0, 'worker', CURRENT_TIMESTAMP + INTERVAL '5 minutes'
+      );" >/dev/null 2>&1; then
+  echo "[FAIL] PostgreSQL accepted validating repository without start evidence" >&2
+  exit 1
+fi
+
 echo "[INFO] PostgreSQL drift refusal smoke"
 docker compose exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U ai_orchestra -d ai_orchestra \
@@ -80,6 +133,12 @@ docker compose exec -T postgres \
 docker compose exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U ai_orchestra -d ai_orchestra \
   -c 'ALTER TABLE repositories DROP CONSTRAINT ck_repositories_status;' >/dev/null
+docker compose exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U ai_orchestra -d ai_orchestra \
+  -c 'ALTER TABLE repositories DROP CONSTRAINT ck_repositories_sync_lease_pair;' >/dev/null
+docker compose exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U ai_orchestra -d ai_orchestra \
+  -c 'ALTER TABLE repositories DROP CONSTRAINT ck_repositories_validating_state;' >/dev/null
 
 if schema_cli check; then
   echo "[FAIL] schema check accepted deliberately removed index/constraint" >&2

@@ -4,7 +4,7 @@
 
 This runbook covers the G1 Durable Core backup/DR baseline for AI Orchestra. It is repository and storage-provider agnostic.
 
-The current local backup remains `scripts/backup.sh`: PostgreSQL custom-format dump + configuration + optional OpenCode state + Git bundles + internal `SHA256SUMS`. Secrets (`.env`, `.env.providers`, OpenCode `auth.json`) are intentionally excluded and must be recovered from a separate secret-management process.
+The current local backup remains `scripts/backup.sh`: PostgreSQL custom-format dump + configuration + optional OpenCode state + Git bundles + internal `SHA256SUMS`. The command serializes concurrent backup attempts, publishes the archive with an atomic rename, and verifies its paths/checksums before reporting success. Secrets (`.env`, `.env.providers`, `.env.repositories`, OpenCode `auth.json`) are intentionally excluded and must be recovered from a separate secret-management process. Trusted Repo Manager bare mirrors are a reconstructible cache and are also excluded.
 
 ## Commands
 
@@ -26,7 +26,7 @@ Each command accepts the newest local backup by default. The scripts also accept
 - required PostgreSQL/configuration payload exists;
 - every file listed in the internal `SHA256SUMS` matches;
 - PostgreSQL dump is non-empty;
-- `.env`, `.env.providers`, and `auth.json` are absent.
+- `.env`, `.env.providers`, `.env.repositories`, and `auth.json` are absent.
 
 This proves archive integrity/structure. It does **not** prove recoverability by itself; `make restore-drill` is the recoverability test.
 

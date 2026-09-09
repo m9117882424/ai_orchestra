@@ -24,7 +24,8 @@ jobs:
         run: |
           cp .env.example .env
           cp .env.providers.example .env.providers
-          chmod 600 .env .env.providers
+          cp .env.repositories.example .env.repositories
+          chmod 600 .env .env.providers .env.repositories
           cp config/opencode.gateway.json runtime/opencode.json
           cp config/model-router.shared.yaml runtime/model-router.yaml
 
@@ -59,7 +60,9 @@ jobs:
           bash -n scripts/export-backup-offsite.sh
           bash -n scripts/backup-restore-smoke.sh
           bash -n scripts/temporal-durable-smoke.sh
+          bash -n control_plane/app/repo_manager_git_wrapper.sh
           shellcheck scripts/*.sh
+          shellcheck control_plane/app/repo_manager_git_wrapper.sh
 
       - name: Проверить dependency locks
         run: |
@@ -104,4 +107,16 @@ jobs:
             command -v python3 >/dev/null &&
             command -v node >/dev/null &&
             rg --version | head -n 1
+          '
+
+      - name: Проверить trusted Repo Manager toolchain
+        run: |
+          docker compose run --rm -T --no-deps control-plane sh -lc '
+            ! command -v git
+          '
+          docker compose run --rm -T --no-deps repo-manager sh -lc '
+            test "$(id -u)" != 0 &&
+            test -x /app/app/repo_manager_askpass.py &&
+            test -x /app/app/repo_manager_git_wrapper.sh &&
+            REPO_MANAGER_GIT_MAX_FILE_BLOCKS=2048 /app/app/repo_manager_git_wrapper.sh --version
           '

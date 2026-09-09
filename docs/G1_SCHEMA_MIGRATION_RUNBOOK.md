@@ -2,14 +2,14 @@
 
 ## Purpose
 
-This runbook is the only supported path for moving the existing Control Plane PostgreSQL database through its reviewed Alembic chain. The current repository head is `20260908_0005`.
+This runbook is the only supported path for moving the existing Control Plane PostgreSQL database through its reviewed Alembic chain. The current repository head is `20260909_0006`.
 
 The first migration is special because production already contains tables created historically by SQLAlchemy `Base.metadata.create_all()`.
 
 The migration tooling therefore supports two fail-closed paths:
 
 1. **fresh database** — Alembic creates the complete schema;
-2. **legacy existing database** — the tool verifies that tables, columns, types/nullability, primary keys, foreign keys, named checks and explicit indexes match the declared historical `20260904_0001` shape, stamps that exact revision, and upgrades through `0002` (lease/fencing), `0003` (durable queued dispatch), `0004` (deadline/cancellation intent), and `0005` (Repository Registry).
+2. **legacy existing database** — the tool verifies that tables, columns, types/nullability, primary keys, foreign keys, named checks and explicit indexes match the declared historical `20260904_0001` shape, stamps that exact revision, and upgrades through `0002` (lease/fencing), `0003` (durable queued dispatch), `0004` (deadline/cancellation intent), `0005` (Repository Registry), and `0006` (trusted Repo Manager synchronization state).
 
 If legacy schema differs, the tool refuses to stamp it.
 
@@ -28,10 +28,11 @@ If legacy schema differs, the tool refuses to stamp it.
 From `/opt/ai_orchestra` after updating the repository:
 
 ```bash
+make init
 make preflight
 make build
 docker compose up -d postgres
-docker compose stop control-plane execution-worker
+docker compose stop control-plane execution-worker repo-manager
 make migrate
 make schema-check
 make up
@@ -39,38 +40,45 @@ docker compose ps
 make smoke
 ```
 
-`make migrate` creates the normal project backup before any schema action. The old
+`make init` creates the new ignored `.env.repositories` scope when upgrading from
+G2.1. Preserve an existing file; never reconstruct private Git credentials from a
+backup or terminal transcript.
+
+`make migrate` creates and verifies the normal project backup before any schema
+action. A failed archive/path/checksum verification stops migration. The old
 Control Plane is stopped first so it cannot write lifecycle state while the schema
 and application image move together. Model Router, Gateway and OpenCode may remain
 available during this maintenance window.
 
-Do not reverse `make migrate` and `make up`: both `control-plane` and
-`execution-worker` verify the exact schema at startup and must fail closed on an old
-revision.
+Do not reverse `make migrate` and `make up`: `control-plane`, `execution-worker`
+and `repo-manager` verify the exact schema at startup and must fail closed on an
+old revision.
 
 ## Expected first production migration
 
 For a versioned `20260904_0001` database the expected message is equivalent to:
 
 ```text
-[OK] Schema migrated to 20260908_0005
+[OK] Schema migrated to 20260909_0006
 ```
 
 For an unversioned database that exactly matches the historical baseline:
 
 ```text
-[OK] Historical baseline 20260904_0001 verified, migrated to 20260908_0005; data unchanged
+[OK] Historical baseline 20260904_0001 verified, migrated to 20260909_0006; data unchanged
 ```
 
 Active executions present during `0004` receive a fresh two-hour deadline grace
 period. Terminal execution history receives no deadline and is otherwise unchanged.
-Migration `0005` creates an empty repository registry and does not mutate existing
-tasks, executions, approvals, budgets, usage or audit rows.
+Migration `0005` creates a repository registry. Migration `0006` preserves
+registry identity/policy, revokes pre-worker operational trust by setting rows to
+`pending_validation`, and queues enabled rows for trusted synchronization. Neither
+migration mutates tasks, executions, approvals, budgets, usage or audit rows.
 
 If the database is already migrated, the expected message is:
 
 ```text
-[OK] Schema already at head: 20260908_0005
+[OK] Schema already at head: 20260909_0006
 ```
 
 ## Failure: legacy schema mismatch
@@ -114,15 +122,18 @@ This is defense in depth. The long-term G1/G2 target is a separate database role
 
 The initial baseline stamp does not alter business data. Later G1 revisions add
 execution lifecycle columns and relax `opencode_session_id` nullability; `0004`
-backfills deadlines only for active rows. G2 revision `0005` adds a new empty table.
+backfills deadlines only for active rows. G2 revision `0005` adds a new table;
+`0006` adds synchronization metadata and deliberately requires Registry rows to be
+revalidated before `ready` can be trusted.
 
-If application rollout fails after a successful baseline stamp:
+If application rollout fails after a successful migration:
 
-1. keep the database and backup intact;
-2. roll the application/container revision back;
-3. do not run Alembic downgrade automatically;
-4. investigate the application failure;
-5. if a future migration changed data/schema, use that migration's reviewed rollback plan rather than a generic downgrade command.
+1. keep all lifecycle writers stopped and preserve the verified pre-migration backup;
+2. do not start an older application image against a newer revision — runtime schema guards will reject it;
+3. prefer a reviewed fix-forward on the new schema;
+4. do not run Alembic downgrade automatically;
+5. if rollback is explicitly approved before writers resume, restore the verified pre-migration backup and then restore the matching application/container revision;
+6. retain the failed database separately for investigation rather than overwriting it in place.
 
 ## Verification evidence
 

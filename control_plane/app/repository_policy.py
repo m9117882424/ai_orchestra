@@ -72,7 +72,7 @@ def normalize_profile_reference(value: str, *, field_name: str) -> str:
     return normalized
 
 
-def _normalize_host(hostname: str) -> str:
+def normalize_repository_host(hostname: str) -> str:
     if hostname.endswith("."):
         raise RepositoryPolicyError("Git remote host с завершающей точкой запрещен")
     try:
@@ -124,7 +124,7 @@ def normalize_repository_remote(value: str) -> NormalizedRepositoryRemote:
     if port not in (None, 443):
         raise RepositoryPolicyError("Git remote разрешен только через стандартный HTTPS port 443")
 
-    host = _normalize_host(parsed.hostname)
+    host = normalize_repository_host(parsed.hostname)
     path = parsed.path.rstrip("/")
     if not path.startswith("/") or path == "/" or "//" in path:
         raise RepositoryPolicyError("Git remote должен содержать однозначный путь репозитория")

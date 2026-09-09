@@ -35,7 +35,7 @@ class Repository(Base):
             name="ck_repositories_provider",
         ),
         CheckConstraint(
-            "status IN ('pending_validation', 'ready', 'unavailable', 'invalid')",
+            "status IN ('pending_validation', 'validating', 'ready', 'unavailable', 'invalid')",
             name="ck_repositories_status",
         ),
         CheckConstraint(
@@ -54,9 +54,40 @@ class Repository(Base):
             name="ck_repositories_assurance_profile",
         ),
         CheckConstraint("version >= 1", name="ck_repositories_version"),
+        CheckConstraint(
+            "sync_generation >= 0",
+            name="ck_repositories_sync_generation",
+        ),
+        CheckConstraint(
+            "sync_failure_count >= 0",
+            name="ck_repositories_sync_failure_count",
+        ),
+        CheckConstraint(
+            "((sync_lease_owner IS NULL AND sync_lease_expires_at IS NULL) "
+            "OR (sync_lease_owner IS NOT NULL AND sync_lease_expires_at IS NOT NULL))",
+            name="ck_repositories_sync_lease_pair",
+        ),
+        CheckConstraint(
+            "(status <> 'ready' OR (enabled IS TRUE "
+            "AND length(default_branch) BETWEEN 1 AND 255 "
+            "AND length(last_known_commit) IN (40, 64) "
+            "AND last_fetched_at IS NOT NULL AND sync_finished_at IS NOT NULL "
+            "AND sync_next_at IS NOT NULL AND sync_lease_owner IS NULL "
+            "AND sync_lease_expires_at IS NULL AND last_sync_error_code IS NULL "
+            "AND sync_failure_count = 0))",
+            name="ck_repositories_ready_state",
+        ),
+        CheckConstraint(
+            "(status <> 'validating' OR (enabled IS TRUE "
+            "AND sync_started_at IS NOT NULL AND sync_lease_owner IS NOT NULL "
+            "AND sync_lease_expires_at IS NOT NULL))",
+            name="ck_repositories_validating_state",
+        ),
         Index("ux_repositories_name", "name", unique=True),
         Index("ux_repositories_remote_identity", "remote_identity", unique=True),
         Index("ix_repositories_enabled_status", "enabled", "status"),
+        Index("ix_repositories_sync_queue", "enabled", "sync_next_at"),
+        Index("ix_repositories_sync_lease", "sync_lease_expires_at"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -73,6 +104,25 @@ class Repository(Base):
     last_fetched_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    sync_generation: Mapped[int] = mapped_column(Integer, default=0)
+    sync_failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    sync_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    sync_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    sync_finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    sync_next_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    sync_lease_owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    sync_lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_sync_error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
     execution_profile: Mapped[str] = mapped_column(String(40), default="development")
     assurance_tier: Mapped[str] = mapped_column(String(40), default="general-standard")
     assurance_profile: Mapped[str | None] = mapped_column(String(80), nullable=True)

@@ -15,6 +15,7 @@ FORBIDDEN_OPENCODE_ENV = {
     "CONTROL_PLANE_DB_PASSWORD",
     "CONTROL_PLANE_SERVER_PASSWORD",
     "MODEL_ROUTER_MASTER_KEY",
+    "REPO_MANAGER_AUTH_PROFILES_JSON",
 }
 FORBIDDEN_EXECUTION_WORKER_ENV = {
     "AITUNNEL_API_KEY",
@@ -23,6 +24,7 @@ FORBIDDEN_EXECUTION_WORKER_ENV = {
     "GOOGLE_GENERATIVE_AI_API_KEY",
     "MODEL_ROUTER_MASTER_KEY",
     "MODEL_ROUTER_CLIENT_KEY",
+    "REPO_MANAGER_AUTH_PROFILES_JSON",
 }
 PRODUCT_POLICY_MARKERS = {
     "min_deviation_pct",
@@ -81,9 +83,12 @@ def main() -> int:
     assert network_set(services["postgres"]) == {"control-db"}
     assert network_set(services["control-plane"]) == {"control-db", "control-access", "model-net"}
     assert network_set(services["execution-worker"]) == {"control-db", "model-net"}
+    assert network_set(services["repo-manager"]) == {"control-db", "repository-egress"}
     assert network_set(services["model-router"]) == {"router-backend", "provider-egress"}
     assert network_set(services["model-gateway"]) == {"model-net", "router-backend"}
     assert network_set(services["opencode"]) == {"model-net"}
+    assert not (network_set(services["repo-manager"]) & network_set(services["opencode"]))
+    assert not (network_set(services["repo-manager"]) & network_set(services["model-router"]))
 
     control_env = set((services["control-plane"].get("environment") or {}).keys())
     assert "MODEL_ROUTER_CLIENT_KEY" not in control_env
@@ -105,6 +110,44 @@ def main() -> int:
     assert worker.get("image") == services["control-plane"].get("image")
     assert worker.get("healthcheck"), "Execution worker must expose process liveness"
 
+    repo_manager = services["repo-manager"]
+    repo_environment = repo_manager.get("environment") or {}
+    repo_env = set(repo_environment)
+    assert "REPO_MANAGER_AUTH_PROFILES_JSON" in repo_env
+    assert "CONTROL_PLANE_DB_PASSWORD" in repo_env
+    assert repo_environment.get("CONTROL_PLANE_SERVER_PASSWORD") == (
+        "repo-manager-does-not-use-manager-auth"
+    )
+    assert repo_environment.get("CONTROL_PLANE_OPENCODE_PASSWORD") == (
+        "repo-manager-does-not-use-opencode-auth"
+    )
+    for forbidden in (
+        "AITUNNEL_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GOOGLE_GENERATIVE_AI_API_KEY",
+        "MODEL_ROUTER_MASTER_KEY",
+        "MODEL_ROUTER_CLIENT_KEY",
+    ):
+        assert forbidden not in repo_env, f"Repo Manager receives forbidden key: {forbidden}"
+    for service_name, service in services.items():
+        if service_name != "repo-manager":
+            assert "REPO_MANAGER_AUTH_PROFILES_JSON" not in (
+                service.get("environment") or {}
+            ), f"Git auth profiles leaked to {service_name}"
+    assert not repo_manager.get("ports"), "Repo Manager must not expose host ports"
+    assert repo_manager.get("read_only") is True
+    assert repo_manager.get("command") == ["python", "-m", "app.repository_manager"]
+    assert repo_manager.get("image") != services["control-plane"].get("image")
+    assert (repo_manager.get("build") or {}).get("target") == "repo-manager"
+    assert (services["control-plane"].get("build") or {}).get("target") == "control-plane"
+    assert (worker.get("build") or {}).get("target") == "control-plane"
+    assert repo_manager.get("healthcheck"), "Repo Manager must expose process liveness"
+    assert repo_manager.get("pids_limit") == 64
+    repo_mounts = repo_manager.get("volumes") or []
+    assert len(repo_mounts) == 1
+    assert repo_mounts[0].get("target") == "/var/lib/ai-orchestra/repositories"
+
     # OpenCode talks only to the inference gateway with a non-admin client credential.
     gateway = json.loads((ROOT / "config/opencode.gateway.json").read_text(encoding="utf-8"))
     assert set(gateway["provider"]) == {"orchestra"}
@@ -121,6 +164,10 @@ def main() -> int:
     assert "LITELLM_VERSION=1.98.0" in env_text
     assert "CONTROL_PLANE_SCHEMA_MODE=" not in env_text
     assert "CONTROL_PLANE_EXECUTION_TIMEOUT_SECONDS=7200" in env_text
+    assert "REPO_MANAGER_LEASE_SECONDS=300" in env_text
+    assert "REPO_MANAGER_GIT_TIMEOUT_SECONDS=60" in env_text
+    assert "REPO_MANAGER_MAX_ACTIVE=1" in env_text
+    assert "REPO_MANAGER_MIN_FREE_BYTES=536870912" in env_text
     assert "BACKUP_OFFSITE_ENCRYPTION_AT_REST_CONFIRMED=no" in env_text
     assert "BACKUP_OFFSITE_AUTHENTICATED_TRANSPORT_CONFIRMED=no" in env_text
 
@@ -129,6 +176,16 @@ def main() -> int:
         assert f"{key}=" in provider_example
     assert "MODEL_ROUTER_MASTER_KEY=" not in provider_example
     assert "MODEL_ROUTER_CLIENT_KEY=" not in provider_example
+
+    repository_example = (ROOT / ".env.repositories.example").read_text(encoding="utf-8")
+    assert "REPO_MANAGER_AUTH_PROFILES_JSON='{}'" in repository_example
+    for forbidden in (
+        "AITUNNEL_API_KEY=",
+        "OPENAI_API_KEY=",
+        "CONTROL_PLANE_DB_PASSWORD=",
+        "MODEL_ROUTER_MASTER_KEY=",
+    ):
+        assert forbidden not in repository_example
 
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     router_dockerfile = (ROOT / "model_router/Dockerfile").read_text(encoding="utf-8")
@@ -141,6 +198,10 @@ def main() -> int:
     assert "--require-hashes --requirement requirements.lock" in control_dockerfile
     assert "runtime-lock.sha256" in control_dockerfile
     assert "app.production:app" in control_dockerfile
+    assert "FROM application-base AS control-plane" in control_dockerfile
+    assert "FROM application-base AS repo-manager" in control_dockerfile
+    assert "apt-get install -y --no-install-recommends ca-certificates git" in control_dockerfile
+    assert "repo_manager_askpass.py" in control_dockerfile
 
     production_wrapper = (ROOT / "control_plane/app/production.py").read_text(encoding="utf-8")
     assert "_EXECUTION_REFRESH_RE" in production_wrapper
@@ -210,8 +271,11 @@ def main() -> int:
     restore_drill_script = (ROOT / "scripts/restore-drill.sh").read_text(encoding="utf-8")
     offsite_script = (ROOT / "scripts/export-backup-offsite.sh").read_text(encoding="utf-8")
     assert "export-backup-offsite.sh" not in backup_script, "Local backup must not gain implicit external effects"
-    assert "sha256sum --check --strict SHA256SUMS" in verify_backup_script
+    assert 'flock -n 9' in backup_script
+    assert 'bash ./scripts/verify-backup.sh "$archive"' in backup_script
+    assert "sha256sum --check --strict --quiet SHA256SUMS" in verify_backup_script
     assert "Secret-bearing file detected inside backup" in verify_backup_script
+    assert ".env.repositories" in verify_backup_script
     assert "ai-orchestra-restore-net-" in restore_drill_script
     assert "ai-orchestra-restore-vol-" in restore_drill_script
     assert "--network-alias restore-postgres" in restore_drill_script
@@ -255,6 +319,7 @@ def main() -> int:
         ), f"Repository Registry must not store Git credential column: {forbidden_column}"
     assert 'status="pending_validation"' in main_text
     assert '@app.delete("/api/repositories' not in main_text
+    assert '"/api/repositories/{repository_id}/validate"' in main_text
 
     repository_policy = (ROOT / "control_plane/app/repository_policy.py").read_text(
         encoding="utf-8"
@@ -268,6 +333,45 @@ def main() -> int:
             "Repository Registry policy must remain validation-only; "
             f"unexpected network/process marker: {network_marker}"
         )
+
+    repo_manager_text = (ROOT / "control_plane/app/repository_manager.py").read_text(
+        encoding="utf-8"
+    )
+    for marker in (
+        "with_for_update(skip_locked=True)",
+        "sync_generation",
+        "record_version",
+        "http.followRedirects=false",
+        "http.curloptResolve",
+        "start_new_session=True",
+        "os.killpg",
+        "GIT_ALLOW_PROTOCOL",
+        "protocol.allow=never",
+        "fetch.fsckObjects=true",
+        "--prune",
+        "ls-remote",
+        "resolve_public_addresses",
+        "REPO_MANAGER_AUTH_PROFILES_JSON",
+        "repo_manager_git_wrapper.sh",
+        "storage_capacity_low",
+        "_cleanup_staging",
+        "_cleanup_stale_git_locks",
+        "_repository_lock",
+    ):
+        assert marker in repo_manager_text, f"Repo Manager safety marker missing: {marker}"
+    assert "shell=True" not in repo_manager_text
+    assert "stderr=subprocess.DEVNULL" in repo_manager_text
+    askpass_text = (ROOT / "control_plane/app/repo_manager_askpass.py").read_text(
+        encoding="utf-8"
+    )
+    assert "REPO_MANAGER_GIT_PASSWORD" in askpass_text
+    assert "logging" not in askpass_text
+    assert "REPO_MANAGER_GIT_HOST" in askpass_text
+    git_wrapper_text = (ROOT / "control_plane/app/repo_manager_git_wrapper.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'ulimit -f "$limit"' in git_wrapper_text
+    assert 'exec /usr/bin/git "$@"' in git_wrapper_text
 
     worker_text = (ROOT / "control_plane/app/execution_worker.py").read_text(encoding="utf-8")
     assert "with_for_update(skip_locked=True)" in worker_text

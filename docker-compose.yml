@@ -30,7 +30,8 @@ services:
   control-plane:
     build:
       context: ./control_plane
-    image: ai-development-department/control-plane:0.7.0
+      target: control-plane
+    image: ai-development-department/control-plane:0.8.0
     restart: unless-stopped
     init: true
     read_only: true
@@ -81,7 +82,8 @@ services:
   execution-worker:
     build:
       context: ./control_plane
-    image: ai-development-department/control-plane:0.7.0
+      target: control-plane
+    image: ai-development-department/control-plane:0.8.0
     restart: unless-stopped
     init: true
     read_only: true
@@ -125,6 +127,71 @@ services:
         - python
         - -c
         - "import os,time; p='/tmp/ai-orchestra-execution-worker.heartbeat'; assert os.path.isfile(p) and time.time()-os.path.getmtime(p) < 180"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
+
+  repo-manager:
+    build:
+      context: ./control_plane
+      target: repo-manager
+    image: ai-development-department/repo-manager:0.8.0
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    command: ["python", "-m", "app.repository_manager"]
+    env_file:
+      - .env.repositories
+    environment:
+      CONTROL_PLANE_ENVIRONMENT: production
+      CONTROL_PLANE_DB_HOST: postgres
+      CONTROL_PLANE_DB_PORT: 5432
+      CONTROL_PLANE_DB_NAME: ai_orchestra
+      CONTROL_PLANE_DB_USER: ai_orchestra
+      CONTROL_PLANE_DB_PASSWORD: ${CONTROL_PLANE_DB_PASSWORD}
+      CONTROL_PLANE_SERVER_USERNAME: repo-manager
+      CONTROL_PLANE_SERVER_PASSWORD: repo-manager-does-not-use-manager-auth
+      CONTROL_PLANE_OPENCODE_PASSWORD: repo-manager-does-not-use-opencode-auth
+      REPO_MANAGER_STORAGE_ROOT: /var/lib/ai-orchestra/repositories
+      REPO_MANAGER_HEALTH_PATH: /tmp/ai-orchestra-repo-manager.heartbeat
+      REPO_MANAGER_LEASE_SECONDS: ${REPO_MANAGER_LEASE_SECONDS:-300}
+      REPO_MANAGER_GIT_TIMEOUT_SECONDS: ${REPO_MANAGER_GIT_TIMEOUT_SECONDS:-60}
+      REPO_MANAGER_REFRESH_SECONDS: ${REPO_MANAGER_REFRESH_SECONDS:-3600}
+      REPO_MANAGER_RETRY_BASE_SECONDS: ${REPO_MANAGER_RETRY_BASE_SECONDS:-30}
+      REPO_MANAGER_RETRY_MAX_SECONDS: ${REPO_MANAGER_RETRY_MAX_SECONDS:-1800}
+      REPO_MANAGER_MAX_ACTIVE: ${REPO_MANAGER_MAX_ACTIVE:-1}
+      REPO_MANAGER_POLL_SECONDS: ${REPO_MANAGER_POLL_SECONDS:-10}
+      REPO_MANAGER_MAX_REPOSITORY_BYTES: ${REPO_MANAGER_MAX_REPOSITORY_BYTES:-5368709120}
+      REPO_MANAGER_MIN_FREE_BYTES: ${REPO_MANAGER_MIN_FREE_BYTES:-536870912}
+    volumes:
+      - repository-mirrors:/var/lib/ai-orchestra/repositories
+    networks:
+      - control-db
+      - repository-egress
+    depends_on:
+      postgres:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 64
+    mem_limit: 512m
+    cpus: 0.50
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,time; p='/tmp/ai-orchestra-repo-manager.heartbeat'; assert os.path.isfile(p) and time.time()-os.path.getmtime(p) < 180"
       interval: 30s
       timeout: 5s
       retries: 3
@@ -278,6 +345,8 @@ networks:
   router-backend:
     internal: true
   provider-egress:
+  repository-egress:
 
 volumes:
   control-plane-postgres:
+  repository-mirrors:

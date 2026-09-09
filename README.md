@@ -4,11 +4,12 @@ AI Orchestra — самостоятельный AI-отдел, который п
 
 **AI Orchestra не является частью Trading Platform.** Trading Platform, Arvento, Wialon, Fuel Monitor, BI и другие системы — отдельные продукты, которые отдел может разрабатывать.
 
-> Статус repository head: pilot 0.7.0, G2 в реализации. G1 Durable Core принят
+> Статус repository head: pilot 0.8.0, G2 в реализации. G1 Durable Core принят
 > для pilot после rollout `05bafd9` от 2026-09-07; проверяемая сводка находится в
 > [`docs/G1_PRODUCTION_ACCEPTANCE_2026-09-07.md`](docs/G1_PRODUCTION_ACCEPTANCE_2026-09-07.md).
-> Первый инкремент G2 — fail-closed
-> [`Repository Registry`](docs/G2_REPOSITORY_REGISTRY.md). Приёмка G1 не
+> G2.1 Registry дополнен G2.2
+> [`Trusted Repo Manager`](docs/G2_TRUSTED_REPO_MANAGER.md): read-only fetch,
+> durable lease/fencing и отдельная Git credential boundary. Приёмка G1 не
 > означает автоматический rollout: `git push`, merge, production deploy, доступ к
 > product secrets, запись во внешние production-системы и финансовое исполнение
 > технически не входят в разрешенный контур отдела.
@@ -18,7 +19,9 @@ AI Orchestra — самостоятельный AI-отдел, который п
 - OpenCode Web как рабочее место AI-руководителя и специалистов;
 - кабинет руководителя на FastAPI;
 - PostgreSQL для задач, согласований, бюджетов и audit trail;
-- versioned Repository Registry без Git credentials и сетевых side effects;
+- versioned Repository Registry без Git credentials;
+- отдельный trusted `repo-manager`: DNS/IP/TLS validation, redirect deny,
+  read-only bare mirror, prune/fsck и durable lease/fencing;
 - отдельный `execution-worker`: durable queue, lease/heartbeat, fencing, deadline и recovery без участия браузера;
 - обязательные QA и independent review;
 - одна задача — одна ветка/worktree — один агент-редактор;
@@ -29,7 +32,7 @@ AI Orchestra — самостоятельный AI-отдел, который п
 - provider secrets и router admin key недоступны OpenCode/агентам;
 - control-plane PostgreSQL физически отделен Docker-сетью от OpenCode;
 - pinned runtime versions, resource limits и localhost-only web ports;
-- backup без `.env`, `.env.providers` и OpenCode credential store.
+- backup без `.env`, `.env.providers`, `.env.repositories` и OpenCode credential store.
 
 Подробные границы описаны в [`docs/ARCHITECTURE_V1.md`](docs/ARCHITECTURE_V1.md), а lifecycle выполнения — в [`docs/G1_EXECUTION_LIFECYCLE.md`](docs/G1_EXECUTION_LIFECYCLE.md).
 
@@ -166,11 +169,12 @@ LiteLLM   1.98.0 stable
 
 ## Секреты
 
-После `make init` есть два файла:
+После `make init` есть три файла:
 
 ```text
 .env
 .env.providers
+.env.repositories
 ```
 
 `.env` содержит operational credentials:
@@ -184,7 +188,11 @@ LiteLLM   1.98.0 stable
 
 `.env.providers` содержит только provider API keys.
 
-Оба файла имеют права `0600` и игнорируются Git. `make preflight` откажется продолжать, если provider credentials обнаружены в обычном `.env`.
+`.env.repositories` содержит только host-bound read-only Git auth profiles для
+trusted Repo Manager. Для public repositories он остаётся пустым JSON object.
+
+Все три файла имеют права `0600` и игнорируются Git. `make preflight` откажется
+продолжать при пересечении provider, Git, admin и DB credential scopes.
 
 **Не используйте `/connect` OpenCode для production provider credentials.**
 
@@ -194,7 +202,9 @@ LiteLLM   1.98.0 stable
 - `model-net` — только OpenCode + Model Gateway;
 - `router-backend` — только Model Gateway + Model Router, internal network;
 - `provider-egress` — Model Router для исходящих AI API;
+- `repository-egress` — только trusted Repo Manager для HTTPS Git read;
 - OpenCode не находится в сети control-plane DB или router admin service;
+- Repo Manager не находится в сетях OpenCode, Gateway или Model Router;
 - Docker socket хоста не монтируется;
 - все web/diagnostic ports привязаны только к `127.0.0.1`;
 - контейнеры имеют CPU/RAM limits, log rotation и `no-new-privileges`.
@@ -233,6 +243,11 @@ AITUNNEL_API_KEY=...
 ```
 
 Не публикуйте ключ в терминальных логах, Git или чатах.
+
+Для private repository отдельно откройте `.env.repositories`, добавьте только
+read-only profile по контракту
+[`docs/G2_TRUSTED_REPO_MANAGER.md`](docs/G2_TRUSTED_REPO_MANAGER.md) и не
+публикуйте его содержимое. Для public repositories ничего менять не нужно.
 
 Дальше:
 
@@ -343,20 +358,16 @@ Owner
 
 ## Рабочие репозитории
 
-G2.1 добавляет управляемый реестр через `GET/POST /api/repositories` и
-`GET/PATCH /api/repositories/{id}`. Новая запись всегда получает
-`pending_validation`; регистрация ещё не выполняет `clone/fetch` и не разрешает
-execution. Контракт и оставшиеся границы G2 описаны в
-[`docs/G2_REPOSITORY_REGISTRY.md`](docs/G2_REPOSITORY_REGISTRY.md).
+G2.1/G2.2 дают versioned Registry и отдельный trusted Repo Manager через
+`GET/POST /api/repositories`, `GET/PATCH /api/repositories/{id}` и
+`POST /api/repositories/{id}/validate`. Enabled запись автоматически попадает в
+очередь. Только после DNS/TLS/pinned-address проверки, read-only fetch и fsck она
+получает `ready`, default branch и immutable commit SHA. Credentials хранятся
+только в `.env.repositories`, не в API или OpenCode. Полный контракт:
+[`docs/G2_REPOSITORY_REGISTRY.md`](docs/G2_REPOSITORY_REGISTRY.md) и
+[`docs/G2_TRUSTED_REPO_MANAGER.md`](docs/G2_TRUSTED_REPO_MANAGER.md).
 
-Проекты клонируются на host в `/opt/ai_orchestra/repos/`. Не передавайте GitHub write token OpenCode-контейнеру.
-
-```bash
-cd /opt/ai_orchestra/repos
-git clone https://github.com/m9117882424/arvento-kpp-report.git
-```
-
-Worktree задачи:
+Task worktree пока остаётся отдельной операторской операцией следующего инкремента:
 
 ```bash
 cd /opt/ai_orchestra
@@ -402,7 +413,10 @@ Backup включает:
 - Git bundles проектов;
 - `SHA256SUMS`.
 
-Не включаются `.env`, `.env.providers` и `data/opencode/auth.json`. Provider secrets храните отдельно в password/secret manager; backup рекомендуется копировать в шифрованное внешнее хранилище.
+Не включаются `.env`, `.env.providers`, `.env.repositories` и
+`data/opencode/auth.json`. Provider/Git secrets храните отдельно в password/secret
+manager; backup рекомендуется копировать в шифрованное внешнее хранилище. Bare
+mirrors Repo Manager — восстановимый cache и после DR синхронизируются заново.
 
 ## Логи и диагностика
 
@@ -434,7 +448,7 @@ git pull --ff-only
 make init
 make preflight
 make build
-docker compose stop control-plane execution-worker
+docker compose stop control-plane execution-worker repo-manager
 docker compose up -d postgres
 make migrate
 make up

@@ -52,6 +52,14 @@ else
 fi
 chmod 600 .env.providers
 
+if [[ ! -f .env.repositories ]]; then
+  cp .env.repositories.example .env.repositories
+  echo "Создан .env.repositories. В него помещаются только read-only Git credentials Repo Manager."
+else
+  echo ".env.repositories уже существует — файл сохранен без перезаписи."
+fi
+chmod 600 .env.repositories
+
 if grep -Eq '^(AITUNNEL_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|GOOGLE_GENERATIVE_AI_API_KEY)=' .env; then
   echo "[WARN] В старом .env обнаружены provider-переменные."
   echo "[WARN] Перенесите их значения в .env.providers и удалите строки из .env; preflight это проверит."
@@ -79,5 +87,6 @@ python3 -m json.tool runtime/opencode.json >/dev/null
 echo
 echo "Инициализация завершена."
 echo "1. Заполните только нужные provider-ключи в .env.providers"
-echo "2. Выполните: make preflight"
-echo "3. Выполните: make build && make up && make smoke"
+echo "2. При необходимости добавьте read-only Git auth profiles в .env.repositories"
+echo "3. Выполните: make preflight"
+echo "4. Выполните: make build && make up && make smoke"

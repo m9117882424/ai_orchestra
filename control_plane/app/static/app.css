@@ -70,6 +70,8 @@ td { padding: 15px 12px; border-top: 1px solid var(--line); vertical-align: midd
 .pill.high, .pill.critical { color: #ffc4c4; border-color: #63363a; background: #27171a; }
 .pill.medium, .pill.waiting_approval { color: #ffe3a2; border-color: #65532a; background: #282313; }
 .pill.done { color: #c9ffac; border-color: #42622e; background: #162411; }
+.pill.validating, .pill.pending_validation { color: #b9ddff; border-color: #315775; background: #122333; }
+.pill.unavailable, .pill.invalid { color: #ffc4c4; border-color: #63363a; background: #27171a; }
 .status-select { max-width: 172px; }
 .guard-panel { background: linear-gradient(160deg, rgba(29, 24, 20, .95), rgba(17, 22, 30, .95) 60%); }
 .lock { color: var(--amber); border: 1px solid #66552d; padding: 4px 8px; border-radius: 6px; font: 700 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em; }

@@ -28,7 +28,9 @@ ApprovalKind = Literal[
 ]
 ApprovalDecision = Literal["approved", "rejected"]
 RepositoryProvider = Literal["github", "gitlab", "bitbucket", "generic"]
-RepositoryStatus = Literal["pending_validation", "ready", "unavailable", "invalid"]
+RepositoryStatus = Literal[
+    "pending_validation", "validating", "ready", "unavailable", "invalid"
+]
 ExecutionProfile = Literal["development"]
 AssuranceTier = Literal[
     "general-standard", "general-high-assurance", "regulated-critical"
@@ -111,6 +113,12 @@ class RepositoryUpdate(BaseModel):
         return self
 
 
+class RepositoryValidationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=1, strict=True)
+
+
 class RepositoryRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -125,6 +133,12 @@ class RepositoryRead(BaseModel):
     status: RepositoryStatus
     last_known_commit: str | None
     last_fetched_at: datetime | None
+    sync_failure_count: int
+    sync_requested_at: datetime | None
+    sync_started_at: datetime | None
+    sync_finished_at: datetime | None
+    sync_next_at: datetime | None
+    last_sync_error_code: str | None
     execution_profile: ExecutionProfile
     assurance_tier: AssuranceTier
     assurance_profile: str | None

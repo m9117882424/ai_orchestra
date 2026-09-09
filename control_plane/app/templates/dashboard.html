@@ -34,7 +34,7 @@
 
       <section class="entry-form panel hidden" id="repository-form-panel">
         <div class="panel-heading">
-          <div><p class="eyebrow">G2 Repository Registry</p><h2>Новый репозиторий</h2></div>
+          <div><p class="eyebrow">G2 Trusted Repo Manager</p><h2>Новый репозиторий</h2></div>
           <button class="icon-button" id="hide-repository-form" aria-label="Закрыть">×</button>
         </div>
         <form id="repository-form">
@@ -46,7 +46,7 @@
           <label class="checkbox-label"><input name="enabled" type="checkbox" checked>Разрешён после проверки</label>
           <div class="wide form-actions"><span class="form-status" id="repository-form-status"></span><button class="button button-primary" type="submit">Зарегистрировать</button></div>
         </form>
-        <p class="panel-note">Credentials сюда не вводятся. Запись останется pending validation до проверки Repo Manager.</p>
+        <p class="panel-note">Credentials сюда не вводятся. Отдельный Repo Manager проверит DNS/TLS, заблокирует redirect и создаст bare mirror без передачи Git-доступа AI.</p>
       </section>
 
       <section class="entry-form panel hidden" id="task-form-panel">
@@ -74,7 +74,7 @@
 
       <div class="layout">
         <section class="panel span-two">
-          <div class="panel-heading"><div><p class="eyebrow">G2 Repository Registry</p><h2>Репозитории</h2></div><button class="text-button" data-refresh>Обновить</button></div>
+          <div class="panel-heading"><div><p class="eyebrow">G2 Trusted Repo Manager</p><h2>Репозитории</h2></div><button class="text-button" data-refresh>Обновить</button></div>
           <div class="table-wrap"><table><thead><tr><th>Репозиторий</th><th>Provider</th><th>Проверка</th><th>Надёжность</th><th>Доступ</th></tr></thead><tbody id="repositories-body"><tr><td colspan="5" class="empty">Загрузка…</td></tr></tbody></table></div>
         </section>
 

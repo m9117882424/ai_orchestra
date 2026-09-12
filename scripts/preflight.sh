@@ -367,6 +367,8 @@ assert {(item.get("target"), bool(item.get("read_only"))) for item in workspace_
 opencode_mounts=services["opencode"].get("volumes") or []
 task_mount=[item for item in opencode_mounts if item.get("target")=="/workspace/worktrees/managed"]
 assert len(task_mount)==1 and task_mount[0].get("read_only") is not True, task_mount
+assert set(op.get("cap_drop") or [])=={"ALL"}
+assert set(op.get("cap_add") or [])=={"DAC_OVERRIDE","FOWNER"}
 manual_mount=[item for item in opencode_mounts if item.get("target")=="/workspace/worktrees/manual"]
 assert len(manual_mount)==1 and manual_mount[0].get("type")=="bind", manual_mount
 assert not any(item.get("target")=="/workspace/worktrees" for item in opencode_mounts), (
@@ -377,8 +379,11 @@ assert volume_init.get("network_mode")=="none"
 assert volume_init.get("user")=="0:0"
 assert volume_init.get("read_only") is True
 assert not volume_init.get("environment")
-assert set(volume_init.get("cap_add") or [])=={"CHOWN","FOWNER"}
+assert set(volume_init.get("cap_add") or [])=={"CHOWN","DAC_OVERRIDE","FOWNER"}
 assert set(volume_init.get("cap_drop") or [])=={"ALL"}
+init_entrypoint=volume_init.get("entrypoint") or []
+assert init_entrypoint==["/app/app/workspace_volume_init.sh"], init_entrypoint
+assert not volume_init.get("command"), volume_init.get("command")
 init_mounts=volume_init.get("volumes") or []
 assert len(init_mounts)==1 and init_mounts[0].get("target")=="/workspace/worktrees/managed", init_mounts
 assert (workspace.get("depends_on") or {})["workspace-volume-init"]["condition"]=="service_completed_successfully"

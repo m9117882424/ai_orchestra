@@ -197,6 +197,11 @@ def main() -> int:
         if mount.get("target") == "/workspace/worktrees/managed"
     )
     assert task_mount.get("read_only") is not True
+    assert set(services["opencode"].get("cap_drop") or []) == {"ALL"}
+    assert set(services["opencode"].get("cap_add") or []) == {
+        "DAC_OVERRIDE",
+        "FOWNER",
+    }
     manual_mount = next(
         mount
         for mount in opencode_mounts
@@ -214,8 +219,27 @@ def main() -> int:
     assert volume_init.get("read_only") is True
     assert not volume_init.get("environment")
     assert not volume_init.get("ports")
-    assert set(volume_init.get("cap_add") or []) == {"CHOWN", "FOWNER"}
+    assert set(volume_init.get("cap_add") or []) == {
+        "CHOWN",
+        "DAC_OVERRIDE",
+        "FOWNER",
+    }
     assert set(volume_init.get("cap_drop") or []) == {"ALL"}
+    init_entrypoint = volume_init.get("entrypoint") or []
+    assert init_entrypoint == ["/app/app/workspace_volume_init.sh"]
+    assert not volume_init.get("command")
+    init_script = (ROOT / "control_plane/app/workspace_volume_init.sh").read_text(
+        encoding="utf-8"
+    )
+    for required in (
+        '[ "$(id -u)" = 0 ]',
+        '[ ! -L "$target" ]',
+        'chown 10001:10001 "$target"',
+        'chmod 0700 "$target"',
+        "stat -c '%u:%g:%a'",
+        "10001:10001:700",
+    ):
+        assert required in init_script
     init_mounts = volume_init.get("volumes") or []
     assert len(init_mounts) == 1
     assert init_mounts[0].get("target") == "/workspace/worktrees/managed"
@@ -323,6 +347,10 @@ def main() -> int:
     assert "--require-hashes --requirement control_plane/requirements-dev.lock" in validate_workflow
     assert "Docker buildability with current upstream bases" in validate_workflow
     assert "docker compose run --rm -T --no-deps workspace-volume-init" in validate_workflow
+    assert "[CHECK] Task workspace volume initialization" in validate_workflow
+    assert 'test "$(id -u)" = 0 &&' in validate_workflow
+    assert "chmod 0640 /workspace/worktrees/managed/.ci-workspace-boundary" in validate_workflow
+    assert "shellcheck control_plane/app/workspace_volume_init.sh" in validate_workflow
     assert_actions_pinned(validate_workflow_path, validate_workflow)
 
     compose_command_paths = [

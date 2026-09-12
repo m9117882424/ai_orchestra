@@ -26,6 +26,14 @@ provider key или Git credential. Он создаёт workspace исключи
 проверенного локального mirror. `execution-worker` не может изменить workspace,
 а OpenCode не видит mirror и не может получить remote credential.
 
+Named volume принадлежит UID/GID `10001:10001` и имеет режим `0700`.
+One-shot initializer без сети и с read-only rootfs проверяет этот invariant до
+старта writers. OpenCode сохраняет `cap_drop: ALL` и получает обратно только
+`DAC_OVERRIDE` и `FOWNER`, необходимые его UID 0 для записи и изменения mode в
+этом volume; Docker socket, mirror, Git credentials и control-plane/provider
+secrets ему по-прежнему недоступны. Execution Worker монтирует тот же volume
+только read-only.
+
 ## Durable lifecycle
 
 1. Manager назначает задаче `ready` repository.

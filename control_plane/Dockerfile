@@ -23,7 +23,8 @@ FROM application-base AS git-runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/* \
-    && install -d -o orchestra -g orchestra -m 0700 /workspace/worktrees/managed
+    && install -d -o orchestra -g orchestra -m 0700 /workspace/worktrees/managed \
+    && chmod 0555 /app/app/workspace_volume_init.sh
 
 FROM git-runtime AS repo-manager
 

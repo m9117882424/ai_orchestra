@@ -95,6 +95,11 @@ task-workspaces volume
 Legacy operator worktrees монтируются отдельно в
 `/workspace/worktrees/manual`; bind mount на общий `/workspace/worktrees`
 запрещён, потому что он может скрыть managed named volume внутри OpenCode.
+Managed volume принадлежит UID/GID `10001:10001` с режимом `0700`; из всех
+долгоживущих сервисов только OpenCode получает две capabilities:
+`DAC_OVERRIDE` и `FOWNER`, чтобы его UID 0 мог изменять содержимое и file mode
+workspace. Execution Worker по-прежнему видит volume только read-only, а
+Workspace Manager работает как непривилегированный UID 10001.
 
 Дополнительные правила:
 

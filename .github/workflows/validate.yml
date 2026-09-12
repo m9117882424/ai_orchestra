@@ -120,18 +120,27 @@ jobs:
             test -x /app/app/repo_manager_git_wrapper.sh &&
             REPO_MANAGER_GIT_MAX_FILE_BLOCKS=2048 /app/app/repo_manager_git_wrapper.sh --version
           '
+          docker compose run --rm -T --no-deps workspace-volume-init
           docker compose run --rm -T --no-deps workspace-manager sh -lc '
             test "$(id -u)" = 10001 &&
             command -v git >/dev/null &&
-            touch /workspace/worktrees/managed/.ci-workspace-boundary
+            printf "workspace-manager\n" > /workspace/worktrees/managed/.ci-workspace-boundary
+          '
+          docker compose run --rm -T --no-deps --entrypoint sh opencode -lc '
+            test -f /workspace/worktrees/managed/.ci-workspace-boundary &&
+            printf "opencode-write\n" >> /workspace/worktrees/managed/.ci-workspace-boundary &&
+            grep -Fxq opencode-write /workspace/worktrees/managed/.ci-workspace-boundary
           '
           docker compose run --rm -T --no-deps execution-worker sh -lc '
             test "$(id -u)" = 10001 &&
             command -v git >/dev/null &&
             test -f /workspace/worktrees/managed/.ci-workspace-boundary &&
-            ! sh -c "echo forbidden >> /workspace/worktrees/managed/.ci-workspace-boundary"
+            grep -Fxq opencode-write /workspace/worktrees/managed/.ci-workspace-boundary &&
+            if sh -c "printf forbidden >> /workspace/worktrees/managed/.ci-workspace-boundary" 2>/dev/null; then
+              echo "[FAIL] Execution Worker unexpectedly wrote to task workspace" >&2
+              exit 1
+            fi
           '
-          docker compose run --rm -T --no-deps --entrypoint sh opencode -lc '
-            test -f /workspace/worktrees/managed/.ci-workspace-boundary &&
+          docker compose run --rm -T --no-deps workspace-manager sh -lc '
             rm /workspace/worktrees/managed/.ci-workspace-boundary
           '

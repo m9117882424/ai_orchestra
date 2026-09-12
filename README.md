@@ -213,6 +213,9 @@ trusted Repo Manager. Для public repositories он остаётся пуст�
 - Workspace Manager находится только в `control-db`, читает mirror read-only и
   один владеет lifecycle task workspace volume;
 - Execution Worker видит task workspace volume read-only, OpenCode — read/write;
+- legacy operator worktrees доступны OpenCode через отдельный
+  `/workspace/worktrees/manual`; родительский bind mount не может скрыть managed
+  task workspace volume;
 - OpenCode не находится в сети control-plane DB или router admin service;
 - Repo Manager не находится в сетях OpenCode, Gateway или Model Router;
 - Docker socket хоста не монтируется;

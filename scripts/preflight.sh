@@ -367,6 +367,11 @@ assert {(item.get("target"), bool(item.get("read_only"))) for item in workspace_
 opencode_mounts=services["opencode"].get("volumes") or []
 task_mount=[item for item in opencode_mounts if item.get("target")=="/workspace/worktrees/managed"]
 assert len(task_mount)==1 and task_mount[0].get("read_only") is not True, task_mount
+manual_mount=[item for item in opencode_mounts if item.get("target")=="/workspace/worktrees/manual"]
+assert len(manual_mount)==1 and manual_mount[0].get("type")=="bind", manual_mount
+assert not any(item.get("target")=="/workspace/worktrees" for item in opencode_mounts), (
+    "A parent /workspace/worktrees mount would mask the managed workspace volume"
+)
 volume_init=services["workspace-volume-init"]
 assert volume_init.get("network_mode")=="none"
 assert volume_init.get("user")=="0:0"

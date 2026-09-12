@@ -197,6 +197,16 @@ def main() -> int:
         if mount.get("target") == "/workspace/worktrees/managed"
     )
     assert task_mount.get("read_only") is not True
+    manual_mount = next(
+        mount
+        for mount in opencode_mounts
+        if mount.get("target") == "/workspace/worktrees/manual"
+    )
+    assert manual_mount.get("type") == "bind"
+    assert not any(
+        mount.get("target") == "/workspace/worktrees"
+        for mount in opencode_mounts
+    ), "A parent worktrees mount would mask the managed workspace volume"
 
     volume_init = services["workspace-volume-init"]
     assert volume_init.get("network_mode") == "none"
@@ -312,6 +322,7 @@ def main() -> int:
     assert "scripts/verify_dependency_locks.py" in validate_workflow
     assert "--require-hashes --requirement control_plane/requirements-dev.lock" in validate_workflow
     assert "Docker buildability with current upstream bases" in validate_workflow
+    assert "docker compose run --rm -T --no-deps workspace-volume-init" in validate_workflow
     assert_actions_pinned(validate_workflow_path, validate_workflow)
 
     compose_command_paths = [
@@ -321,6 +332,14 @@ def main() -> int:
     ]
     for path in compose_command_paths:
         assert_compose_runs_disable_tty(path, path.read_text(encoding="utf-8"))
+
+    for path in (
+        ROOT / "scripts/worktree-create.sh",
+        ROOT / "scripts/worktree-remove.sh",
+    ):
+        assert 'container_target="/workspace/worktrees/manual/' in path.read_text(
+            encoding="utf-8"
+        )
 
     main_text = (ROOT / "control_plane/app/main.py").read_text(encoding="utf-8")
     assert "Base.metadata.create_all" not in main_text

@@ -92,6 +92,10 @@ task-workspaces volume
   workspace-manager (rw) -> opencode (rw) / execution-worker (ro)
 ```
 
+Legacy operator worktrees монтируются отдельно в
+`/workspace/worktrees/manual`; bind mount на общий `/workspace/worktrees`
+запрещён, потому что он может скрыть managed named volume внутри OpenCode.
+
 Дополнительные правила:
 
 - PostgreSQL control-plane недоступен агентскому контейнеру;

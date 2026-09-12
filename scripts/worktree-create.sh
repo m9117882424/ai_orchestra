@@ -34,7 +34,7 @@ worktree_parent="$project_root/worktrees/$project"
 target="$worktree_parent/$task_slug"
 branch="agent/$task_slug"
 container_repo="/workspace/repos/projects/$project"
-container_target="/workspace/worktrees/$project/$task_slug"
+container_target="/workspace/worktrees/manual/$project/$task_slug"
 
 if [[ ! -d "$repo_dir/.git" && ! -f "$repo_dir/.git" ]]; then
   echo "[FAIL] $repo_dir не является Git-репозиторием" >&2

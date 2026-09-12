@@ -57,6 +57,7 @@
         <form id="task-form">
           <label class="wide">Название<input name="title" minlength="3" maxlength="200" required placeholder="Что должен сделать отдел"></label>
           <label>Проект<input name="project" value="general" maxlength="120" required></label>
+          <label>Репозиторий<select name="repository_id" id="task-repository"><option value="">Можно назначить позже</option></select></label>
           <label>Направление<select name="domain"><option value="development">Разработка</option><option value="analytics">Аналитика</option><option value="trading">Торговые исследования</option></select></label>
           <label>Приоритет<select name="priority"><option value="normal">Обычный</option><option value="high">Высокий</option><option value="critical">Критический</option><option value="low">Низкий</option></select></label>
           <label>Риск<select name="risk_level"><option value="low">Низкий</option><option value="medium">Средний</option><option value="high">Высокий</option><option value="critical">Критический</option></select></label>
@@ -80,7 +81,13 @@
 
         <section class="panel span-two">
           <div class="panel-heading"><div><p class="eyebrow">Портфель</p><h2>Задачи отдела</h2></div><button class="text-button" data-refresh>Обновить</button></div>
-          <div class="table-wrap"><table><thead><tr><th>Задача</th><th>Направление</th><th>Риск</th><th>Статус</th><th>Исполнение</th></tr></thead><tbody id="tasks-body"><tr><td colspan="5" class="empty">Загрузка…</td></tr></tbody></table></div>
+          <div class="table-wrap"><table><thead><tr><th>Задача</th><th>Репозиторий</th><th>Направление</th><th>Риск</th><th>Статус</th><th>Исполнение</th></tr></thead><tbody id="tasks-body"><tr><td colspan="6" class="empty">Загрузка…</td></tr></tbody></table></div>
+        </section>
+
+        <section class="panel span-two">
+          <div class="panel-heading"><div><p class="eyebrow">G2 Task Workspaces</p><h2>Изолированные рабочие каталоги</h2></div><button class="text-button" data-refresh>Обновить</button></div>
+          <div class="table-wrap"><table><thead><tr><th>Задача</th><th>Репозиторий</th><th>Base commit</th><th>Каталог</th><th>Статус</th><th>Изменения</th><th>Действие</th></tr></thead><tbody id="workspaces-body"><tr><td colspan="7" class="empty">Загрузка…</td></tr></tbody></table></div>
+          <p class="panel-note">Изменённые каталоги сохраняются для ревью. Автоочистка доступна только после доказанной чистой проверки; никакой «магии rm -rf» — у нас enterprise.</p>
         </section>
 
         <aside class="panel guard-panel">

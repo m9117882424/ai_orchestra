@@ -93,12 +93,11 @@ Alembic revision `20260908_0005` создаёт только новую пуст
    существующих данных.
 8. Schema drift по обязательным checks/indexes блокирует production startup.
 
-## Что остаётся в G2
+## Следующий инкремент
 
-- task branch/worktree lifecycle;
-- обязательный workspace preflight до первого LLM inference;
-- привязка execution к immutable repository/base/worktree identity;
-- recovery и cleanup без потери незакоммиченных данных.
+Task branch/workspace lifecycle, обязательный preflight до inference, immutable
+execution binding и conservative recovery/cleanup реализуются в G2.3:
+[`G2_TASK_WORKSPACES.md`](G2_TASK_WORKSPACES.md).
 
 Trusted Repo Manager, credential boundary и read-only mirror lifecycle закрыты в
 [`G2_TRUSTED_REPO_MANAGER.md`](G2_TRUSTED_REPO_MANAGER.md).

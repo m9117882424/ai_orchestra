@@ -8,9 +8,11 @@ read-only Git network operations. Он берёт задания из Repository
 в очередь; OpenCode и execution-worker не получают Git credentials и не могут
 вызвать Repo Manager по сети.
 
-Этот инкремент не создаёт task worktree и не даёт права `push`, PR, merge или
-deploy. Репозиторий со статусом, отличным от `ready`, не считается пригодным для
-будущего execution preflight.
+Сам G2.2 не создаёт task workspace и не даёт права `push`, PR, merge или deploy.
+Следующий G2.3 использует его `ready` mirror через отдельный read-only mount;
+полный контракт описан в
+[`G2_TASK_WORKSPACES.md`](G2_TASK_WORKSPACES.md). Репозиторий со статусом,
+отличным от `ready`, не считается пригодным для execution preflight.
 
 ## Границы доверия
 
@@ -196,21 +198,19 @@ Migration сохраняет identity/policy существующих Registry r
 9. Исчерпанный storage reserve останавливает Git до fetch и уходит в
    контролируемый retry без заполнения системного диска.
 
-## Что остаётся в G2
+## Следующий gate
 
-- task branch/worktree lifecycle;
-- обязательный workspace preflight до первого LLM inference;
-- immutable binding execution → repository/base/worktree;
-- recovery/cleanup незакоммиченной task workspace;
-- отдельная disposable execution boundary для untrusted code (G3).
+G2.3 добавляет task workspace lifecycle, обязательный preflight, immutable
+execution binding и conservative recovery/cleanup. Отдельная disposable
+execution boundary для untrusted code остаётся G3.
 
 Текущая реализация также использует общий PostgreSQL role Control Plane для
 операционного состояния Repo Manager. Выделение минимально привилегированного DB
 role остаётся отдельным hardening-инкрементом; Git credentials при этом уже
 изолированы в отдельном process/env boundary.
 
-До закрытия этих пунктов наличие `ready` mirror само по себе не разрешает AI
-работать с private/high-value repository. Push/PR/merge остаются закрыты до G5.
+Наличие `ready` mirror само по себе не разрешает inference: G2.3 дополнительно
+требует успешный workspace preflight. Push/PR/merge остаются закрыты до G5.
 
 ## Implementation references
 

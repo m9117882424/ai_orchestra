@@ -35,8 +35,17 @@ if [[ -e "$archive" || -e "$archive.tmp" ]]; then
 fi
 staging_dir="$(mktemp -d /tmp/ai-orchestra-backup.XXXXXX)"
 checksum_tmp="$(mktemp /tmp/ai-orchestra-checksums.XXXXXX)"
+paused_services=()
+
+resume_writers() {
+  if (( ${#paused_services[@]} > 0 )); then
+    docker compose unpause "${paused_services[@]}" >/dev/null 2>&1 || true
+    paused_services=()
+  fi
+}
 
 cleanup() {
+  resume_writers
   find "$staging_dir" -depth -delete 2>/dev/null || true
   rm -f "$checksum_tmp"
 }
@@ -48,9 +57,18 @@ if ! docker compose ps --status running --services | grep -qx postgres; then
 fi
 
 mkdir -p "$staging_dir/configuration" "$staging_dir/git-bundles"
+printf '2\n' > "$staging_dir/BACKUP_FORMAT"
 
-docker compose exec -T postgres \
-  pg_dump -U ai_orchestra -d ai_orchestra --format=custom \
+for writer in control-plane execution-worker workspace-manager opencode; do
+  if docker compose ps --status running --services | grep -qx "$writer"; then
+    docker compose pause "$writer" >/dev/null
+    paused_services+=("$writer")
+  fi
+done
+
+timeout --foreground --signal=TERM --kill-after=10s 300s \
+  docker compose exec -T postgres \
+  pg_dump -U ai_orchestra -d ai_orchestra --format=custom --lock-wait-timeout=30s \
   > "$staging_dir/control-plane.pgdump"
 
 cp -R \
@@ -80,6 +98,15 @@ if [[ -d data/opencode || -d data/state ]]; then
     data/opencode data/state
 fi
 
+timeout --foreground --signal=TERM --kill-after=10s 300s \
+  docker compose run --rm -T --no-deps --entrypoint tar workspace-manager \
+  -czf - -C /workspace/worktrees/managed . \
+  > "$staging_dir/task-workspaces.tar.gz"
+if [[ ! -s "$staging_dir/task-workspaces.tar.gz" ]]; then
+  echo "[FAIL] Архив task workspaces пуст" >&2
+  exit 1
+fi
+
 while IFS= read -r -d '' git_dir; do
   repo_dir="$(dirname "$git_dir")"
   repo_name="$(basename "$repo_dir")"
@@ -89,6 +116,8 @@ while IFS= read -r -d '' git_dir; do
     echo "[WARN] Пропущен репозиторий с небезопасным именем: $repo_name" >&2
   fi
 done < <(find "$project_root/repos" -mindepth 2 -maxdepth 2 -type d -name .git -print0)
+
+resume_writers
 
 (
   cd "$staging_dir"

@@ -177,6 +177,17 @@ rules = {
     "REPO_MANAGER_POLL_SECONDS": (10, 1, 60),
     "REPO_MANAGER_MAX_REPOSITORY_BYTES": (5368709120, 1048576, 1099511627776),
     "REPO_MANAGER_MIN_FREE_BYTES": (536870912, 67108864, 1099511627776),
+    "WORKSPACE_MANAGER_LEASE_SECONDS": (180, 60, 3600),
+    "WORKSPACE_MANAGER_GIT_TIMEOUT_SECONDS": (60, 10, 600),
+    "WORKSPACE_MANAGER_RETRY_BASE_SECONDS": (15, 1, 3600),
+    "WORKSPACE_MANAGER_RETRY_MAX_SECONDS": (900, 1, 86400),
+    "WORKSPACE_MANAGER_MAX_PREPARE_FAILURES": (8, 1, 100),
+    "WORKSPACE_MANAGER_MAX_ACTIVE": (1, 1, 4),
+    "WORKSPACE_MANAGER_POLL_SECONDS": (5, 1, 60),
+    "WORKSPACE_MANAGER_MAX_FILES": (100000, 1, 1000000),
+    "WORKSPACE_MANAGER_MAX_FILE_BYTES": (134217728, 1024, 1073741824),
+    "WORKSPACE_MANAGER_MAX_WORKSPACE_BYTES": (5368709120, 1048576, 1099511627776),
+    "WORKSPACE_MANAGER_MIN_FREE_BYTES": (536870912, 67108864, 1099511627776),
 }
 values = {}
 for name, (default, minimum, maximum) in rules.items():
@@ -191,11 +202,15 @@ if values["REPO_MANAGER_LEASE_SECONDS"] < values["REPO_MANAGER_GIT_TIMEOUT_SECON
     raise SystemExit(1)
 if values["REPO_MANAGER_RETRY_MAX_SECONDS"] < values["REPO_MANAGER_RETRY_BASE_SECONDS"]:
     raise SystemExit(1)
+if values["WORKSPACE_MANAGER_LEASE_SECONDS"] < values["WORKSPACE_MANAGER_GIT_TIMEOUT_SECONDS"] + 30:
+    raise SystemExit(1)
+if values["WORKSPACE_MANAGER_RETRY_MAX_SECONDS"] < values["WORKSPACE_MANAGER_RETRY_BASE_SECONDS"]:
+    raise SystemExit(1)
 PY
   then
-    pass "Repo Manager runtime limits и lease/timeout invariant валидны"
+    pass "Repo/Workspace Manager runtime limits и lease/timeout invariants валидны"
   else
-    fail "Некорректны Repo Manager limits или lease меньше Git timeout + 30s"
+    fail "Некорректны Repo/Workspace Manager limits или lease меньше Git timeout + 30s"
   fi
 
   case "${KEY_MODE:-}" in
@@ -306,15 +321,21 @@ assert nets("postgres")=={"control-db"}, nets("postgres")
 assert nets("control-plane")=={"control-db","control-access","model-net"}, nets("control-plane")
 assert nets("execution-worker")=={"control-db","model-net"}, nets("execution-worker")
 assert nets("repo-manager")=={"control-db","repository-egress"}, nets("repo-manager")
+assert nets("workspace-manager")=={"control-db"}, nets("workspace-manager")
 assert nets("opencode")=={"model-net"}, nets("opencode")
 assert nets("model-gateway")=={"model-net","router-backend"}, nets("model-gateway")
 assert nets("model-router")=={"router-backend","provider-egress"}, nets("model-router")
 assert not (nets("opencode") & nets("model-router")), "OpenCode must not share a network with router admin service"
 assert not (nets("repo-manager") & nets("opencode")), "Repo Manager must not share an OpenCode network"
 assert not (nets("repo-manager") & nets("model-router")), "Repo Manager must not share a router network"
+assert not (nets("workspace-manager") & nets("opencode")), "Workspace Manager must not share an OpenCode network"
+assert not (nets("workspace-manager") & nets("model-router")), "Workspace Manager must not share a router network"
 worker=services["execution-worker"]
 assert not worker.get("ports"), "Execution worker must not publish ports"
-assert not worker.get("volumes"), "Execution worker must not receive repository volumes"
+worker_mounts=worker.get("volumes") or []
+assert len(worker_mounts)==1, worker_mounts
+assert worker_mounts[0].get("target")=="/workspace/worktrees/managed", worker_mounts
+assert worker_mounts[0].get("read_only") is True, worker_mounts
 worker_env=set((worker.get("environment") or {}).keys())
 forbidden_worker={"AITUNNEL_API_KEY","OPENAI_API_KEY","ANTHROPIC_API_KEY","GOOGLE_GENERATIVE_AI_API_KEY","MODEL_ROUTER_MASTER_KEY","MODEL_ROUTER_CLIENT_KEY"}
 assert not (worker_env & forbidden_worker), "Execution worker receives model/provider credentials"
@@ -331,10 +352,36 @@ for name, service in services.items():
         assert "REPO_MANAGER_AUTH_PROFILES_JSON" not in (service.get("environment") or {}), name
 mounts=repo.get("volumes") or []
 assert len(mounts)==1 and mounts[0].get("target")=="/var/lib/ai-orchestra/repositories", mounts
+workspace=services["workspace-manager"]
+assert not workspace.get("ports"), "Workspace Manager must not publish ports"
+workspace_env=workspace.get("environment") or {}
+assert workspace_env.get("CONTROL_PLANE_SERVER_PASSWORD")=="workspace-manager-does-not-use-manager-auth"
+assert workspace_env.get("CONTROL_PLANE_OPENCODE_PASSWORD")=="workspace-manager-does-not-use-opencode-auth"
+for forbidden in forbidden_worker | {"REPO_MANAGER_AUTH_PROFILES_JSON"}:
+    assert forbidden not in workspace_env, forbidden
+workspace_mounts=workspace.get("volumes") or []
+assert {(item.get("target"), bool(item.get("read_only"))) for item in workspace_mounts}=={
+    ("/var/lib/ai-orchestra/repositories", True),
+    ("/workspace/worktrees/managed", False),
+}, workspace_mounts
+opencode_mounts=services["opencode"].get("volumes") or []
+task_mount=[item for item in opencode_mounts if item.get("target")=="/workspace/worktrees/managed"]
+assert len(task_mount)==1 and task_mount[0].get("read_only") is not True, task_mount
+volume_init=services["workspace-volume-init"]
+assert volume_init.get("network_mode")=="none"
+assert volume_init.get("user")=="0:0"
+assert volume_init.get("read_only") is True
+assert not volume_init.get("environment")
+assert set(volume_init.get("cap_add") or [])=={"CHOWN","FOWNER"}
+assert set(volume_init.get("cap_drop") or [])=={"ALL"}
+init_mounts=volume_init.get("volumes") or []
+assert len(init_mounts)==1 and init_mounts[0].get("target")=="/workspace/worktrees/managed", init_mounts
+assert (workspace.get("depends_on") or {})["workspace-volume-init"]["condition"]=="service_completed_successfully"
+assert (services["opencode"].get("depends_on") or {})["workspace-volume-init"]["condition"]=="service_completed_successfully"
 ' >/dev/null; then
-  pass "Секреты и Docker-сети изолированы от OpenCode/Execution Worker/Repo Manager"
+  pass "Секреты, сети и task workspace mounts изолированы по ролям"
 else
-  fail "Нарушена изоляция сервисов или Repo Manager credential boundary"
+  fail "Нарушена изоляция сервисов, credential boundary или task workspace mounts"
 fi
 
 if (( failures > 0 )); then

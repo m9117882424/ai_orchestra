@@ -109,7 +109,7 @@ jobs:
             rg --version | head -n 1
           '
 
-      - name: Проверить trusted Repo Manager toolchain
+      - name: Проверить isolated Git worker toolchains and workspace ownership
         run: |
           docker compose run --rm -T --no-deps control-plane sh -lc '
             ! command -v git
@@ -119,4 +119,19 @@ jobs:
             test -x /app/app/repo_manager_askpass.py &&
             test -x /app/app/repo_manager_git_wrapper.sh &&
             REPO_MANAGER_GIT_MAX_FILE_BLOCKS=2048 /app/app/repo_manager_git_wrapper.sh --version
+          '
+          docker compose run --rm -T --no-deps workspace-manager sh -lc '
+            test "$(id -u)" = 10001 &&
+            command -v git >/dev/null &&
+            touch /workspace/worktrees/managed/.ci-workspace-boundary
+          '
+          docker compose run --rm -T --no-deps execution-worker sh -lc '
+            test "$(id -u)" = 10001 &&
+            command -v git >/dev/null &&
+            test -f /workspace/worktrees/managed/.ci-workspace-boundary &&
+            ! sh -c "echo forbidden >> /workspace/worktrees/managed/.ci-workspace-boundary"
+          '
+          docker compose run --rm -T --no-deps --entrypoint sh opencode -lc '
+            test -f /workspace/worktrees/managed/.ci-workspace-boundary &&
+            rm /workspace/worktrees/managed/.ci-workspace-boundary
           '

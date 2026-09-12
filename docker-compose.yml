@@ -31,7 +31,7 @@ services:
     build:
       context: ./control_plane
       target: control-plane
-    image: ai-development-department/control-plane:0.8.0
+    image: ai-development-department/control-plane:0.9.0
     restart: unless-stopped
     init: true
     read_only: true
@@ -82,8 +82,8 @@ services:
   execution-worker:
     build:
       context: ./control_plane
-      target: control-plane
-    image: ai-development-department/control-plane:0.8.0
+      target: execution-worker
+    image: ai-development-department/execution-worker:0.9.0
     restart: unless-stopped
     init: true
     read_only: true
@@ -107,6 +107,10 @@ services:
       CONTROL_PLANE_EXECUTION_WORKER_MAX_ACTIVE: ${CONTROL_PLANE_EXECUTION_WORKER_MAX_ACTIVE:-4}
       CONTROL_PLANE_EXECUTION_WORKER_POLL_SECONDS: ${CONTROL_PLANE_EXECUTION_WORKER_POLL_SECONDS:-5}
       CONTROL_PLANE_EXECUTION_WORKER_HEALTH_PATH: /tmp/ai-orchestra-execution-worker.heartbeat
+      CONTROL_PLANE_TASK_WORKSPACE_ROOT: /workspace/worktrees/managed
+      CONTROL_PLANE_WORKSPACE_MANAGER_MAX_FILES: ${WORKSPACE_MANAGER_MAX_FILES:-100000}
+    volumes:
+      - task-workspaces:/workspace/worktrees/managed:ro
     networks:
       - control-db
       - model-net
@@ -114,6 +118,8 @@ services:
       postgres:
         condition: service_healthy
       opencode:
+        condition: service_healthy
+      workspace-manager:
         condition: service_healthy
     security_opt:
       - no-new-privileges:true
@@ -141,7 +147,7 @@ services:
     build:
       context: ./control_plane
       target: repo-manager
-    image: ai-development-department/repo-manager:0.8.0
+    image: ai-development-department/repo-manager:0.9.0
     restart: unless-stopped
     init: true
     read_only: true
@@ -201,6 +207,104 @@ services:
       options:
         max-size: 20m
         max-file: "5"
+
+  workspace-manager:
+    build:
+      context: ./control_plane
+      target: workspace-manager
+    image: ai-development-department/workspace-manager:0.9.0
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    command: ["python", "-m", "app.workspace_manager"]
+    environment:
+      CONTROL_PLANE_ENVIRONMENT: production
+      CONTROL_PLANE_DB_HOST: postgres
+      CONTROL_PLANE_DB_PORT: 5432
+      CONTROL_PLANE_DB_NAME: ai_orchestra
+      CONTROL_PLANE_DB_USER: ai_orchestra
+      CONTROL_PLANE_DB_PASSWORD: ${CONTROL_PLANE_DB_PASSWORD}
+      CONTROL_PLANE_SERVER_USERNAME: workspace-manager
+      CONTROL_PLANE_SERVER_PASSWORD: workspace-manager-does-not-use-manager-auth
+      CONTROL_PLANE_OPENCODE_PASSWORD: workspace-manager-does-not-use-opencode-auth
+      WORKSPACE_MANAGER_MIRROR_ROOT: /var/lib/ai-orchestra/repositories
+      WORKSPACE_MANAGER_STORAGE_ROOT: /workspace/worktrees/managed
+      WORKSPACE_MANAGER_HEALTH_PATH: /tmp/ai-orchestra-workspace-manager.heartbeat
+      WORKSPACE_MANAGER_LEASE_SECONDS: ${WORKSPACE_MANAGER_LEASE_SECONDS:-180}
+      WORKSPACE_MANAGER_GIT_TIMEOUT_SECONDS: ${WORKSPACE_MANAGER_GIT_TIMEOUT_SECONDS:-60}
+      WORKSPACE_MANAGER_RETRY_BASE_SECONDS: ${WORKSPACE_MANAGER_RETRY_BASE_SECONDS:-15}
+      WORKSPACE_MANAGER_RETRY_MAX_SECONDS: ${WORKSPACE_MANAGER_RETRY_MAX_SECONDS:-900}
+      WORKSPACE_MANAGER_MAX_PREPARE_FAILURES: ${WORKSPACE_MANAGER_MAX_PREPARE_FAILURES:-8}
+      WORKSPACE_MANAGER_MAX_ACTIVE: ${WORKSPACE_MANAGER_MAX_ACTIVE:-1}
+      WORKSPACE_MANAGER_POLL_SECONDS: ${WORKSPACE_MANAGER_POLL_SECONDS:-5}
+      WORKSPACE_MANAGER_MAX_FILES: ${WORKSPACE_MANAGER_MAX_FILES:-100000}
+      WORKSPACE_MANAGER_MAX_FILE_BYTES: ${WORKSPACE_MANAGER_MAX_FILE_BYTES:-134217728}
+      WORKSPACE_MANAGER_MAX_WORKSPACE_BYTES: ${WORKSPACE_MANAGER_MAX_WORKSPACE_BYTES:-5368709120}
+      WORKSPACE_MANAGER_MIN_FREE_BYTES: ${WORKSPACE_MANAGER_MIN_FREE_BYTES:-536870912}
+    volumes:
+      - repository-mirrors:/var/lib/ai-orchestra/repositories:ro
+      - task-workspaces:/workspace/worktrees/managed
+    networks:
+      - control-db
+    depends_on:
+      postgres:
+        condition: service_healthy
+      workspace-volume-init:
+        condition: service_completed_successfully
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 96
+    mem_limit: 512m
+    cpus: 0.50
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,time; p='/tmp/ai-orchestra-workspace-manager.heartbeat'; assert os.path.isfile(p) and time.time()-os.path.getmtime(p) < 180"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
+
+  workspace-volume-init:
+    build:
+      context: ./control_plane
+      target: workspace-manager
+    image: ai-development-department/workspace-manager:0.9.0
+    user: "0:0"
+    read_only: true
+    network_mode: none
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - chown 10001:10001 /workspace/worktrees/managed && chmod 0700 /workspace/worktrees/managed
+    volumes:
+      - task-workspaces:/workspace/worktrees/managed
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - FOWNER
+    mem_limit: 32m
+    cpus: 0.10
+    pids_limit: 16
+    logging:
+      driver: json-file
+      options:
+        max-size: 1m
+        max-file: "1"
 
   model-router:
     build:
@@ -312,11 +416,14 @@ services:
       - ./policy/AGENTS.md:/workspace/worktrees/AGENTS.md:ro
       - ./repos:/workspace/repos/projects
       - ./worktrees:/workspace/worktrees
+      - task-workspaces:/workspace/worktrees/managed
       - ./data/opencode:/root/.local/share/opencode
       - ./data/state:/root/.local/state/opencode
     depends_on:
       model-gateway:
         condition: service_healthy
+      workspace-volume-init:
+        condition: service_completed_successfully
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -350,3 +457,4 @@ networks:
 volumes:
   control-plane-postgres:
   repository-mirrors:
+  task-workspaces:

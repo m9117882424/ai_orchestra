@@ -4,12 +4,15 @@ AI Orchestra — самостоятельный AI-отдел, который п
 
 **AI Orchestra не является частью Trading Platform.** Trading Platform, Arvento, Wialon, Fuel Monitor, BI и другие системы — отдельные продукты, которые отдел может разрабатывать.
 
-> Статус repository head: pilot 0.8.0, G2 в реализации. G1 Durable Core принят
+> Статус repository head: engineering candidate 0.9.0; G2.3 ещё не принят в
+> production. G1 Durable Core принят
 > для pilot после rollout `05bafd9` от 2026-09-07; проверяемая сводка находится в
 > [`docs/G1_PRODUCTION_ACCEPTANCE_2026-09-07.md`](docs/G1_PRODUCTION_ACCEPTANCE_2026-09-07.md).
-> G2.1 Registry дополнен G2.2
+> G2.1 Registry и G2.2
 > [`Trusted Repo Manager`](docs/G2_TRUSTED_REPO_MANAGER.md): read-only fetch,
-> durable lease/fencing и отдельная Git credential boundary. Приёмка G1 не
+> durable lease/fencing и отдельная Git credential boundary — дополнены G2.3
+> [`durable task workspaces`](docs/G2_TASK_WORKSPACES.md) с immutable execution
+> binding и pre-inference verification. Приёмка G1/G2 candidate не
 > означает автоматический rollout: `git push`, merge, production deploy, доступ к
 > product secrets, запись во внешние production-системы и финансовое исполнение
 > технически не входят в разрешенный контур отдела.
@@ -22,7 +25,11 @@ AI Orchestra — самостоятельный AI-отдел, который п
 - versioned Repository Registry без Git credentials;
 - отдельный trusted `repo-manager`: DNS/IP/TLS validation, redirect deny,
   read-only bare mirror, prune/fsck и durable lease/fencing;
+- отдельный `workspace-manager`: standalone task workspace без remote, atomic
+  activation, durable lease/fencing, inspection и conservative cleanup;
 - отдельный `execution-worker`: durable queue, lease/heartbeat, fencing, deadline и recovery без участия браузера;
+- immutable execution → repository/base/workspace binding и повторный read-only
+  workspace preflight непосредственно перед inference;
 - обязательные QA и independent review;
 - одна задача — одна ветка/worktree — один агент-редактор;
 - inference-only Model Gateway между OpenCode и Model Router;
@@ -203,6 +210,9 @@ trusted Repo Manager. Для public repositories он остаётся пуст�
 - `router-backend` — только Model Gateway + Model Router, internal network;
 - `provider-egress` — Model Router для исходящих AI API;
 - `repository-egress` — только trusted Repo Manager для HTTPS Git read;
+- Workspace Manager находится только в `control-db`, читает mirror read-only и
+  один владеет lifecycle task workspace volume;
+- Execution Worker видит task workspace volume read-only, OpenCode — read/write;
 - OpenCode не находится в сети control-plane DB или router admin service;
 - Repo Manager не находится в сетях OpenCode, Gateway или Model Router;
 - Docker socket хоста не монтируется;
@@ -266,7 +276,8 @@ make smoke
 2. реальные model routes через Model Router;
 3. OpenCode Web;
 4. control-plane;
-5. PostgreSQL.
+5. PostgreSQL;
+6. Execution Worker, Repo Manager и Workspace Manager health.
 
 ## Переход на прямые API
 
@@ -356,7 +367,7 @@ Owner
  → result
 ```
 
-## Рабочие репозитории
+## Рабочие репозитории и task workspaces
 
 G2.1/G2.2 дают versioned Registry и отдельный trusted Repo Manager через
 `GET/POST /api/repositories`, `GET/PATCH /api/repositories/{id}` и
@@ -367,20 +378,23 @@ G2.1/G2.2 дают versioned Registry и отдельный trusted Repo Manager
 [`docs/G2_REPOSITORY_REGISTRY.md`](docs/G2_REPOSITORY_REGISTRY.md) и
 [`docs/G2_TRUSTED_REPO_MANAGER.md`](docs/G2_TRUSTED_REPO_MANAGER.md).
 
-Task worktree пока остаётся отдельной операторской операцией следующего инкремента:
+G2.3 связывает development-задачу с `ready` repository. Запуск сначала фиксирует
+точные repository/base SHA/workspace identifiers, затем Workspace Manager создаёт
+standalone task branch из локального mirror. Execution Worker не отправляет
+prompt, пока manifest, HEAD, tree, tracked files и чистый status не совпадут с
+durable DB evidence. После выполнения каталог инспектируется и сохраняется;
+изменённый либо неоднозначный workspace автоматически не удаляется.
 
-```bash
-cd /opt/ai_orchestra
-./scripts/worktree-create.sh arvento-kpp-report fix-mileage origin/main
+```text
+PATCH /api/tasks/{task_id}/repository
+GET   /api/workspaces
+GET   /api/workspaces/{workspace_id}
+POST  /api/workspaces/{workspace_id}/cleanup
 ```
 
-Удаление после проверки:
-
-```bash
-./scripts/worktree-remove.sh arvento-kpp-report fix-mileage --yes
-```
-
-Скрипт не удалит worktree с незакоммиченными файлами.
+Cleanup требует exact `expected_version`, терминальный execution и доказанно
+чистую инспекцию. Полный lifecycle и ограничения:
+[`docs/G2_TASK_WORKSPACES.md`](docs/G2_TASK_WORKSPACES.md).
 
 ## Проверки разработки
 
@@ -410,6 +424,7 @@ Backup включает:
 - dump control-plane PostgreSQL;
 - код и несекретную конфигурацию, включая Model Router и Model Gateway;
 - OpenCode state;
+- durable task workspace volume (`BACKUP_FORMAT=2`);
 - Git bundles проектов;
 - `SHA256SUMS`.
 
@@ -417,6 +432,9 @@ Backup включает:
 `data/opencode/auth.json`. Provider/Git secrets храните отдельно в password/secret
 manager; backup рекомендуется копировать в шифрованное внешнее хранилище. Bare
 mirrors Repo Manager — восстановимый cache и после DR синхронизируются заново.
+Перед упаковкой backup координированно приостанавливает workspace/DB writers;
+restore drill сверяет manifest каждого операционного workspace с восстановленной
+БД. Подробности: [`docs/G1_BACKUP_DR_RUNBOOK.md`](docs/G1_BACKUP_DR_RUNBOOK.md).
 
 ## Логи и диагностика
 
@@ -448,7 +466,7 @@ git pull --ff-only
 make init
 make preflight
 make build
-docker compose stop control-plane execution-worker repo-manager
+docker compose stop control-plane execution-worker repo-manager workspace-manager opencode
 docker compose up -d postgres
 make migrate
 make up

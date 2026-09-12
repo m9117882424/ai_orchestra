@@ -419,6 +419,29 @@ def test_repository_table_constraints_require_complete_ready_and_validating_evid
 
         db.add(
             Repository(
+                name="ready-with-null-branch",
+                remote_url="https://github.com/owner/null-branch.git",
+                remote_identity="github.com/owner/null-branch",
+                remote_host="github.com",
+                provider="github",
+                enabled=True,
+                status="ready",
+                default_branch=None,
+                last_known_commit="a" * 40,
+                last_fetched_at=now,
+                sync_finished_at=now,
+                sync_next_at=now + timedelta(hours=1),
+                execution_profile="development",
+                assurance_tier="general-standard",
+                version=1,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            db.commit()
+        db.rollback()
+
+        db.add(
+            Repository(
                 name="validating-without-start",
                 remote_url="https://github.com/owner/validating-without-start.git",
                 remote_identity="github.com/owner/validating-without-start",

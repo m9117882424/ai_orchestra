@@ -2,14 +2,14 @@
 
 ## Purpose
 
-This runbook is the only supported path for moving the existing Control Plane PostgreSQL database through its reviewed Alembic chain. The current repository head is `20260909_0006`.
+This runbook is the only supported path for moving the existing Control Plane PostgreSQL database through its reviewed Alembic chain. The current repository head is `20260909_0007`.
 
 The first migration is special because production already contains tables created historically by SQLAlchemy `Base.metadata.create_all()`.
 
 The migration tooling therefore supports two fail-closed paths:
 
 1. **fresh database** — Alembic creates the complete schema;
-2. **legacy existing database** — the tool verifies that tables, columns, types/nullability, primary keys, foreign keys, named checks and explicit indexes match the declared historical `20260904_0001` shape, stamps that exact revision, and upgrades through `0002` (lease/fencing), `0003` (durable queued dispatch), `0004` (deadline/cancellation intent), `0005` (Repository Registry), and `0006` (trusted Repo Manager synchronization state).
+2. **legacy existing database** — the tool verifies that tables, columns, types/nullability, primary keys, foreign keys, named checks and explicit indexes match the declared historical `20260904_0001` shape, stamps that exact revision, and upgrades through `0002` (lease/fencing), `0003` (durable queued dispatch), `0004` (deadline/cancellation intent), `0005` (Repository Registry), `0006` (trusted Repo Manager synchronization state), and `0007` (durable task workspaces and execution contract v2).
 
 If legacy schema differs, the tool refuses to stamp it.
 
@@ -32,7 +32,7 @@ make init
 make preflight
 make build
 docker compose up -d postgres
-docker compose stop control-plane execution-worker repo-manager
+docker compose stop control-plane execution-worker repo-manager workspace-manager opencode
 make migrate
 make schema-check
 make up
@@ -50,35 +50,37 @@ Control Plane is stopped first so it cannot write lifecycle state while the sche
 and application image move together. Model Router, Gateway and OpenCode may remain
 available during this maintenance window.
 
-Do not reverse `make migrate` and `make up`: `control-plane`, `execution-worker`
-and `repo-manager` verify the exact schema at startup and must fail closed on an
-old revision.
+Do not reverse `make migrate` and `make up`: `control-plane`, `execution-worker`,
+`repo-manager` and `workspace-manager` verify the exact schema at startup and
+must fail closed on an old revision.
 
 ## Expected first production migration
 
 For a versioned `20260904_0001` database the expected message is equivalent to:
 
 ```text
-[OK] Schema migrated to 20260909_0006
+[OK] Schema migrated to 20260909_0007
 ```
 
 For an unversioned database that exactly matches the historical baseline:
 
 ```text
-[OK] Historical baseline 20260904_0001 verified, migrated to 20260909_0006; data unchanged
+[OK] Historical baseline 20260904_0001 verified, migrated to 20260909_0007; data unchanged
 ```
 
 Active executions present during `0004` receive a fresh two-hour deadline grace
 period. Terminal execution history receives no deadline and is otherwise unchanged.
 Migration `0005` creates a repository registry. Migration `0006` preserves
 registry identity/policy, revokes pre-worker operational trust by setting rows to
-`pending_validation`, and queues enabled rows for trusted synchronization. Neither
-migration mutates tasks, executions, approvals, budgets, usage or audit rows.
+`pending_validation`, and queues enabled rows for trusted synchronization.
+Migration `0007` adds nullable repository binding to existing tasks, creates an
+empty workspace registry and preserves every existing execution as contract v1;
+only newly requested executions use contract v2.
 
 If the database is already migrated, the expected message is:
 
 ```text
-[OK] Schema already at head: 20260909_0006
+[OK] Schema already at head: 20260909_0007
 ```
 
 ## Failure: legacy schema mismatch
@@ -124,7 +126,8 @@ The initial baseline stamp does not alter business data. Later G1 revisions add
 execution lifecycle columns and relax `opencode_session_id` nullability; `0004`
 backfills deadlines only for active rows. G2 revision `0005` adds a new table;
 `0006` adds synchronization metadata and deliberately requires Registry rows to be
-revalidated before `ready` can be trusted.
+revalidated before `ready` can be trusted. `0007` adds workspace state and
+immutable execution binding while retaining legacy runs under contract v1.
 
 If application rollout fails after a successful migration:
 

@@ -84,11 +84,14 @@ def main() -> int:
     assert network_set(services["control-plane"]) == {"control-db", "control-access", "model-net"}
     assert network_set(services["execution-worker"]) == {"control-db", "model-net"}
     assert network_set(services["repo-manager"]) == {"control-db", "repository-egress"}
+    assert network_set(services["workspace-manager"]) == {"control-db"}
     assert network_set(services["model-router"]) == {"router-backend", "provider-egress"}
     assert network_set(services["model-gateway"]) == {"model-net", "router-backend"}
     assert network_set(services["opencode"]) == {"model-net"}
     assert not (network_set(services["repo-manager"]) & network_set(services["opencode"]))
     assert not (network_set(services["repo-manager"]) & network_set(services["model-router"]))
+    assert not (network_set(services["workspace-manager"]) & network_set(services["opencode"]))
+    assert not (network_set(services["workspace-manager"]) & network_set(services["model-router"]))
 
     control_env = set((services["control-plane"].get("environment") or {}).keys())
     assert "MODEL_ROUTER_CLIENT_KEY" not in control_env
@@ -104,10 +107,13 @@ def main() -> int:
     assert "CONTROL_PLANE_OPENCODE_PASSWORD" in worker_env
     assert worker_environment.get("CONTROL_PLANE_SERVER_PASSWORD") == "execution-worker-does-not-use-manager-auth"
     assert not worker.get("ports"), "Execution worker must not expose host ports"
-    assert not worker.get("volumes"), "Execution worker must not receive repository or secret volumes"
+    worker_mounts = worker.get("volumes") or []
+    assert len(worker_mounts) == 1
+    assert worker_mounts[0].get("target") == "/workspace/worktrees/managed"
+    assert worker_mounts[0].get("read_only") is True
     assert worker.get("read_only") is True
     assert worker.get("command") == ["python", "-m", "app.execution_worker"]
-    assert worker.get("image") == services["control-plane"].get("image")
+    assert worker.get("image") != services["control-plane"].get("image")
     assert worker.get("healthcheck"), "Execution worker must expose process liveness"
 
     repo_manager = services["repo-manager"]
@@ -141,12 +147,79 @@ def main() -> int:
     assert repo_manager.get("image") != services["control-plane"].get("image")
     assert (repo_manager.get("build") or {}).get("target") == "repo-manager"
     assert (services["control-plane"].get("build") or {}).get("target") == "control-plane"
-    assert (worker.get("build") or {}).get("target") == "control-plane"
+    assert (worker.get("build") or {}).get("target") == "execution-worker"
     assert repo_manager.get("healthcheck"), "Repo Manager must expose process liveness"
     assert repo_manager.get("pids_limit") == 64
     repo_mounts = repo_manager.get("volumes") or []
     assert len(repo_mounts) == 1
     assert repo_mounts[0].get("target") == "/var/lib/ai-orchestra/repositories"
+
+    workspace_manager = services["workspace-manager"]
+    workspace_environment = workspace_manager.get("environment") or {}
+    workspace_env = set(workspace_environment)
+    assert "CONTROL_PLANE_DB_PASSWORD" in workspace_env
+    assert workspace_environment.get("CONTROL_PLANE_SERVER_PASSWORD") == (
+        "workspace-manager-does-not-use-manager-auth"
+    )
+    assert workspace_environment.get("CONTROL_PLANE_OPENCODE_PASSWORD") == (
+        "workspace-manager-does-not-use-opencode-auth"
+    )
+    for forbidden in (
+        "AITUNNEL_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GOOGLE_GENERATIVE_AI_API_KEY",
+        "MODEL_ROUTER_MASTER_KEY",
+        "MODEL_ROUTER_CLIENT_KEY",
+        "REPO_MANAGER_AUTH_PROFILES_JSON",
+    ):
+        assert forbidden not in workspace_env, (
+            f"Workspace Manager receives forbidden key: {forbidden}"
+        )
+    assert not workspace_manager.get("ports")
+    assert workspace_manager.get("read_only") is True
+    assert workspace_manager.get("command") == ["python", "-m", "app.workspace_manager"]
+    assert workspace_manager.get("image") != services["control-plane"].get("image")
+    assert (workspace_manager.get("build") or {}).get("target") == "workspace-manager"
+    assert workspace_manager.get("healthcheck")
+    workspace_mounts = workspace_manager.get("volumes") or []
+    assert {
+        (mount.get("target"), bool(mount.get("read_only")))
+        for mount in workspace_mounts
+    } == {
+        ("/var/lib/ai-orchestra/repositories", True),
+        ("/workspace/worktrees/managed", False),
+    }
+    opencode_mounts = services["opencode"].get("volumes") or []
+    task_mount = next(
+        mount
+        for mount in opencode_mounts
+        if mount.get("target") == "/workspace/worktrees/managed"
+    )
+    assert task_mount.get("read_only") is not True
+
+    volume_init = services["workspace-volume-init"]
+    assert volume_init.get("network_mode") == "none"
+    assert volume_init.get("user") == "0:0"
+    assert volume_init.get("read_only") is True
+    assert not volume_init.get("environment")
+    assert not volume_init.get("ports")
+    assert set(volume_init.get("cap_add") or []) == {"CHOWN", "FOWNER"}
+    assert set(volume_init.get("cap_drop") or []) == {"ALL"}
+    init_mounts = volume_init.get("volumes") or []
+    assert len(init_mounts) == 1
+    assert init_mounts[0].get("target") == "/workspace/worktrees/managed"
+    assert init_mounts[0].get("read_only") is not True
+    assert (
+        (workspace_manager.get("depends_on") or {})["workspace-volume-init"]
+        ["condition"]
+        == "service_completed_successfully"
+    )
+    assert (
+        (services["opencode"].get("depends_on") or {})["workspace-volume-init"]
+        ["condition"]
+        == "service_completed_successfully"
+    )
 
     # OpenCode talks only to the inference gateway with a non-admin client credential.
     gateway = json.loads((ROOT / "config/opencode.gateway.json").read_text(encoding="utf-8"))
@@ -168,6 +241,10 @@ def main() -> int:
     assert "REPO_MANAGER_GIT_TIMEOUT_SECONDS=60" in env_text
     assert "REPO_MANAGER_MAX_ACTIVE=1" in env_text
     assert "REPO_MANAGER_MIN_FREE_BYTES=536870912" in env_text
+    assert "WORKSPACE_MANAGER_LEASE_SECONDS=180" in env_text
+    assert "WORKSPACE_MANAGER_GIT_TIMEOUT_SECONDS=60" in env_text
+    assert "WORKSPACE_MANAGER_MAX_ACTIVE=1" in env_text
+    assert "WORKSPACE_MANAGER_MAX_FILES=100000" in env_text
     assert "BACKUP_OFFSITE_ENCRYPTION_AT_REST_CONFIRMED=no" in env_text
     assert "BACKUP_OFFSITE_AUTHENTICATED_TRANSPORT_CONFIRMED=no" in env_text
 
@@ -199,7 +276,11 @@ def main() -> int:
     assert "runtime-lock.sha256" in control_dockerfile
     assert "app.production:app" in control_dockerfile
     assert "FROM application-base AS control-plane" in control_dockerfile
-    assert "FROM application-base AS repo-manager" in control_dockerfile
+    assert "FROM git-runtime AS repo-manager" in control_dockerfile
+    assert "FROM git-runtime AS workspace-manager" in control_dockerfile
+    assert "FROM git-runtime AS execution-worker" in control_dockerfile
+    assert "groupadd --gid 10001 orchestra" in control_dockerfile
+    assert "useradd --uid 10001 --gid orchestra" in control_dockerfile
     assert "apt-get install -y --no-install-recommends ca-certificates git" in control_dockerfile
     assert "repo_manager_askpass.py" in control_dockerfile
 
@@ -246,11 +327,13 @@ def main() -> int:
     assert ".metadata.create_all(" not in main_text
     assert "opencode.create_session" not in main_text, "HTTP execute boundary must persist before OpenCode side effects"
     assert "opencode.prompt_async" not in main_text, "HTTP execute boundary must not dispatch prompts"
-    assert 'status="queued"' in main_text
-    assert 'stage="dispatch_pending"' in main_text
+    assert 'status="preparing"' in main_text
+    assert 'stage="workspace_pending"' in main_text
+    assert "workspace_branch_name" in main_text
+    assert "workspace_path_for" in main_text
     assert "/api/executions/{execution_id}/refresh" not in main_text
     assert "deadline_at=" in main_text
-    assert 'action="execution.cancel_requested"' in main_text
+    assert 'action="execution.preparing"' in main_text
     assert "opencode.abort" not in main_text
 
     db_text = (ROOT / "control_plane/app/db.py").read_text(encoding="utf-8")
@@ -273,14 +356,27 @@ def main() -> int:
     assert "export-backup-offsite.sh" not in backup_script, "Local backup must not gain implicit external effects"
     assert 'flock -n 9' in backup_script
     assert 'bash ./scripts/verify-backup.sh "$archive"' in backup_script
+    assert "printf '2\\n' > \"$staging_dir/BACKUP_FORMAT\"" in backup_script
+    assert "control-plane execution-worker workspace-manager opencode" in backup_script
+    assert "docker compose pause" in backup_script
+    assert "docker compose unpause" in backup_script
+    assert 'task-workspaces.tar.gz' in backup_script
+    assert "--lock-wait-timeout=30s" in backup_script
+    assert "timeout --foreground" in backup_script
     assert "sha256sum --check --strict --quiet SHA256SUMS" in verify_backup_script
     assert "Secret-bearing file detected inside backup" in verify_backup_script
     assert ".env.repositories" in verify_backup_script
+    assert "forbidden outer archive entry type" in verify_backup_script
+    assert "forbidden workspace entry type" in verify_backup_script
+    assert "escaping workspace symlink" in verify_backup_script
+    assert "BACKUP_FORMAT" in verify_backup_script
     assert "ai-orchestra-restore-net-" in restore_drill_script
     assert "ai-orchestra-restore-vol-" in restore_drill_script
     assert "--network-alias restore-postgres" in restore_drill_script
     assert "CONTROL_PLANE_DATABASE_URL" in restore_drill_script
     assert "observed_restore_rto_seconds" in restore_drill_script
+    assert "task_workspace_restore" in restore_drill_script
+    assert "task-workspaces.tar.gz" in restore_drill_script
     assert "docker compose exec" not in restore_drill_script, "Restore drill must never execute against production Compose services"
     assert "BACKUP_OFFSITE_ENCRYPTION_AT_REST_CONFIRMED" in offsite_script
     assert "BACKUP_OFFSITE_AUTHENTICATED_TRANSPORT_CONFIRMED" in offsite_script
@@ -389,7 +485,43 @@ def main() -> int:
     assert "mark_cancel_pending" in worker_text
     assert "delete_session" in worker_text
     assert "write_worker_health" in worker_text
+    assert "verify_runtime_workspace" in worker_text
+    assert "workspace_runtime_preflight_digest" in worker_text
+    assert "workspace_root=workspace_root" in worker_text
+    assert "request_workspace_inspection" in worker_text
+    assert "client.for_directory" in worker_text
     assert 'minimum=60' in worker_text, "Runtime execution lease must exceed the 30s OpenCode HTTP timeout"
+
+    workspace_manager_text = (ROOT / "control_plane/app/workspace_manager.py").read_text(
+        encoding="utf-8"
+    )
+    for marker in (
+        "with_for_update(skip_locked=True)",
+        "workspace.binding_rejected",
+        "workspace_manifest_binding_mismatch",
+        "--ignored=matching",
+        "repository_submodule_forbidden",
+        "WorkspaceLeaseLost",
+        "write_worker_health",
+    ):
+        assert marker in workspace_manager_text, (
+            f"Workspace Manager safety marker missing: {marker}"
+        )
+    assert "shell=True" not in workspace_manager_text
+    workspace_protocol_text = (
+        ROOT / "control_plane/app/workspace_protocol.py"
+    ).read_text(encoding="utf-8")
+    for marker in (
+        "workspace_symlink_escape",
+        "workspace_symlink_git_metadata",
+        "workspace_manifest_digest_invalid",
+        "O_NOFOLLOW",
+        "verify_runtime_workspace",
+    ):
+        assert marker in workspace_protocol_text, (
+            f"Workspace protocol safety marker missing: {marker}"
+        )
+    assert "shell=True" not in workspace_protocol_text
 
     shared = (ROOT / "config/model-router.shared.yaml").read_text(encoding="utf-8")
     direct = (ROOT / "config/model-router.separate.yaml").read_text(encoding="utf-8")

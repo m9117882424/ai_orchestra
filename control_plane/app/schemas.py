@@ -148,9 +148,12 @@ class RepositoryRead(BaseModel):
 
 
 class TaskCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     title: str = Field(min_length=3, max_length=200)
     description: str = Field(default="", max_length=10000)
     project: str = Field(default="general", min_length=1, max_length=120)
+    repository_id: str | None = Field(default=None, min_length=36, max_length=36)
     domain: TaskDomain = "development"
     priority: TaskPriority = "normal"
     risk_level: RiskLevel = "low"
@@ -159,6 +162,12 @@ class TaskCreate(BaseModel):
 
 class TaskStatusUpdate(BaseModel):
     status: TaskStatus
+
+
+class TaskRepositoryUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repository_id: str | None = Field(default=None, min_length=36, max_length=36)
 
 
 class TaskRead(TaskCreate):
@@ -250,7 +259,23 @@ class CapabilityGuardRead(BaseModel):
     updated_at: datetime
 
 
-ExecutionStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
+ExecutionStatus = Literal[
+    "preparing", "queued", "running", "completed", "failed", "cancelled"
+]
+
+WorkspaceStatus = Literal[
+    "pending",
+    "preparing",
+    "unavailable",
+    "ready",
+    "inspection_pending",
+    "inspecting",
+    "retained",
+    "cleanup_pending",
+    "cleaning",
+    "removed",
+    "invalid",
+]
 
 
 class ExecutionRead(BaseModel):
@@ -258,6 +283,16 @@ class ExecutionRead(BaseModel):
 
     id: str
     task_id: str
+    contract_version: int
+    repository_id: str | None
+    workspace_id: str | None
+    base_commit: str | None
+    workspace_path: str | None
+    workspace_tree: str | None
+    workspace_preflight_digest: str | None
+    workspace_preflight_completed_at: datetime | None
+    workspace_runtime_preflight_digest: str | None
+    workspace_runtime_verified_at: datetime | None
     status: ExecutionStatus
     stage: str
     opencode_session_id: str | None
@@ -272,6 +307,47 @@ class ExecutionRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     finished_at: datetime | None
+
+
+class WorkspaceCleanupRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=1, strict=True)
+
+
+class TaskWorkspaceRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    task_id: str
+    repository_id: str
+    status: WorkspaceStatus
+    base_commit: str
+    base_branch: str
+    branch_name: str
+    opencode_path: str
+    initial_tree: str | None
+    preflight_digest: str | None
+    tracked_entries: int | None
+    current_head_commit: str | None
+    current_tree: str | None
+    change_digest: str | None
+    has_changes: bool | None
+    changed_file_count: int | None
+    generation: int
+    failure_count: int
+    requested_at: datetime
+    started_at: datetime | None
+    prepared_at: datetime | None
+    inspection_requested_at: datetime | None
+    inspected_at: datetime | None
+    cleanup_requested_at: datetime | None
+    cleaned_at: datetime | None
+    next_attempt_at: datetime | None
+    last_error_code: str | None
+    version: int
+    created_at: datetime
+    updated_at: datetime
 
 
 class ExecutionProgressItem(BaseModel):

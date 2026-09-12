@@ -4,7 +4,7 @@
 
 This runbook covers the G1 Durable Core backup/DR baseline for AI Orchestra. It is repository and storage-provider agnostic.
 
-The current local backup remains `scripts/backup.sh`: PostgreSQL custom-format dump + configuration + optional OpenCode state + Git bundles + internal `SHA256SUMS`. The command serializes concurrent backup attempts, publishes the archive with an atomic rename, and verifies its paths/checksums before reporting success. Secrets (`.env`, `.env.providers`, `.env.repositories`, OpenCode `auth.json`) are intentionally excluded and must be recovered from a separate secret-management process. Trusted Repo Manager bare mirrors are a reconstructible cache and are also excluded.
+The current local backup remains `scripts/backup.sh`. Backup format v2 contains a PostgreSQL custom-format dump, configuration, optional OpenCode state, local Git bundles, the durable task-workspace volume snapshot and an internal `SHA256SUMS`. The command serializes concurrent attempts, briefly pauses all workspace/DB writers, bounds dump time and lock wait, resumes writers through an error trap, publishes the archive with an atomic rename and verifies it before reporting success. Secrets (`.env`, `.env.providers`, `.env.repositories`, OpenCode `auth.json`) are intentionally excluded and must be recovered from a separate secret-management process. Trusted Repo Manager bare mirrors are a reconstructible cache and are also excluded.
 
 ## Commands
 
@@ -22,9 +22,15 @@ Each command accepts the newest local backup by default. The scripts also accept
 `make backup-verify` performs fail-closed structural verification:
 
 - archive is a regular `.tar.gz`, not a symlink;
-- archive paths contain no absolute or `..` traversal entries;
+- verification uses a private byte-identical snapshot and fails if the source
+  changes during the operation;
+- archive paths are canonical, unique and contain no absolute or `..` traversal
+  entries; outer symlinks, hardlinks and special files are rejected;
 - required PostgreSQL/configuration payload exists;
-- every file listed in the internal `SHA256SUMS` matches;
+- `SHA256SUMS` is a complete inventory, contains only safe in-archive regular
+  paths, and every digest matches;
+- format v2 contains a structurally safe `task-workspaces.tar.gz`; escaping
+  symlinks, hardlinks, devices and unexpected workspace roots are rejected;
 - PostgreSQL dump is non-empty;
 - `.env`, `.env.providers`, `.env.repositories`, and `auth.json` are absent.
 
@@ -39,9 +45,11 @@ This proves archive integrity/structure. It does **not** prove recoverability by
 3. validates and restores `control-plane.pgdump` into that isolated database;
 4. runs the **current checked-out Control Plane image** against the restored copy only;
 5. executes `python -m app.schema_cli migrate` and `check` on the copy;
-6. records the resulting Alembic revision and row counts for every public table;
-7. destroys the disposable database/network/volume;
-8. writes evidence under `backups/drills/restore-drill-*.json` with mode `600`.
+6. extracts the workspace snapshot only into an isolated temporary directory and
+   reconciles directory/manifest identity against restored DB workspace rows;
+7. records the resulting Alembic revision and row counts for every public table;
+8. destroys the disposable database/network/volume;
+9. writes evidence under `backups/drills/restore-drill-*.json` with mode `600`.
 
 Evidence includes:
 
@@ -53,6 +61,10 @@ Evidence includes:
 - exact Git SHA;
 - Docker image names and immutable local image IDs;
 - restored table row counts.
+- backup format and task-workspace reconciliation counts.
+
+Legacy format v1 remains verifiable. A v1 restore fails closed if migration finds
+task-workspace rows because that format has no corresponding filesystem payload.
 
 `observed_restore_rto_seconds` is a measured drill restoration time. `observed_backup_age_seconds` is an observed local recovery-point upper-bound proxy when the selected archive is the newest successful backup. Neither value is a contractual RTO/RPO SLO until an automated backup schedule, off-host delivery cadence, alerting, and retention policy are activated and measured over time.
 

@@ -60,6 +60,8 @@ OpenCode никогда не получает provider API keys или `MODEL_RO
 
 - `.env` — operational/control credentials, router admin credential и отдельный inference client credential;
 - `.env.providers` — только реальные ключи AI-провайдеров; файл получает только `model-router`;
+- `.env.repositories` — host-bound read-only Git profiles; файл получает только
+  `repo-manager`;
 - OpenCode не получает пароли control-plane/PostgreSQL, provider keys или router admin key;
 - GitHub write token не передается агентскому контейнеру;
 - `/connect` в OpenCode не используется для production credentials;
@@ -69,7 +71,7 @@ OpenCode никогда не получает provider API keys или `MODEL_RO
 
 ```text
 control-db (internal)
-  postgres <-> control-plane
+  postgres <-> control-plane / execution-worker / repo-manager / workspace-manager
 
 model-net
   opencode <-> model-gateway
@@ -79,12 +81,24 @@ router-backend (internal)
 
 provider-egress
   model-router -> AI provider APIs
+
+repository-egress
+  repo-manager -> разрешённые HTTPS Git remotes
+
+repository-mirrors volume
+  repo-manager (rw) -> workspace-manager (ro)
+
+task-workspaces volume
+  workspace-manager (rw) -> opencode (rw) / execution-worker (ro)
 ```
 
 Дополнительные правила:
 
 - PostgreSQL control-plane недоступен агентскому контейнеру;
 - admin endpoint Model Router недоступен агентскому контейнеру;
+- Git credentials и mirror недоступны OpenCode и Execution Worker;
+- Workspace Manager не имеет network egress, а task workspace создаёт только из
+  локального read-only mirror;
 - Docker socket хоста не монтируется;
 - web ports публикуются только на `127.0.0.1`;
 - CPU/RAM limits и log rotation заданы в Compose;
@@ -131,5 +145,8 @@ Trading Platform — отдельный проект. Допустимо име�
 - OpenCode использует только `MODEL_ROUTER_CLIENT_KEY`;
 - runtime OpenCode/Router config соответствует выбранному `KEY_MODE`;
 - Docker network membership соответствует этой схеме;
+- task execution до inference связан с exact repository/base/workspace identity
+  и проходит повторную read-only filesystem verification;
+- workspace с изменениями или неоднозначным evidence не удаляется автоматически;
 - в core-моделях Orchestra нет продуктовых trading risk parameters;
 - runtime версии закреплены, а не используют `latest`.

@@ -23,7 +23,7 @@ const approvalLabels = {
   financial_execution: "Финансовое исполнение",
 };
 
-const executionLabels = { queued: "В очереди", running: "Выполняется", completed: "Готов к приемке", failed: "Ошибка", cancelled: "Остановлен" };
+const executionLabels = { preparing: "Подготовка каталога", queued: "В очереди", running: "Выполняется", completed: "Готов к приемке", failed: "Ошибка", cancelled: "Остановлен" };
 const repositoryStatusLabels = {
   pending_validation: "Ожидает проверки",
   validating: "Проверяется",
@@ -37,8 +37,23 @@ const assuranceLabels = {
   "general-high-assurance": "High assurance",
   "regulated-critical": "Regulated critical",
 };
+const workspaceStatusLabels = {
+  pending: "Ожидает подготовки",
+  preparing: "Подготавливается",
+  unavailable: "Повтор ожидается",
+  ready: "Готов",
+  inspection_pending: "Ожидает проверки",
+  inspecting: "Проверяется",
+  retained: "Сохранён для ревью",
+  cleanup_pending: "Ожидает удаления",
+  cleaning: "Удаляется",
+  removed: "Удалён",
+  invalid: "Заблокирован",
+};
 let progressExecutionId = null;
 let executionsByTask = new Map();
+let repositoriesById = new Map();
+let tasksById = new Map();
 
 const transitions = {
   backlog: ["planned", "in_progress"],
@@ -132,6 +147,17 @@ async function validateRepository(repository) {
 
 async function loadRepositories() {
   const repositories = await api("/api/repositories?limit=100");
+  repositoriesById = new Map(repositories.map((repository) => [repository.id, repository]));
+  const taskRepository = document.getElementById("task-repository");
+  taskRepository.replaceChildren(new Option("Выберите готовый репозиторий", ""));
+  repositories.forEach((repository) => {
+    const option = new Option(
+      `${repository.name} · ${repositoryStatusLabels[repository.status] || repository.status}`,
+      repository.id,
+    );
+    option.disabled = !repository.enabled || repository.status !== "ready";
+    taskRepository.append(option);
+  });
   const body = document.getElementById("repositories-body");
   body.replaceChildren();
   if (!repositories.length) {
@@ -179,7 +205,7 @@ async function loadRepositories() {
 async function startExecution(taskId) {
   try {
     await api(`/api/tasks/${taskId}/execute`, { method: "POST" });
-    toast("AI Orchestra поставил задачу в очередь выполнения");
+    toast("AI Orchestra начал безопасную подготовку рабочего каталога");
     await refreshAll();
   } catch (error) { toast(error.message, true); }
 }
@@ -215,6 +241,8 @@ async function loadExecutionProgress(id) {
       ? "● активен"
       : progress.status === "queued"
         ? "● в очереди"
+        : progress.status === "preparing"
+          ? "● подготовка каталога"
         : executionLabels[progress.status] || progress.status;
   const summaryItems = [
     node("span", "", activityLabel),
@@ -231,9 +259,11 @@ async function loadExecutionProgress(id) {
   feed.replaceChildren();
   if (!progress.items.length) {
     const emptyText = progress.error
-      || (progress.status === "queued"
-        ? "Запуск сохранен и ожидает dispatch worker."
-        : "Текстовых сообщений пока нет.");
+      || (progress.status === "preparing"
+        ? "Workspace Manager проверяет commit и создаёт изолированный каталог."
+        : progress.status === "queued"
+          ? "Каталог проверен; запуск ожидает dispatch worker."
+          : "Текстовых сообщений пока нет.");
     feed.append(node("p", "empty", emptyText));
     return;
   }
@@ -254,12 +284,13 @@ function showExecutionResult(text) {
 
 async function loadTasks() {
   const tasks = await api("/api/tasks?limit=50");
+  tasksById = new Map(tasks.map((task) => [task.id, task]));
   const body = document.getElementById("tasks-body");
   body.replaceChildren();
   if (!tasks.length) {
     const row = node("tr");
     const cell = node("td", "empty", "Пока нет задач — создайте первую.");
-    cell.colSpan = 5;
+    cell.colSpan = 6;
     row.append(cell);
     body.append(row);
     return;
@@ -269,6 +300,35 @@ async function loadTasks() {
     const titleCell = node("td");
     titleCell.append(node("span", "task-title", task.title));
     titleCell.append(node("span", "task-meta", `${task.project} · ${formatDate(task.created_at)}`));
+    const repositoryCell = node("td");
+    const repositorySelect = node("select", "status-select");
+    repositorySelect.append(new Option("Не назначен", ""));
+    repositoriesById.forEach((repository) => {
+      repositorySelect.append(new Option(repository.name, repository.id));
+    });
+    repositorySelect.value = task.repository_id || "";
+    const run = executionsByTask.get(task.id);
+    repositorySelect.disabled = Boolean(run && ["preparing", "queued", "running"].includes(run.status));
+    repositorySelect.addEventListener("change", async () => {
+      repositorySelect.disabled = true;
+      try {
+        await api(`/api/tasks/${task.id}/repository`, {
+          method: "PATCH",
+          body: JSON.stringify({ repository_id: repositorySelect.value || null }),
+        });
+        toast("Репозиторий задачи обновлён");
+        await refreshAll();
+      } catch (error) {
+        repositorySelect.value = task.repository_id || "";
+        repositorySelect.disabled = false;
+        toast(error.message, true);
+      }
+    });
+    repositoryCell.append(repositorySelect);
+    if (task.repository_id) {
+      const repository = repositoriesById.get(task.repository_id);
+      repositoryCell.append(node("span", "task-meta", repository?.status === "ready" ? "commit будет зафиксирован при запуске" : "репозиторий пока не готов"));
+    }
     const domainCell = node("td");
     domainCell.append(node("span", "pill", domainLabels[task.domain] || task.domain));
     const riskCell = node("td");
@@ -296,14 +356,18 @@ async function loadTasks() {
       statusCell.append(node("span", `pill ${task.status}`, statusLabels[task.status] || task.status));
     }
     const executionCell = node("td");
-    const run = executionsByTask.get(task.id);
     if (!run && task.domain === "development" && task.status !== "done") {
-      const start = node("button", "button button-small button-secondary", "Запустить");
-      start.addEventListener("click", () => startExecution(task.id));
-      executionCell.append(start);
+      const repository = repositoriesById.get(task.repository_id);
+      if (repository?.enabled && repository.status === "ready") {
+        const start = node("button", "button button-small button-secondary", "Запустить");
+        start.addEventListener("click", () => startExecution(task.id));
+        executionCell.append(start);
+      } else {
+        executionCell.append(node("span", "task-meta", "Нужен ready-репозиторий"));
+      }
     } else if (run) {
       executionCell.append(node("span", `pill ${run.status}`, executionLabels[run.status] || run.status));
-      if (["queued", "running"].includes(run.status)) {
+      if (["preparing", "queued", "running"].includes(run.status)) {
         const actions = node("div", "stack-actions");
         const progress = node("button", "text-button", "Ход работы");
         const refresh = node("button", "text-button", "Обновить");
@@ -322,15 +386,71 @@ async function loadTasks() {
         result.addEventListener("click", () => showExecutionResult(run.result));
         executionCell.append(result);
       }
-      if (!["queued", "running"].includes(run.status) && task.status !== "done") {
-        const restart = node("button", "text-button", "Запустить снова");
-        restart.addEventListener("click", () => startExecution(task.id));
-        executionCell.append(restart);
+      if (!["preparing", "queued", "running"].includes(run.status) && task.status !== "done") {
+        const repository = repositoriesById.get(task.repository_id);
+        if (repository?.enabled && repository.status === "ready") {
+          const restart = node("button", "text-button", "Запустить снова");
+          restart.addEventListener("click", () => startExecution(task.id));
+          executionCell.append(restart);
+        }
       }
     } else {
       executionCell.append(node("span", "task-meta", "V1: development"));
     }
-    row.append(titleCell, domainCell, riskCell, statusCell, executionCell);
+    row.append(titleCell, repositoryCell, domainCell, riskCell, statusCell, executionCell);
+    body.append(row);
+  });
+}
+
+async function requestWorkspaceCleanup(workspace) {
+  if (!window.confirm("Удалить доказанно чистый рабочий каталог?")) return;
+  try {
+    await api(`/api/workspaces/${workspace.id}/cleanup`, {
+      method: "POST",
+      body: JSON.stringify({ expected_version: workspace.version }),
+    });
+    toast("Безопасная очистка поставлена в очередь");
+    await refreshAll();
+  } catch (error) { toast(error.message, true); }
+}
+
+async function loadWorkspaces() {
+  const workspaces = await api("/api/workspaces?limit=100");
+  const body = document.getElementById("workspaces-body");
+  body.replaceChildren();
+  if (!workspaces.length) {
+    const row = node("tr");
+    const cell = node("td", "empty", "Рабочие каталоги появятся после запуска задач.");
+    cell.colSpan = 7;
+    row.append(cell);
+    body.append(row);
+    return;
+  }
+  workspaces.forEach((workspace) => {
+    const row = node("tr");
+    const taskCell = node("td");
+    taskCell.append(node("span", "task-title", tasksById.get(workspace.task_id)?.title || workspace.task_id));
+    taskCell.append(node("span", "task-meta mono", workspace.id));
+    const repositoryCell = node("td", "", repositoriesById.get(workspace.repository_id)?.name || workspace.repository_id);
+    const commitCell = node("td", "mono", workspace.base_commit.slice(0, 12));
+    const pathCell = node("td", "mono", workspace.opencode_path);
+    const statusCell = node("td");
+    statusCell.append(node("span", `pill ${workspace.status}`, workspaceStatusLabels[workspace.status] || workspace.status));
+    if (workspace.last_error_code) statusCell.append(node("span", "task-meta mono", workspace.last_error_code));
+    const changesCell = node("td", "", workspace.has_changes === null ? "—" : workspace.has_changes ? `${workspace.changed_file_count} файл(ов)` : "Чисто");
+    const actionCell = node("td");
+    const clean = workspace.status === "retained"
+      && workspace.has_changes === false
+      && workspace.current_head_commit === workspace.base_commit
+      && workspace.current_tree === workspace.initial_tree;
+    if (clean) {
+      const remove = node("button", "text-button", "Очистить");
+      remove.addEventListener("click", () => requestWorkspaceCleanup(workspace));
+      actionCell.append(remove);
+    } else {
+      actionCell.append(node("span", "task-meta", workspace.status === "retained" ? "Требуется ревью" : "—"));
+    }
+    row.append(taskCell, repositoryCell, commitCell, pathCell, statusCell, changesCell, actionCell);
     body.append(row);
   });
 }
@@ -434,7 +554,9 @@ async function loadAudit() {
 async function refreshAll() {
   try {
     await loadExecutions();
-    await Promise.all([loadSummary(), loadRepositories(), loadTasks(), loadCapabilityGuard(), loadApprovals(), loadBudgets(), loadAudit()]);
+    await loadRepositories();
+    await Promise.all([loadSummary(), loadTasks(), loadCapabilityGuard(), loadApprovals(), loadBudgets(), loadAudit()]);
+    await loadWorkspaces();
   } catch (error) { toast(error.message, true); }
 }
 
@@ -474,6 +596,7 @@ document.getElementById("task-form").addEventListener("submit", async (event) =>
   const form = event.currentTarget;
   const status = document.getElementById("task-form-status");
   const payload = Object.fromEntries(new FormData(form).entries());
+  if (!payload.repository_id) delete payload.repository_id;
   try {
     status.textContent = "";
     await api("/api/tasks", { method: "POST", body: JSON.stringify(payload) });
@@ -488,7 +611,7 @@ document.getElementById("task-form").addEventListener("submit", async (event) =>
 refreshAll();
 
 setInterval(async () => {
-  const active = [...executionsByTask.values()].filter((run) => ["queued", "running"].includes(run.status));
+  const active = [...executionsByTask.values()].filter((run) => ["preparing", "queued", "running"].includes(run.status));
   if (!active.length) return;
   await refreshAll();
 }, 10000);

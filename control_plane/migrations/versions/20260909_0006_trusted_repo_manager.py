@@ -94,7 +94,9 @@ def upgrade() -> None:
         batch_op.create_check_constraint(
             "ck_repositories_ready_state",
             "(status <> 'ready' OR (enabled IS TRUE "
+            "AND default_branch IS NOT NULL "
             "AND length(default_branch) BETWEEN 1 AND 255 "
+            "AND last_known_commit IS NOT NULL "
             "AND length(last_known_commit) IN (40, 64) "
             "AND last_fetched_at IS NOT NULL AND sync_finished_at IS NOT NULL "
             "AND sync_next_at IS NOT NULL AND sync_lease_owner IS NULL "

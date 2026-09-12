@@ -3,8 +3,9 @@ FROM python:3.12-slim AS application-base
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-RUN groupadd --system orchestra \
-    && useradd --system --gid orchestra --home-dir /app orchestra
+RUN groupadd --gid 10001 orchestra \
+    && useradd --uid 10001 --gid orchestra --home-dir /app \
+        --no-create-home --shell /usr/sbin/nologin orchestra
 
 WORKDIR /app
 
@@ -17,12 +18,16 @@ COPY alembic.ini ./alembic.ini
 COPY migrations ./migrations
 COPY app ./app
 
-FROM application-base AS repo-manager
+FROM application-base AS git-runtime
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/* \
-    && install -d -o orchestra -g orchestra -m 0700 /var/lib/ai-orchestra/repositories \
+    && install -d -o orchestra -g orchestra -m 0700 /workspace/worktrees/managed
+
+FROM git-runtime AS repo-manager
+
+RUN install -d -o orchestra -g orchestra -m 0700 /var/lib/ai-orchestra/repositories \
     && chmod 0555 \
         /app/app/repo_manager_askpass.py \
         /app/app/repo_manager_git_wrapper.sh
@@ -30,6 +35,18 @@ RUN apt-get update \
 USER orchestra
 
 CMD ["python", "-m", "app.repository_manager"]
+
+FROM git-runtime AS workspace-manager
+
+USER orchestra
+
+CMD ["python", "-m", "app.workspace_manager"]
+
+FROM git-runtime AS execution-worker
+
+USER orchestra
+
+CMD ["python", "-m", "app.execution_worker"]
 
 FROM application-base AS control-plane
 

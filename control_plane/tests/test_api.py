@@ -1,10 +1,13 @@
+from datetime import datetime, timezone
+from uuid import uuid4
+
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 import pytest
 
 from control_plane.app.db import SessionLocal
 from control_plane.app.main import app
-from control_plane.app.models import ExecutionRun, Task
+from control_plane.app.models import ExecutionRun, Repository, Task, TaskWorkspace
 from control_plane.app.opencode_client import OpenCodeError
 from control_plane.app.settings import Settings
 
@@ -176,12 +179,52 @@ class FailingOpenCode(FakeOpenCode):
         raise OpenCodeError("simulated OpenCode outage")
 
 
+def _seed_repository(
+    *,
+    status: str = "ready",
+    commit: str = "a" * 40,
+    branch: str = "main",
+) -> str:
+    now = datetime.now(timezone.utc)
+    suffix = uuid4().hex
+    ready = status == "ready"
+    with SessionLocal() as db:
+        repository = Repository(
+            name=f"ready-{suffix}",
+            remote_url=f"https://github.com/example/{suffix}.git",
+            remote_identity=f"github.com/example/{suffix}",
+            remote_host="github.com",
+            provider="github",
+            auth_profile_ref="git-readonly",
+            default_branch=branch if ready else None,
+            enabled=True,
+            status=status,
+            last_known_commit=commit if ready else None,
+            last_fetched_at=now if ready else None,
+            sync_failure_count=0,
+            sync_finished_at=now if ready else None,
+            sync_next_at=now,
+        )
+        db.add(repository)
+        db.commit()
+        return repository.id
+
+
+def _seed_ready_repository() -> str:
+    return _seed_repository()
+
+
 def _create_development_task(client, auth, mutation_headers, title="Сделать тестовый модуль"):
+    repository_id = _seed_ready_repository()
     created = client.post(
         "/api/tasks",
         auth=auth,
         headers=mutation_headers,
-        json={"title": title, "domain": "development"},
+        json={
+            "title": title,
+            "domain": "development",
+            "repository_id": repository_id,
+        },
     )
     assert created.status_code == 201
     return created.json()["id"]
@@ -204,7 +247,7 @@ def _seed_running_execution(task_id: str, session_id: str = "session-test-1") ->
         return run.id
 
 
-def test_development_execution_is_durably_queued_before_opencode(auth, mutation_headers):
+def test_development_execution_is_durably_preparing_before_opencode(auth, mutation_headers):
     with TestClient(app) as client:
         task_id = _create_development_task(client, auth, mutation_headers)
         started = client.post(
@@ -216,17 +259,29 @@ def test_development_execution_is_durably_queued_before_opencode(auth, mutation_
         audit = client.get("/api/audit", auth=auth).json()
 
     assert started.status_code == 201
-    assert started.json()["status"] == "queued"
-    assert started.json()["stage"] == "dispatch_pending"
+    assert started.json()["status"] == "preparing"
+    assert started.json()["stage"] == "workspace_pending"
+    assert started.json()["contract_version"] == 2
+    assert started.json()["repository_id"] is not None
+    assert started.json()["workspace_id"] is not None
+    assert started.json()["base_commit"] == "a" * 40
+    assert started.json()["workspace_path"].startswith("/workspace/worktrees/managed/")
     assert started.json()["opencode_session_id"] is None
     assert started.json()["lease_generation"] == 0
     assert started.json()["heartbeat_at"] is None
     assert started.json()["deadline_at"] > started.json()["created_at"]
     assert next(t for t in tasks if t["id"] == task_id)["status"] == "in_progress"
-    assert audit[0]["action"] == "execution.queued"
+    actions = [event["action"] for event in audit]
+    assert "workspace.requested" in actions
+    assert "execution.preparing" in actions
+    with SessionLocal() as db:
+        workspace = db.get(TaskWorkspace, started.json()["workspace_id"])
+        assert workspace is not None
+        assert workspace.status == "pending"
+        assert workspace.base_commit == started.json()["base_commit"]
 
 
-def test_second_execute_is_rejected_while_first_is_queued(auth, mutation_headers):
+def test_second_execute_is_rejected_while_first_is_preparing(auth, mutation_headers):
     with TestClient(app) as client:
         task_id = _create_development_task(client, auth, mutation_headers)
         first = client.post(
@@ -243,6 +298,99 @@ def test_second_execute_is_rejected_while_first_is_queued(auth, mutation_headers
     assert first.status_code == 201
     assert second.status_code == 409
     assert "активный запуск" in second.json()["detail"]
+
+
+def test_execution_requires_an_assigned_ready_repository(auth, mutation_headers):
+    with TestClient(app) as client:
+        without_repository = client.post(
+            "/api/tasks",
+            auth=auth,
+            headers=mutation_headers,
+            json={"title": "Нет репозитория", "domain": "development"},
+        )
+        no_repository_run = client.post(
+            f"/api/tasks/{without_repository.json()['id']}/execute",
+            auth=auth,
+            headers=mutation_headers,
+        )
+
+        pending_repository_id = _seed_repository(status="pending_validation")
+        pending_task = client.post(
+            "/api/tasks",
+            auth=auth,
+            headers=mutation_headers,
+            json={
+                "title": "Репозиторий ещё не готов",
+                "domain": "development",
+                "repository_id": pending_repository_id,
+            },
+        )
+        pending_run = client.post(
+            f"/api/tasks/{pending_task.json()['id']}/execute",
+            auth=auth,
+            headers=mutation_headers,
+        )
+
+    assert no_repository_run.status_code == 409
+    assert "назначьте репозиторий" in no_repository_run.json()["detail"]
+    assert pending_run.status_code == 409
+    assert "не готов" in pending_run.json()["detail"]
+    with SessionLocal() as db:
+        assert db.query(ExecutionRun).count() == 0
+        assert db.query(TaskWorkspace).count() == 0
+
+
+def test_execution_rejects_malformed_durable_repository_identity(
+    auth,
+    mutation_headers,
+):
+    repository_id = _seed_repository(commit="z" * 40)
+    with TestClient(app) as client:
+        task = client.post(
+            "/api/tasks",
+            auth=auth,
+            headers=mutation_headers,
+            json={
+                "title": "Повреждённая repository identity",
+                "domain": "development",
+                "repository_id": repository_id,
+            },
+        )
+        response = client.post(
+            f"/api/tasks/{task.json()['id']}/execute",
+            auth=auth,
+            headers=mutation_headers,
+        )
+
+    assert response.status_code == 409
+    assert "immutable identity" in response.json()["detail"]
+    with SessionLocal() as db:
+        assert db.query(ExecutionRun).count() == 0
+        assert db.query(TaskWorkspace).count() == 0
+
+
+def test_repository_assignment_is_frozen_during_active_execution(
+    auth,
+    mutation_headers,
+):
+    replacement_repository_id = _seed_ready_repository()
+    with TestClient(app) as client:
+        task_id = _create_development_task(client, auth, mutation_headers)
+        started = client.post(
+            f"/api/tasks/{task_id}/execute",
+            auth=auth,
+            headers=mutation_headers,
+        )
+        changed = client.patch(
+            f"/api/tasks/{task_id}/repository",
+            auth=auth,
+            headers=mutation_headers,
+            json={"repository_id": replacement_repository_id},
+        )
+
+    assert started.status_code == 201
+    assert changed.status_code == 409
+    assert "активного запуска" in changed.json()["detail"]
 
 
 def test_abort_persists_idempotent_cancel_intent_without_opencode_call(auth, mutation_headers):
@@ -271,20 +419,21 @@ def test_abort_persists_idempotent_cancel_intent_without_opencode_call(auth, mut
             audit = client.get("/api/audit", auth=auth).json()
 
         assert first.status_code == 200
-        assert first.json()["status"] == "queued"
-        assert first.json()["stage"] == "cancel_requested"
+        assert first.json()["status"] == "cancelled"
+        assert first.json()["stage"] == "stopped"
         assert first.json()["cancel_requested_at"] is not None
         assert first.json()["lease_generation"] == 1
         assert second.json()["cancel_requested_at"] == first.json()["cancel_requested_at"]
         assert second.json()["lease_generation"] == first.json()["lease_generation"]
-        assert sum(event["action"] == "execution.cancel_requested" for event in audit) == 1
+        assert sum(event["action"] == "execution.cancelled" for event in audit) == 1
+        assert sum(event["action"] == "workspace.cleanup_requested" for event in audit) == 1
         assert fake.status_calls == 0
         assert fake.message_calls == 0
     finally:
         app.dependency_overrides.pop(get_opencode_client, None)
 
 
-def test_queued_progress_does_not_call_opencode(auth, mutation_headers):
+def test_preparing_progress_does_not_call_opencode(auth, mutation_headers):
     from control_plane.app.main import get_opencode_client
 
     fake = FakeOpenCode()
@@ -303,12 +452,131 @@ def test_queued_progress_does_not_call_opencode(auth, mutation_headers):
             )
 
         assert progress.status_code == 200
-        assert progress.json()["session_state"] == "queued"
+        assert progress.json()["session_state"] == "preparing"
         assert progress.json()["items"] == []
         assert fake.status_calls == 0
         assert fake.message_calls == 0
     finally:
         app.dependency_overrides.pop(get_opencode_client, None)
+
+
+def _seed_retained_workspace(*, has_changes: bool) -> tuple[str, int]:
+    now = datetime.now(timezone.utc)
+    repository_id = _seed_ready_repository()
+    task_id = str(uuid4())
+    workspace_id = str(uuid4())
+    run_id = str(uuid4())
+    base_commit = "a" * 40
+    initial_tree = "b" * 40
+    preflight_digest = "c" * 64
+    with SessionLocal() as db:
+        db.add(
+            Task(
+                id=task_id,
+                title="Проверить очистку workspace",
+                repository_id=repository_id,
+                status="qa",
+            )
+        )
+        db.add(
+            TaskWorkspace(
+                id=workspace_id,
+                task_id=task_id,
+                repository_id=repository_id,
+                status="retained",
+                base_commit=base_commit,
+                base_branch="main",
+                branch_name=(
+                    f"ai-orchestra/task-{task_id.replace('-', '')[:12]}"
+                    f"/run-{run_id.replace('-', '')}"
+                ),
+                opencode_path=f"/workspace/worktrees/managed/{workspace_id}",
+                initial_tree=initial_tree,
+                preflight_digest=preflight_digest,
+                tracked_entries=2,
+                current_head_commit=base_commit,
+                current_tree=("d" * 40 if has_changes else initial_tree),
+                change_digest="e" * 64,
+                has_changes=has_changes,
+                changed_file_count=1 if has_changes else 0,
+                prepared_at=now,
+                inspection_requested_at=now,
+                inspected_at=now,
+                version=1,
+            )
+        )
+        db.add(
+            ExecutionRun(
+                id=run_id,
+                task_id=task_id,
+                contract_version=2,
+                repository_id=repository_id,
+                workspace_id=workspace_id,
+                base_commit=base_commit,
+                workspace_path=f"/workspace/worktrees/managed/{workspace_id}",
+                workspace_tree=initial_tree,
+                workspace_preflight_digest=preflight_digest,
+                workspace_preflight_completed_at=now,
+                workspace_runtime_preflight_digest=preflight_digest,
+                workspace_runtime_verified_at=now,
+                status="completed",
+                stage="manager_review",
+                finished_at=now,
+            )
+        )
+        db.commit()
+    return workspace_id, 1
+
+
+def test_cleanup_request_requires_clean_inspection_and_exact_version(
+    auth,
+    mutation_headers,
+):
+    workspace_id, version = _seed_retained_workspace(has_changes=False)
+    with TestClient(app) as client:
+        listed = client.get("/api/workspaces", auth=auth)
+        accepted = client.post(
+            f"/api/workspaces/{workspace_id}/cleanup",
+            auth=auth,
+            headers=mutation_headers,
+            json={"expected_version": version},
+        )
+        stale = client.post(
+            f"/api/workspaces/{workspace_id}/cleanup",
+            auth=auth,
+            headers=mutation_headers,
+            json={"expected_version": version},
+        )
+
+    assert listed.status_code == 200
+    listed_workspace = next(
+        item for item in listed.json() if item["id"] == workspace_id
+    )
+    assert listed_workspace["generation"] == 0
+    assert accepted.status_code == 200
+    assert accepted.json()["status"] == "cleanup_pending"
+    assert accepted.json()["version"] == version + 1
+    assert stale.status_code == 409
+    assert "expected_version" in stale.json()["detail"]
+
+
+def test_cleanup_request_never_deletes_changed_workspace(auth, mutation_headers):
+    workspace_id, version = _seed_retained_workspace(has_changes=True)
+    with TestClient(app) as client:
+        rejected = client.post(
+            f"/api/workspaces/{workspace_id}/cleanup",
+            auth=auth,
+            headers=mutation_headers,
+            json={"expected_version": version},
+        )
+
+    assert rejected.status_code == 409
+    assert "изменён" in rejected.json()["detail"]
+    with SessionLocal() as db:
+        workspace = db.get(TaskWorkspace, workspace_id)
+        assert workspace is not None
+        assert workspace.status == "retained"
+        assert workspace.version == version
 
 
 def test_core_api_has_no_browser_owned_refresh_lifecycle(auth, mutation_headers):

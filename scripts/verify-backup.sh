@@ -38,9 +38,9 @@ chmod 600 "$verified_archive"
 verified_sha="$(sha256sum "$verified_archive" | awk '{print $1}')"
 archive_sha_after_copy="$(sha256sum "$archive" | awk '{print $1}')"
 archive_bytes_after_copy="$(stat -c '%s' "$archive")"
-if [[ "$archive_sha_before" != "$verified_sha" \
-  || "$archive_sha_before" != "$archive_sha_after_copy" \
-  || "$archive_bytes_before" != "$archive_bytes_after_copy" ]]; then
+if ! [[ "$archive_sha_before" == "$verified_sha" \
+  && "$archive_sha_before" == "$archive_sha_after_copy" \
+  && "$archive_bytes_before" == "$archive_bytes_after_copy" ]]; then
   echo "[FAIL] Backup archive changed while creating a verification snapshot" >&2
   exit 1
 fi

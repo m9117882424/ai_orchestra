@@ -43,10 +43,15 @@ secrets ему по-прежнему недоступны. Execution Worker мо
    - новый workspace ID, branch и абсолютный path;
    - execution в `preparing`, workspace в `pending`.
 3. Workspace Manager забирает durable lease и проверяет binding повторно.
+   Непосредственно перед filesystem effect он также повторно проверяет, что
+   Registry всё ещё разрешает `ready` repository. Отзыв trust останавливает
+   подготовку, а временная повторная validation переводит её в bounded retry.
 4. Из mirror создаётся standalone Git repository без remote. Hooks, fsmonitor,
    submodules и сетевые protocols отключены.
 5. После проверок каталог публикуется атомарным rename. Только затем одна
-   транзакция переводит workspace в `ready`, а execution — в `queued`.
+   транзакция, удерживающая повторную блокировку Registry row, переводит workspace
+   в `ready`, а execution — в `queued`. Поэтому отзыв repository trust во время
+   checkout не может пересечь границу публикации очереди.
 6. Execution Worker сверяет DB binding и read-only filesystem evidence, затем
    повторяет проверку непосредственно перед единственным prompt, запускающим
    inference.

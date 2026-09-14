@@ -259,6 +259,7 @@ def upgrade() -> None:
             "(contract_version = 1 OR status NOT IN ('running', 'completed') "
             "OR (workspace_runtime_preflight_digest IS NOT NULL "
             "AND length(workspace_runtime_preflight_digest) = 64 "
+            "AND workspace_runtime_preflight_digest = workspace_preflight_digest "
             "AND workspace_runtime_verified_at IS NOT NULL))",
         )
     op.create_index(

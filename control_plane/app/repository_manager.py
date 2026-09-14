@@ -426,6 +426,95 @@ class RepositoryLeaseManager:
         return repository.status
 
 
+def reconcile_mirror_cache(
+    db: Session,
+    storage_root: Path,
+    *,
+    actor: str,
+    now: datetime | None = None,
+) -> int:
+    """Revoke restored ``ready`` state when its reconstructible cache is absent.
+
+    Repository mirrors are intentionally excluded from backups. A restored
+    database can therefore contain trusted ``ready`` rows while a fresh mirror
+    volume is empty. Requeue those rows before the worker becomes healthy so a
+    workspace can never consume readiness evidence detached from local storage.
+    """
+    now = now or utc_now()
+    repositories = list(
+        db.scalars(
+            select(Repository)
+            .where(Repository.enabled.is_(True), Repository.status == "ready")
+            .order_by(Repository.created_at.asc())
+            .with_for_update(skip_locked=True)
+        )
+    )
+    changed = 0
+    for repository in repositories:
+        try:
+            repository_id = str(UUID(repository.id))
+        except (TypeError, ValueError, AttributeError):
+            state = "invalid"
+            error_code = "repository_id_invalid"
+        else:
+            mirror_path = storage_root / f"{repository_id}.git"
+            lock_path = storage_root / f".{repository_id}.sync.lock"
+            try:
+                mirror_metadata = mirror_path.lstat()
+            except FileNotFoundError:
+                state = "pending_validation"
+                error_code = "mirror_cache_missing"
+            except OSError:
+                state = "pending_validation"
+                error_code = "mirror_cache_unavailable"
+            else:
+                if not stat.S_ISDIR(mirror_metadata.st_mode):
+                    state = "invalid"
+                    error_code = "mirror_path_invalid"
+                else:
+                    try:
+                        lock_metadata = lock_path.lstat()
+                    except FileNotFoundError:
+                        state = "pending_validation"
+                        error_code = "mirror_cache_missing"
+                    except OSError:
+                        state = "pending_validation"
+                        error_code = "mirror_cache_unavailable"
+                    else:
+                        if (
+                            not stat.S_ISREG(lock_metadata.st_mode)
+                            or lock_metadata.st_nlink != 1
+                        ):
+                            state = "invalid"
+                            error_code = "mirror_lock_invalid"
+                        else:
+                            continue
+
+        repository.status = state
+        repository.sync_requested_at = now
+        repository.sync_next_at = now if state == "pending_validation" else None
+        repository.sync_lease_owner = None
+        repository.sync_lease_expires_at = None
+        repository.last_sync_error_code = error_code
+        repository.version += 1
+        repository.updated_at = now
+        write_audit(
+            db,
+            actor=actor,
+            action=(
+                "repository.mirror_revalidation_requested"
+                if state == "pending_validation"
+                else "repository.mirror_cache_rejected"
+            ),
+            entity_type="repository",
+            entity_id=repository.id,
+            details={"error_code": error_code, "version": repository.version},
+        )
+        changed += 1
+    db.commit()
+    return changed
+
+
 class GitCommandRunner:
     def run(
         self,
@@ -673,6 +762,9 @@ class GitRepositorySynchronizer:
                 self.storage_root.chmod(0o700)
             except OSError as exc:
                 raise RepositorySyncError("mirror_root_permissions", terminal=True) from exc
+
+    def prepare_storage_root(self) -> None:
+        self._prepare_storage_root()
 
     @contextmanager
     def _repository_lock(self, repository_id: str) -> Iterator[None]:
@@ -1048,6 +1140,18 @@ def main() -> int:
         min_free_bytes=min_free_bytes,
         liveness_callback=lambda: write_worker_health(health_path),
     )
+    synchronizer.prepare_storage_root()
+    with SessionLocal() as db:
+        requeued_mirrors = reconcile_mirror_cache(
+            db,
+            storage_root,
+            actor=manager.audit_actor,
+        )
+    if requeued_mirrors:
+        LOGGER.warning(
+            "Requeued repositories with missing or invalid mirror cache count=%s",
+            requeued_mirrors,
+        )
     LOGGER.info(
         "Repo Manager started worker_id=%s lease_seconds=%s timeout_seconds=%s max_active=%s poll_seconds=%s",
         worker_id,

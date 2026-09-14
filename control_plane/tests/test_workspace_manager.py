@@ -11,6 +11,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.exc import IntegrityError
 
+from control_plane.app import workspace_protocol as workspace_protocol_module
 from control_plane.app.db import SessionLocal
 from control_plane.app.execution_worker import ExecutionLease, ExecutionLeaseManager, poll_execution
 from control_plane.app.models import AuditEvent, ExecutionRun, Repository, Task, TaskWorkspace
@@ -57,6 +58,7 @@ def _build_mirror(
     *,
     dangerous_symlink: str | None = None,
     gitlink: bool = False,
+    safe_directory_symlink: bool = False,
 ) -> tuple[Path, str]:
     source = root / "source"
     source.mkdir(parents=True)
@@ -68,6 +70,11 @@ def _build_mirror(
         os.symlink("../outside", source / "escape")
     elif dangerous_symlink == "git":
         os.symlink(".git/config", source / "metadata-link")
+    if safe_directory_symlink:
+        docs = source / "docs"
+        docs.mkdir()
+        (docs / "guide.md").write_text("safe target\n", encoding="utf-8")
+        os.symlink("docs", source / "docs-link")
     _git(source, "add", ".")
     _git(source, "commit", "-m", "fixture")
     if gitlink:
@@ -147,6 +154,71 @@ def test_prepare_creates_clean_standalone_workspace_idempotently(tmp_path):
     manifest = workspace / ".git" / WORKSPACE_MANIFEST_NAME
     assert stat.S_IMODE(manifest.stat().st_mode) == 0o400
     assert read_manifest(workspace)["preflight_digest"] == result.preflight_digest
+
+
+def test_prepare_accepts_tracked_directory_symlink_that_stays_inside_workspace(tmp_path):
+    repository_id = str(uuid4())
+    mirror_root, commit = _build_mirror(
+        tmp_path,
+        repository_id,
+        safe_directory_symlink=True,
+    )
+    workspace_root = tmp_path / "workspaces"
+    lease = _lease(workspace_root, repository_id, commit)
+
+    result = _filesystem(mirror_root, workspace_root).prepare(
+        lease,
+        heartbeat=lambda: True,
+    )
+
+    workspace = Path(lease.opencode_path)
+    assert (workspace / "docs-link").is_symlink()
+    assert (workspace / "docs-link" / "guide.md").read_text() == "safe target\n"
+    assert read_manifest(workspace)["preflight_digest"] == result.preflight_digest
+
+
+def test_workspace_git_timeout_kills_the_entire_process_group(monkeypatch):
+    killed: list[tuple[int, int]] = []
+
+    class TimedOutProcess:
+        pid = 4243
+        returncode = None
+
+        def __init__(self):
+            self.calls = 0
+
+        def communicate(self, *, timeout=None):
+            self.calls += 1
+            if self.calls == 1:
+                assert timeout == 7
+                raise subprocess.TimeoutExpired(cmd="git", timeout=7)
+            assert timeout is None
+            return b"", None
+
+    process = TimedOutProcess()
+
+    def fake_popen(*_args, **kwargs):
+        assert kwargs["stderr"] is subprocess.DEVNULL
+        assert kwargs["start_new_session"] is True
+        return process
+
+    monkeypatch.setattr(workspace_protocol_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        workspace_protocol_module.os,
+        "killpg",
+        lambda pid, sig: killed.append((pid, sig)),
+    )
+
+    with pytest.raises(WorkspacePreflightError) as error:
+        workspace_protocol_module.run_git(
+            ["status"],
+            timeout_seconds=7,
+            failure_code="workspace_status_invalid",
+        )
+
+    assert error.value.code == "git_operation_timed_out"
+    assert killed == [(4243, workspace_protocol_module.signal.SIGKILL)]
+    assert process.calls == 2
 
 
 def test_manifest_reader_rejects_permission_link_and_type_tampering(tmp_path):
@@ -393,6 +465,76 @@ def test_database_binding_mismatch_fails_closed_and_is_audited():
     assert run is not None and run.status == "failed"
     assert run.stage == "workspace_binding_rejected"
     assert "workspace.binding_rejected" in actions
+
+
+def _revoke_repository(repository_id: str) -> None:
+    with SessionLocal() as db:
+        repository = db.get(Repository, repository_id)
+        assert repository is not None
+        repository.enabled = False
+        repository.status = "pending_validation"
+        repository.sync_next_at = None
+        repository.last_sync_error_code = None
+        repository.version += 1
+        db.commit()
+
+
+class _PrepareProbe:
+    def __init__(self, *, revoke_repository_id: str | None = None):
+        self.called = False
+        self.revoke_repository_id = revoke_repository_id
+
+    def prepare(self, _lease, *, heartbeat):
+        self.called = True
+        assert heartbeat()
+        if self.revoke_repository_id is not None:
+            _revoke_repository(self.revoke_repository_id)
+        return PreparedWorkspace(
+            tree="c" * 40,
+            tracked_entries=0,
+            preflight_digest="d" * 64,
+        )
+
+
+def test_revoked_repository_stops_prepare_before_filesystem_side_effect():
+    task_id, workspace_id, execution_id = _seed_preparing_workspace()
+    manager = WorkspaceLeaseManager("repository-revoked", lease_seconds=60)
+    with SessionLocal() as db:
+        [lease] = manager.claim_available(db, limit=1)
+    _revoke_repository(lease.repository_id)
+    filesystem = _PrepareProbe()
+
+    assert process_workspace(manager, filesystem, lease) == "invalid"
+
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        workspace = db.get(TaskWorkspace, workspace_id)
+        run = db.get(ExecutionRun, execution_id)
+    assert filesystem.called is False
+    assert task is not None and task.status == "failed"
+    assert workspace is not None and workspace.status == "invalid"
+    assert workspace.last_error_code == "repository_trust_revoked"
+    assert run is not None and run.status == "failed"
+
+
+def test_repository_trust_is_rechecked_after_filesystem_prepare():
+    task_id, workspace_id, execution_id = _seed_preparing_workspace()
+    manager = WorkspaceLeaseManager("repository-race", lease_seconds=60)
+    with SessionLocal() as db:
+        [lease] = manager.claim_available(db, limit=1)
+    filesystem = _PrepareProbe(revoke_repository_id=lease.repository_id)
+
+    assert process_workspace(manager, filesystem, lease) == "invalid"
+
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        workspace = db.get(TaskWorkspace, workspace_id)
+        run = db.get(ExecutionRun, execution_id)
+    assert filesystem.called is True
+    assert task is not None and task.status == "failed"
+    assert workspace is not None and workspace.status == "invalid"
+    assert workspace.last_error_code == "repository_trust_revoked"
+    assert run is not None and run.status == "failed"
 
 
 def test_durable_prepare_claim_publishes_filesystem_evidence_atomically(tmp_path):
@@ -822,6 +964,30 @@ def test_database_constraints_reject_null_workspace_and_execution_evidence():
         workspace.preflight_digest = "b" * 64
         workspace.tracked_entries = 1
         workspace.prepared_at = now
+        with pytest.raises(IntegrityError):
+            db.commit()
+        db.rollback()
+
+        now, task_id, repository_id, workspace, execution_id, path = _constraint_binding(db)
+        db.add(
+            ExecutionRun(
+                id=execution_id,
+                task_id=task_id,
+                contract_version=2,
+                repository_id=repository_id,
+                workspace_id=workspace.id,
+                base_commit="a" * 40,
+                workspace_path=path,
+                workspace_tree="b" * 40,
+                workspace_preflight_digest="c" * 64,
+                workspace_preflight_completed_at=now,
+                workspace_runtime_preflight_digest="d" * 64,
+                workspace_runtime_verified_at=now,
+                status="running",
+                stage="department_lead",
+                deadline_at=now + timedelta(hours=1),
+            )
+        )
         with pytest.raises(IntegrityError):
             db.commit()
         db.rollback()

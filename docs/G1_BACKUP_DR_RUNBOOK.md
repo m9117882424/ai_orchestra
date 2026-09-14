@@ -108,11 +108,34 @@ For a real recovery:
 3. recover secrets through the separate secret process — never from the backup archive;
 4. build/pull the exact intended application images;
 5. perform a clean `scripts/restore-drill.sh <archive>` first when time permits;
-6. restore PostgreSQL to the replacement environment;
+6. while all writers remain stopped, restore PostgreSQL **and**
+   `task-workspaces.tar.gz` from the same verified archive to a clean replacement
+   task-workspace volume; preserve numeric ownership and modes, then run
+   `workspace-volume-init` and verify the root is exactly `10001:10001:0700`;
 7. run the repository's migration CLI and schema check;
-8. start Control Plane and dependent services;
-9. run `make smoke`;
-10. reconcile external effects/approvals before enabling future write-capable workflows.
+8. start Repo Manager first. On an empty replacement mirror volume, version
+   `0.9.0` revokes restored `ready` cache state and immediately queues read-only
+   mirror reconstruction; do not enable new executions until required
+   repositories return to `ready`;
+9. start Workspace Manager, OpenCode, Control Plane and Execution Worker;
+10. run `make smoke` and inspect manager health/logs;
+11. reconcile external effects/approvals before enabling future write-capable workflows.
+
+The task-workspace restore is intentionally fail-closed: use a new/empty named
+volume and never overlay a backup onto existing workspace contents. A safe
+container-side extraction pattern for the already verified nested payload is:
+
+```bash
+docker compose run --rm -T --no-deps --entrypoint sh workspace-volume-init \
+  -c 'test -z "$(find /workspace/worktrees/managed -mindepth 1 -print -quit)"'
+docker compose run --rm -T --no-deps --entrypoint tar workspace-volume-init \
+  -xzf - -C /workspace/worktrees/managed --same-owner --same-permissions \
+  < task-workspaces.tar.gz
+docker compose run --rm -T --no-deps workspace-volume-init
+```
+
+Keep the verified outer archive and extracted nested payload immutable throughout
+this sequence and compare their SHA-256 values before and after recovery.
 
 The final reconciliation step is mandatory once durable external effects are introduced; a database restore alone must never be interpreted as proof that an external action may safely be replayed.
 

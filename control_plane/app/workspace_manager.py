@@ -20,7 +20,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from .db import SessionLocal
-from .models import ExecutionRun, Task, TaskWorkspace
+from .models import ExecutionRun, Repository, Task, TaskWorkspace
 from .schema import assert_database_shape
 from .services import write_audit
 from .workspace_protocol import (
@@ -216,6 +216,26 @@ class WorkspaceLeaseManager:
             .where(ExecutionRun.workspace_id == workspace_id)
             .with_for_update()
         )
+
+    @staticmethod
+    def assert_repository_ready(
+        db: Session,
+        lease: WorkspaceLease,
+    ) -> None:
+        """Recheck repository trust before checkout and before queue publication."""
+        repository = db.scalar(
+            select(Repository)
+            .where(Repository.id == lease.repository_id)
+            .with_for_update()
+        )
+        if repository is None or not repository.enabled or repository.status == "invalid":
+            raise WorkspaceOperationError("repository_trust_revoked", terminal=True)
+        if (
+            repository.status != "ready"
+            or repository.default_branch is None
+            or repository.last_known_commit is None
+        ):
+            raise WorkspaceOperationError("repository_not_ready")
 
     def _invalidate_binding(
         self,
@@ -563,6 +583,7 @@ class WorkspaceLeaseManager:
             self._invalidate_binding(db, workspace, run, binding_error, now)
             db.commit()
             return "invalid"
+        self.assert_repository_ready(db, lease)
         deadline = _as_utc(run.deadline_at)
         if (
             run.status != "preparing"
@@ -1117,8 +1138,17 @@ class WorkspaceFilesystem:
         for root, directories, files in os.walk(path, followlinks=False):
             for name in directories:
                 candidate = Path(root) / name
-                if candidate.is_symlink():
-                    raise WorkspaceOperationError("workspace_directory_symlink", terminal=True)
+                metadata = candidate.lstat()
+                if stat.S_ISLNK(metadata.st_mode):
+                    # os.walk does not traverse directory symlinks when
+                    # followlinks=False. Count the link itself; the subsequent
+                    # runtime preflight validates that every tracked target stays
+                    # inside this exact workspace and outside .git.
+                    total += metadata.st_size
+                    if total > self.max_workspace_bytes:
+                        raise WorkspaceOperationError(
+                            "workspace_size_limit_exceeded", terminal=True
+                        )
             for name in files:
                 candidate = Path(root) / name
                 metadata = candidate.lstat()
@@ -1456,6 +1486,9 @@ def process_workspace(
 
     try:
         if lease.operation == "prepare":
+            with SessionLocal() as db:
+                manager.assert_repository_ready(db, lease)
+                db.rollback()
             result = filesystem.prepare(lease, heartbeat=heartbeat)
             with SessionLocal() as db:
                 return manager.mark_prepare_success(db, lease, result)

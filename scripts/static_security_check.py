@@ -250,6 +250,10 @@ def main() -> int:
         == "service_completed_successfully"
     )
     assert (
+        (workspace_manager.get("depends_on") or {})["repo-manager"]["condition"]
+        == "service_healthy"
+    )
+    assert (
         (services["opencode"].get("depends_on") or {})["workspace-volume-init"]
         ["condition"]
         == "service_completed_successfully"
@@ -416,6 +420,7 @@ def main() -> int:
     assert "forbidden outer archive entry type" in verify_backup_script
     assert "forbidden workspace entry type" in verify_backup_script
     assert "escaping workspace symlink" in verify_backup_script
+    assert 'or ".git" in path.parts' in verify_backup_script
     assert "BACKUP_FORMAT" in verify_backup_script
     assert "ai-orchestra-restore-net-" in restore_drill_script
     assert "ai-orchestra-restore-vol-" in restore_drill_script
@@ -424,6 +429,7 @@ def main() -> int:
     assert "observed_restore_rto_seconds" in restore_drill_script
     assert "task_workspace_restore" in restore_drill_script
     assert "task-workspaces.tar.gz" in restore_drill_script
+    assert "Restored workspace directories missing database rows" in restore_drill_script
     assert "docker compose exec" not in restore_drill_script, "Restore drill must never execute against production Compose services"
     assert "BACKUP_OFFSITE_ENCRYPTION_AT_REST_CONFIRMED" in offsite_script
     assert "BACKUP_OFFSITE_AUTHENTICATED_TRANSPORT_CONFIRMED" in offsite_script
@@ -500,6 +506,8 @@ def main() -> int:
         "_cleanup_staging",
         "_cleanup_stale_git_locks",
         "_repository_lock",
+        "reconcile_mirror_cache",
+        "mirror_cache_missing",
     ):
         assert marker in repo_manager_text, f"Repo Manager safety marker missing: {marker}"
     assert "shell=True" not in repo_manager_text
@@ -550,6 +558,8 @@ def main() -> int:
         "repository_submodule_forbidden",
         "WorkspaceLeaseLost",
         "write_worker_health",
+        "assert_repository_ready",
+        "repository_trust_revoked",
     ):
         assert marker in workspace_manager_text, (
             f"Workspace Manager safety marker missing: {marker}"
@@ -564,6 +574,8 @@ def main() -> int:
         "workspace_manifest_digest_invalid",
         "O_NOFOLLOW",
         "verify_runtime_workspace",
+        "start_new_session=True",
+        "os.killpg",
     ):
         assert marker in workspace_protocol_text, (
             f"Workspace protocol safety marker missing: {marker}"

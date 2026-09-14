@@ -241,6 +241,10 @@ invalid_removed = []
 invalid_evidence = []
 manifest_failures = []
 workspace_manifests_verified = 0
+uuid_re = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+    r"[0-9a-f]{4}-[0-9a-f]{12}"
+)
 always_requires_final = {
     "ready",
     "inspection_pending",
@@ -278,10 +282,6 @@ def verify_manifest(row, final: Path) -> None:
         raise ValueError("manifest is missing or invalid") from exc
     if not isinstance(payload, dict) or set(payload) != manifest_keys:
         raise ValueError("manifest shape mismatch")
-    uuid_re = re.compile(
-        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
-        r"[0-9a-f]{4}-[0-9a-f]{12}"
-    )
     commit_re = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
     branch = payload.get("branch_name")
     tracked = payload.get("tracked_entries")
@@ -362,6 +362,13 @@ def verify_manifest(row, final: Path) -> None:
     workspace_manifests_verified += 1
 
 required_workspace_directories_verified = 0
+known_workspace_ids = {row["id"] for row in rows}
+orphan_directories = sorted(
+    candidate.name
+    for candidate in root.iterdir()
+    if uuid_re.fullmatch(candidate.name)
+    and candidate.name not in known_workspace_ids
+)
 for row in rows:
     workspace_id = row["id"]
     status = row["status"]
@@ -408,6 +415,10 @@ if invalid_evidence:
     raise SystemExit(f"[FAIL] Incomplete workspace evidence in database: {invalid_evidence}")
 if manifest_failures:
     raise SystemExit(f"[FAIL] Restored workspace manifests invalid: {manifest_failures}")
+if orphan_directories:
+    raise SystemExit(
+        f"[FAIL] Restored workspace directories missing database rows: {orphan_directories}"
+    )
 
 payload = {
     "backup_format": int(backup_format),

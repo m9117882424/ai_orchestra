@@ -11,7 +11,12 @@ from uuid import uuid4
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _task_archive(path: Path, *, escaping_symlink: bool = False) -> None:
+def _task_archive(
+    path: Path,
+    *,
+    escaping_symlink: bool = False,
+    git_directory_symlink: bool = False,
+) -> None:
     with tarfile.open(path, "w:gz") as bundle:
         root = tarfile.TarInfo(".")
         root.type = tarfile.DIRTYPE
@@ -27,6 +32,20 @@ def _task_archive(path: Path, *, escaping_symlink: bool = False) -> None:
             link.type = tarfile.SYMTYPE
             link.linkname = "../../etc/passwd"
             bundle.addfile(link)
+        if git_directory_symlink:
+            workspace_id = str(uuid4())
+            directory = tarfile.TarInfo(workspace_id)
+            directory.type = tarfile.DIRTYPE
+            directory.mode = 0o700
+            bundle.addfile(directory)
+            metadata = tarfile.TarInfo(f"{workspace_id}/metadata")
+            metadata.type = tarfile.DIRTYPE
+            metadata.mode = 0o700
+            bundle.addfile(metadata)
+            link = tarfile.TarInfo(f"{workspace_id}/.git")
+            link.type = tarfile.SYMTYPE
+            link.linkname = "metadata"
+            bundle.addfile(link)
 
 
 def _backup_archive(
@@ -35,6 +54,7 @@ def _backup_archive(
     unsafe_checksum: bool = False,
     duplicate_path: bool = False,
     escaping_workspace_symlink: bool = False,
+    git_directory_symlink: bool = False,
 ) -> Path:
     payload = tmp_path / "payload"
     app_dir = payload / "configuration" / "control_plane" / "app"
@@ -57,6 +77,7 @@ def _backup_archive(
     _task_archive(
         payload / "task-workspaces.tar.gz",
         escaping_symlink=escaping_workspace_symlink,
+        git_directory_symlink=git_directory_symlink,
     )
 
     checksum_lines = []
@@ -116,6 +137,15 @@ def test_backup_verifier_rejects_canonical_duplicate_outer_path(tmp_path):
 def test_backup_verifier_rejects_escaping_workspace_symlink(tmp_path):
     result = _verify(
         _backup_archive(tmp_path, escaping_workspace_symlink=True)
+    )
+
+    assert result.returncode != 0
+    assert "escaping workspace symlink" in result.stdout + result.stderr
+
+
+def test_backup_verifier_rejects_symlinked_git_metadata_directory(tmp_path):
+    result = _verify(
+        _backup_archive(tmp_path, git_directory_symlink=True)
     )
 
     assert result.returncode != 0

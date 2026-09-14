@@ -249,6 +249,7 @@ with tarfile.open(sys.argv[1], "r:gz") as bundle:
                 or resolved == ".."
                 or not resolved_path.parts
                 or resolved_path.parts[0] != top
+                or ".git" in path.parts
                 or ".git" in resolved_path.parts
                 or root_id is None
             ):

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import stat
 import subprocess
 from dataclasses import dataclass
@@ -368,27 +369,35 @@ def run_git(
     binary: bool = False,
 ) -> str | bytes:
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             [*safe_git_prefix(workspace), *arguments],
             env=git_environment(),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            timeout=timeout_seconds,
-            check=False,
+            start_new_session=True,
         )
     except FileNotFoundError as exc:
         raise WorkspacePreflightError("git_not_available") from exc
+    try:
+        stdout, _ = process.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            process.kill()
+        process.communicate()
         raise WorkspacePreflightError("git_operation_timed_out") from exc
-    if completed.returncode != 0:
+    if process.returncode != 0:
         raise WorkspacePreflightError(failure_code)
-    if len(completed.stdout) > output_limit:
+    if len(stdout) > output_limit:
         raise WorkspacePreflightError("git_output_too_large")
     if binary:
-        return completed.stdout
+        return stdout
     try:
-        return completed.stdout.decode("utf-8", errors="strict")
+        return stdout.decode("utf-8", errors="strict")
     except UnicodeError as exc:
         raise WorkspacePreflightError("git_output_invalid") from exc
 

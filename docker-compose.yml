@@ -251,6 +251,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      repo-manager:
+        condition: service_healthy
       workspace-volume-init:
         condition: service_completed_successfully
     security_opt:

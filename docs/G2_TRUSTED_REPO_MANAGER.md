@@ -29,7 +29,11 @@ root, с read-only root filesystem и отдельным named volume
 `repository-mirrors`; CPU/RAM/PID и временный filesystem ограничены. Этот volume
 является восстановимым cache: source of truth —
 remote плюс Registry. Он намеренно не входит в backup и после DR заполняется
-повторной проверкой.
+повторной проверкой. До публикации health на старте Repo Manager сверяет все
+восстановленные `ready` rows с локальным mirror/lock. Отсутствующий cache
+атомарно возвращается в `pending_validation`; небезопасный тип или symlink
+переводится в `invalid`. Workspace Manager начинает работу только после этого
+startup reconciliation.
 
 Repo Manager собирается отдельным Docker target с Git/CA toolchain. Образы
 Control Plane и Execution Worker этот Git executable не содержат.
@@ -197,6 +201,8 @@ Migration сохраняет identity/policy существующих Registry r
    сохранением бизнес-данных.
 9. Исчерпанный storage reserve останавливает Git до fetch и уходит в
    контролируемый retry без заполнения системного диска.
+10. Восстановленная БД с `ready` repository и пустым mirror volume автоматически
+    отзывает ready-state и немедленно ставит read-only rebuild в очередь.
 
 ## Следующий gate
 

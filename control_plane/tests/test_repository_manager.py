@@ -21,6 +21,7 @@ from control_plane.app.repository_manager import (
     RepositorySyncLease,
     RepositorySyncResult,
     load_auth_profiles,
+    reconcile_mirror_cache,
     resolve_public_addresses,
 )
 from control_plane.app import repository_manager as repository_manager_module
@@ -63,6 +64,59 @@ def _public_resolver(host, port, *, type):  # noqa: A002
 
 def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+
+def _mark_ready(repository: Repository, *, now: datetime) -> None:
+    repository.status = "ready"
+    repository.default_branch = "main"
+    repository.last_known_commit = COMMIT
+    repository.last_fetched_at = now
+    repository.sync_finished_at = now
+    repository.sync_next_at = now + timedelta(hours=1)
+
+
+def test_missing_reconstructible_mirror_is_requeued_before_worker_health(tmp_path):
+    now = datetime(2026, 9, 10, 8, 0, tzinfo=timezone.utc)
+    missing = _repository(sync_next_at=now)
+    intact = _repository(sync_next_at=now)
+    _mark_ready(missing, now=now)
+    _mark_ready(intact, now=now)
+    storage_root = tmp_path / "mirrors"
+    storage_root.mkdir()
+    (storage_root / f"{intact.id}.git").mkdir()
+    (storage_root / f".{intact.id}.sync.lock").touch(mode=0o600)
+    with SessionLocal() as db:
+        db.add_all([missing, intact])
+        db.commit()
+
+    with SessionLocal() as db:
+        changed = reconcile_mirror_cache(
+            db,
+            storage_root,
+            actor="repo-manager:restore",
+            now=now + timedelta(minutes=1),
+        )
+
+    with SessionLocal() as db:
+        missing_after = db.get(Repository, missing.id)
+        intact_after = db.get(Repository, intact.id)
+        events = list(
+            db.query(AuditEvent)
+            .filter(AuditEvent.entity_id == missing.id)
+            .order_by(AuditEvent.created_at)
+        )
+
+    assert changed == 1
+    assert missing_after is not None
+    assert missing_after.status == "pending_validation"
+    assert missing_after.sync_next_at is not None
+    assert missing_after.last_sync_error_code == "mirror_cache_missing"
+    assert missing_after.version == 2
+    assert intact_after is not None and intact_after.status == "ready"
+    assert intact_after.version == 1
+    assert [event.action for event in events] == [
+        "repository.mirror_revalidation_requested"
+    ]
 
 
 def test_auth_profiles_are_canonical_host_bound_and_do_not_echo_password():

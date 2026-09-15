@@ -815,6 +815,12 @@ def start_execution(
         created_at=now,
         updated_at=now,
     )
+    # ExecutionRun.workspace_id is a real database FK. Persist the parent
+    # workspace first inside the same transaction so PostgreSQL cannot observe
+    # an INSERT ordering violation. A later failure still rolls both rows back.
+    db.add(workspace)
+    db.flush()
+
     run = ExecutionRun(
         id=run_id,
         task_id=task.id,
@@ -831,7 +837,7 @@ def start_execution(
         created_at=now,
         updated_at=now,
     )
-    db.add_all([workspace, run])
+    db.add(run)
     if task.status in {"backlog", "planned", "failed"}:
         task.status = "in_progress"
     task.updated_at = now

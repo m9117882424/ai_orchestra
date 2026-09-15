@@ -1,8 +1,11 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from control_plane.app.opencode_client import (
     OpenCodeClient,
     OpenCodeError,
+    detect_stalled_tool_call,
     extract_last_assistant_text,
     infer_session_state,
 )
@@ -73,6 +76,28 @@ def assistant_failed_with_partial_text():
             "parts": [{"type": "text", "text": "partial result"}],
         }
     ]
+
+
+def test_stalled_tool_detector_uses_explicit_tool_start_time_only():
+    now = datetime.now(timezone.utc)
+    stale = assistant_with_running_tool()
+    stale[0]["parts"][1]["state"]["time"] = {
+        "start": int((now - timedelta(seconds=121)).timestamp() * 1000)
+    }
+    detected = detect_stalled_tool_call(stale, timeout_seconds=120, now=now)
+    assert detected is not None
+    assert detected["tool"] == "read"
+    assert detected["status"] == "running"
+    assert detected["age_seconds"] == 121
+
+    fresh = assistant_with_running_tool()
+    fresh[0]["parts"][1]["state"]["time"] = {
+        "start": int((now - timedelta(seconds=30)).timestamp() * 1000)
+    }
+    assert detect_stalled_tool_call(fresh, timeout_seconds=120, now=now) is None
+    assert detect_stalled_tool_call(
+        assistant_with_running_tool(), timeout_seconds=120, now=now
+    ) is None
 
 
 def test_running_tool_is_inferred_busy():

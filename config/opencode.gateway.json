@@ -31,6 +31,8 @@
     "webfetch": "allow",
     "websearch": "allow",
     "skill": "allow",
+    "todowrite": "allow",
+    "question": "deny",
     "external_directory": "deny",
     "edit": "ask",
     "bash": {"*":"ask","rm *":"deny","sudo *":"deny","git push*":"deny","git reset --hard*":"deny","git clean*":"deny"}

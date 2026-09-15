@@ -116,6 +116,7 @@ def main() -> int:
     assert worker.get("command") == ["python", "-m", "app.execution_worker"]
     assert worker.get("image") != services["control-plane"].get("image")
     assert worker.get("healthcheck"), "Execution worker must expose process liveness"
+    assert worker_environment.get("CONTROL_PLANE_EXECUTION_WORKER_TOOL_STALL_SECONDS") == "300"
 
     repo_manager = services["repo-manager"]
     repo_environment = repo_manager.get("environment") or {}
@@ -272,6 +273,8 @@ def main() -> int:
     # OpenCode talks only to the inference gateway with a non-admin client credential.
     gateway = json.loads((ROOT / "config/opencode.gateway.json").read_text(encoding="utf-8"))
     assert gateway["permission"]["external_directory"] == "deny"
+    assert gateway["permission"]["todowrite"] == "allow"
+    assert gateway["permission"]["question"] == "deny"
     assert set(gateway["provider"]) == {"orchestra"}
     options = gateway["provider"]["orchestra"]["options"]
     assert options["baseURL"] == "http://model-gateway:8080/v1"
@@ -286,6 +289,7 @@ def main() -> int:
     assert "LITELLM_VERSION=1.98.0" in env_text
     assert "CONTROL_PLANE_SCHEMA_MODE=" not in env_text
     assert "CONTROL_PLANE_EXECUTION_TIMEOUT_SECONDS=7200" in env_text
+    assert "CONTROL_PLANE_EXECUTION_WORKER_TOOL_STALL_SECONDS=300" in env_text
     assert "REPO_MANAGER_LEASE_SECONDS=300" in env_text
     assert "REPO_MANAGER_GIT_TIMEOUT_SECONDS=60" in env_text
     assert "REPO_MANAGER_MAX_ACTIVE=1" in env_text

@@ -160,6 +160,20 @@ class FakeDispatchOpenCode:
             raise OpenCodeError("simulated delete uncertainty")
 
 
+class FakePollingOpenCode(FakeDispatchOpenCode):
+    def __init__(self, session_id: str, messages: list[dict], *, fail_abort: bool = False):
+        super().__init__(fail_abort=fail_abort)
+        self.session_id = session_id
+        self._messages = messages
+
+    def session_statuses(self):
+        return {self.session_id: {"type": "busy"}}
+
+    def messages(self, session_id: str):
+        assert session_id == self.session_id
+        return self._messages
+
+
 class StealLeaseBeforeCreate(FakeDispatchOpenCode):
     def __init__(self, run_id: str):
         super().__init__()
@@ -627,6 +641,77 @@ def test_stale_generation_cannot_abort_or_commit_timeout():
         assert run is not None
         assert run.status == "running"
         assert run.lease_owner == "new-generation-worker"
+
+
+def _stalled_tool_messages(*, seconds_old: int = 120) -> list[dict]:
+    started = datetime.now(timezone.utc) - timedelta(seconds=seconds_old)
+    return [
+        {
+            "info": {"role": "assistant", "time": {"created": int(started.timestamp() * 1000)}},
+            "parts": [
+                {
+                    "type": "tool",
+                    "tool": "todowrite",
+                    "state": {
+                        "status": "running",
+                        "time": {"start": int(started.timestamp() * 1000)},
+                    },
+                }
+            ],
+        }
+    ]
+
+
+def test_stalled_tool_is_aborted_and_execution_fails_closed():
+    task_id, run_id = _seed_running_execution("stalled-tool-session")
+    manager = ExecutionLeaseManager(
+        "stalled-tool-worker", lease_seconds=60, tool_stall_seconds=60
+    )
+    with SessionLocal() as db:
+        [lease] = manager.claim_available(db, limit=1)
+
+    fake = FakePollingOpenCode(
+        "stalled-tool-session", _stalled_tool_messages(seconds_old=120)
+    )
+    assert poll_execution(manager, lambda: fake, lease) == "stalled"
+    assert fake.abort_calls == ["stalled-tool-session"]
+
+    with SessionLocal() as db:
+        run = db.get(ExecutionRun, run_id)
+        task = db.get(Task, task_id)
+        assert run is not None and task is not None
+        assert run.status == "failed"
+        assert run.stage == "stalled_tool"
+        assert "todowrite" in run.error
+        assert run.finished_at is not None
+        assert run.lease_owner is None
+        assert task.status == "failed"
+
+
+def test_stalled_tool_abort_uncertainty_remains_active_until_confirmed():
+    _, run_id = _seed_running_execution("stalled-abort-session")
+    manager = ExecutionLeaseManager(
+        "stalled-abort-worker", lease_seconds=60, tool_stall_seconds=60
+    )
+    with SessionLocal() as db:
+        [lease] = manager.claim_available(db, limit=1)
+
+    fake = FakePollingOpenCode(
+        "stalled-abort-session",
+        _stalled_tool_messages(seconds_old=120),
+        fail_abort=True,
+    )
+    assert poll_execution(manager, lambda: fake, lease) == "running"
+    with SessionLocal() as db:
+        run = db.get(ExecutionRun, run_id)
+        assert run is not None
+        assert run.status == "running"
+        assert run.stage == "stalled_tool_abort_pending"
+        assert run.lease_owner == "stalled-abort-worker"
+
+    fake.fail_abort = False
+    assert poll_execution(manager, lambda: fake, lease) == "stalled"
+    assert fake.abort_calls == ["stalled-abort-session", "stalled-abort-session"]
 
 
 def test_worker_health_file_is_refreshed(tmp_path):

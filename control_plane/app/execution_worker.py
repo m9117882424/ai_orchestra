@@ -27,6 +27,7 @@ from .opencode_client import (
     OpenCodeClient,
     OpenCodeError,
     OpenCodeNotFound,
+    detect_stalled_tool_call,
     extract_last_assistant_text,
 )
 from .schema import assert_database_shape
@@ -109,6 +110,7 @@ class ExecutionLeaseManager:
         *,
         lease_seconds: int = 120,
         execution_timeout_seconds: int = 7200,
+        tool_stall_seconds: int = 300,
         workspace_root: Path = DEFAULT_OPENCODE_WORKSPACE_ROOT,
         workspace_max_files: int = 100_000,
     ):
@@ -116,6 +118,8 @@ class ExecutionLeaseManager:
             raise ValueError("lease_seconds must be at least 30")
         if not 60 <= execution_timeout_seconds <= 604800:
             raise ValueError("execution_timeout_seconds must be between 60 and 604800")
+        if not 60 <= tool_stall_seconds <= 7200:
+            raise ValueError("tool_stall_seconds must be between 60 and 7200")
         if not workspace_root.is_absolute():
             raise ValueError("workspace_root must be absolute")
         if not 1 <= workspace_max_files <= 1_000_000:
@@ -123,6 +127,7 @@ class ExecutionLeaseManager:
         self.worker_id = worker_id
         self.lease_seconds = lease_seconds
         self.execution_timeout_seconds = execution_timeout_seconds
+        self.tool_stall_seconds = tool_stall_seconds
         self.workspace_root = workspace_root
         self.workspace_max_files = workspace_max_files
 
@@ -710,6 +715,97 @@ class ExecutionLeaseManager:
         db.commit()
         return "timed_out"
 
+    def mark_stalled_tool_abort_pending(
+        self,
+        db: Session,
+        lease: ExecutionLease,
+        *,
+        tool_name: str,
+        age_seconds: int,
+        error: str,
+        now: datetime | None = None,
+    ) -> str:
+        now = now or utc_now()
+        run = self._locked_owned_run(db, lease, now)
+        if run is None:
+            db.rollback()
+            return "lost"
+        first_attempt = run.stage != "stalled_tool_abort_pending"
+        run.stage = "stalled_tool_abort_pending"
+        run.error = (
+            f"OpenCode tool {tool_name} stalled for {age_seconds}s; "
+            "abort is not yet confirmed: " + error[:800]
+        )
+        run.heartbeat_at = now
+        run.lease_expires_at = self._deadline(now)
+        run.updated_at = now
+        if first_attempt:
+            write_audit(
+                db,
+                actor=self.audit_actor,
+                action="execution.stalled_tool_abort_pending",
+                entity_type="execution",
+                entity_id=run.id,
+                details={
+                    "task_id": run.task_id,
+                    "generation": lease.generation,
+                    "tool": tool_name,
+                    "age_seconds": age_seconds,
+                },
+            )
+        db.commit()
+        return "running"
+
+    def mark_stalled_tool(
+        self,
+        db: Session,
+        lease: ExecutionLease,
+        *,
+        tool_name: str,
+        age_seconds: int,
+        started_at: datetime,
+        aborted_session_id: str,
+        now: datetime | None = None,
+    ) -> str:
+        now = now or utc_now()
+        run = self._locked_owned_run(db, lease, now)
+        if run is None:
+            db.rollback()
+            return "lost"
+        run.status = "failed"
+        run.stage = "stalled_tool"
+        run.error = (
+            f"OpenCode tool {tool_name} stalled for {age_seconds}s "
+            f"(started {started_at.isoformat()}); session aborted"
+        )
+        run.finished_at = now
+        run.heartbeat_at = now
+        run.lease_owner = None
+        run.lease_expires_at = None
+        run.updated_at = now
+        task = db.get(Task, run.task_id)
+        if task and task.status in {"in_progress", "waiting_approval"}:
+            task.status = "failed"
+            task.updated_at = now
+        request_workspace_inspection(db, run, actor=self.audit_actor, now=now)
+        write_audit(
+            db,
+            actor=self.audit_actor,
+            action="execution.stalled_tool",
+            entity_type="execution",
+            entity_id=run.id,
+            details={
+                "task_id": run.task_id,
+                "generation": lease.generation,
+                "tool": tool_name,
+                "age_seconds": age_seconds,
+                "started_at": started_at.isoformat(),
+                "aborted_session_id": aborted_session_id,
+            },
+        )
+        db.commit()
+        return "stalled"
+
     def mark_cancel_pending(
         self,
         db: Session,
@@ -1081,6 +1177,48 @@ def timeout_execution(
         )
 
 
+def stall_execution(
+    manager: ExecutionLeaseManager,
+    client: OpenCodeClient,
+    lease: ExecutionLease,
+    stall: dict,
+) -> str:
+    """Abort a confirmed stale tool call before committing terminal failure."""
+    session_id = lease.opencode_session_id
+    if not session_id:
+        return "lost"
+    tool_name = str(stall.get("tool") or "tool")
+    age_seconds = int(stall.get("age_seconds") or 0)
+    started_at = stall.get("started_at")
+    if not isinstance(started_at, datetime):
+        raise ValueError("stalled tool evidence is missing started_at")
+    try:
+        if not _renew_before_external_side_effect(manager, lease):
+            return "lost"
+        try:
+            client.abort(session_id)
+        except OpenCodeNotFound:
+            pass
+    except OpenCodeError as exc:
+        LOGGER.warning(
+            "Stalled tool abort pending execution=%s generation=%s tool=%s age=%ss: %s",
+            lease.execution_id, lease.generation, tool_name, age_seconds, exc,
+        )
+        with SessionLocal() as db:
+            return manager.mark_stalled_tool_abort_pending(
+                db, lease, tool_name=tool_name, age_seconds=age_seconds, error=str(exc)
+            )
+    with SessionLocal() as db:
+        return manager.mark_stalled_tool(
+            db,
+            lease,
+            tool_name=tool_name,
+            age_seconds=age_seconds,
+            started_at=started_at,
+            aborted_session_id=session_id,
+        )
+
+
 def dispatch_execution(
     manager: ExecutionLeaseManager,
     client: OpenCodeClient,
@@ -1185,6 +1323,20 @@ def poll_execution(
         state = statuses.get(lease.opencode_session_id) or {}
         state_type = state.get("type") if isinstance(state, dict) else str(state)
         result = extract_last_assistant_text(messages)
+        stalled_tool = detect_stalled_tool_call(
+            messages,
+            timeout_seconds=manager.tool_stall_seconds,
+            now=utc_now(),
+        )
+        if stalled_tool is not None:
+            LOGGER.warning(
+                "Stalled OpenCode tool detected execution=%s generation=%s tool=%s age=%ss",
+                lease.execution_id,
+                lease.generation,
+                stalled_tool["tool"],
+                stalled_tool["age_seconds"],
+            )
+            return stall_execution(manager, client, lease, stalled_tool)
         if _deadline_elapsed(lease):
             return timeout_execution(manager, client, lease)
     except OpenCodeError as exc:
@@ -1282,6 +1434,12 @@ def main() -> int:
         minimum=60,
         maximum=3600,
     )
+    tool_stall_seconds = _positive_int(
+        "CONTROL_PLANE_EXECUTION_WORKER_TOOL_STALL_SECONDS",
+        300,
+        minimum=60,
+        maximum=7200,
+    )
     max_active = _positive_int(
         "CONTROL_PLANE_EXECUTION_WORKER_MAX_ACTIVE",
         4,
@@ -1321,6 +1479,7 @@ def main() -> int:
         worker_id,
         lease_seconds=lease_seconds,
         execution_timeout_seconds=settings.execution_timeout_seconds,
+        tool_stall_seconds=tool_stall_seconds,
         workspace_root=workspace_root,
         workspace_max_files=workspace_max_files,
     )
@@ -1333,9 +1492,10 @@ def main() -> int:
         )
 
     LOGGER.info(
-        "Execution worker started worker_id=%s lease_seconds=%s max_active=%s poll_seconds=%s",
+        "Execution worker started worker_id=%s lease_seconds=%s tool_stall_seconds=%s max_active=%s poll_seconds=%s",
         worker_id,
         lease_seconds,
+        tool_stall_seconds,
         max_active,
         poll_seconds,
     )

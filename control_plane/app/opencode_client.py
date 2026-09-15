@@ -237,6 +237,49 @@ class OpenCodeClient:
         self._request("DELETE", f"/session/{session_id}")
 
 
+def detect_stalled_tool_call(
+    messages: list[dict],
+    *,
+    timeout_seconds: int,
+    now: datetime | None = None,
+) -> dict | None:
+    """Return evidence for a running/pending tool call that exceeded its bound.
+
+    Only tool states with an explicit OpenCode ``state.time.start`` timestamp are
+    eligible. Long model inference without an active tool call is intentionally
+    not classified as stalled here.
+    """
+    if timeout_seconds < 1:
+        raise ValueError("timeout_seconds must be positive")
+    now = now or datetime.now(timezone.utc)
+    candidates: list[dict] = []
+    for item in messages:
+        for part in item.get("parts") or []:
+            if part.get("type") != "tool":
+                continue
+            state = part.get("state") or {}
+            status = str(state.get("status") or "").lower()
+            if status not in {"pending", "running"}:
+                continue
+            time_info = state.get("time") or {}
+            raw_start = time_info.get("start") if isinstance(time_info, dict) else None
+            if not isinstance(raw_start, (int, float)) or isinstance(raw_start, bool):
+                continue
+            started_at = datetime.fromtimestamp(raw_start / 1000, tz=timezone.utc)
+            age_seconds = max(0.0, (now - started_at).total_seconds())
+            if age_seconds < timeout_seconds:
+                continue
+            candidates.append({
+                "tool": str(part.get("tool") or "tool"),
+                "status": status,
+                "started_at": started_at,
+                "age_seconds": int(age_seconds),
+            })
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item["age_seconds"])
+
+
 def extract_last_assistant_text(messages: list[dict]) -> str:
     for item in reversed(messages):
         info = item.get("info") or {}

@@ -99,7 +99,7 @@ if [[ -d data/opencode || -d data/state ]]; then
 fi
 
 timeout --foreground --signal=TERM --kill-after=10s 300s \
-  docker compose run --rm -T --no-deps --entrypoint tar workspace-manager \
+  docker compose run --rm -T --no-deps --entrypoint tar workspace-volume-init \
   -czf - -C /workspace/worktrees/managed . \
   > "$staging_dir/task-workspaces.tar.gz"
 if [[ ! -s "$staging_dir/task-workspaces.tar.gz" ]]; then

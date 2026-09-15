@@ -132,6 +132,10 @@ jobs:
           echo "[CHECK] Workspace Manager write access"
           docker compose run --rm -T --no-deps workspace-manager sh -lc '
             test "$(id -u)" = 10001 &&
+            test "$(id -g)" = 10001 &&
+            test "$(awk '\''/^CapEff:/ {print $2}'\'' /proc/self/status)" = 000000000000000a &&
+            test "$(awk '\''/^CapPrm:/ {print $2}'\'' /proc/self/status)" = 000000000000000a &&
+            test "$(awk '\''/^CapAmb:/ {print $2}'\'' /proc/self/status)" = 000000000000000a &&
             command -v git >/dev/null &&
             printf "workspace-manager\n" > /workspace/worktrees/managed/.ci-workspace-boundary &&
             chmod 0600 /workspace/worktrees/managed/.ci-workspace-boundary

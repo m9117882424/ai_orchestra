@@ -214,8 +214,9 @@ trusted Repo Manager. Для public repositories он остаётся пуст�
 - Workspace Manager находится только в `control-db`, читает mirror read-only и
   один владеет lifecycle task workspace volume;
 - Execution Worker видит task workspace volume read-only, OpenCode — read/write;
-- Workspace Manager имеет только `DAC_OVERRIDE`/`FOWNER` для гарантированной
-  инспекции, backup и cleanup root-owned результатов OpenCode внутри volume;
+- Workspace Manager после fail-closed перехода на UID/GID `10001:10001` имеет
+  effective только `DAC_OVERRIDE`/`FOWNER` для гарантированной инспекции, backup
+  и cleanup root-owned результатов OpenCode внутри volume;
 - legacy operator worktrees доступны OpenCode через отдельный
   `/workspace/worktrees/manual`; родительский bind mount не может скрыть managed
   task workspace volume;

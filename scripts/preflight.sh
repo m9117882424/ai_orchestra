@@ -354,9 +354,10 @@ for name, service in services.items():
 mounts=repo.get("volumes") or []
 assert len(mounts)==1 and mounts[0].get("target")=="/var/lib/ai-orchestra/repositories", mounts
 workspace=services["workspace-manager"]
+assert str(workspace.get("user"))=="0:0", workspace.get("user")
 assert not workspace.get("ports"), "Workspace Manager must not publish ports"
 assert set(workspace.get("cap_drop") or [])=={"ALL"}
-assert set(workspace.get("cap_add") or [])=={"DAC_OVERRIDE","FOWNER"}
+assert set(workspace.get("cap_add") or [])=={"DAC_OVERRIDE","FOWNER","SETGID","SETUID"}
 workspace_env=workspace.get("environment") or {}
 assert workspace_env.get("CONTROL_PLANE_SERVER_PASSWORD")=="workspace-manager-does-not-use-manager-auth"
 assert workspace_env.get("CONTROL_PLANE_OPENCODE_PASSWORD")=="workspace-manager-does-not-use-opencode-auth"

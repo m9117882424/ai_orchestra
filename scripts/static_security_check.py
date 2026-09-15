@@ -156,6 +156,7 @@ def main() -> int:
     assert repo_mounts[0].get("target") == "/var/lib/ai-orchestra/repositories"
 
     workspace_manager = services["workspace-manager"]
+    assert str(workspace_manager.get("user")) == "0:0"
     workspace_environment = workspace_manager.get("environment") or {}
     workspace_env = set(workspace_environment)
     assert "CONTROL_PLANE_DB_PASSWORD" in workspace_env
@@ -183,10 +184,13 @@ def main() -> int:
     assert set(workspace_manager.get("cap_add") or []) == {
         "DAC_OVERRIDE",
         "FOWNER",
+        "SETGID",
+        "SETUID",
     }
     assert workspace_manager.get("command") == ["python", "-m", "app.workspace_manager"]
     assert workspace_manager.get("image") != services["control-plane"].get("image")
     assert (workspace_manager.get("build") or {}).get("target") == "workspace-manager"
+    assert workspace_manager.get("entrypoint") is None
     assert workspace_manager.get("healthcheck")
     workspace_mounts = workspace_manager.get("volumes") or []
     assert {
@@ -323,6 +327,12 @@ def main() -> int:
     assert "FROM application-base AS control-plane" in control_dockerfile
     assert "FROM git-runtime AS repo-manager" in control_dockerfile
     assert "FROM git-runtime AS workspace-manager" in control_dockerfile
+    assert 'ENTRYPOINT ["python", "/app/app/workspace_manager_capability_launcher.py"]' in control_dockerfile
+    assert "USER root" in control_dockerfile
+    launcher_text = (ROOT / "control_plane/app/workspace_manager_capability_launcher.py").read_text(
+        encoding="utf-8"
+    )
+    assert "data[0] = _CapabilityData(mask, mask, mask)" in launcher_text
     assert "FROM git-runtime AS execution-worker" in control_dockerfile
     assert "groupadd --gid 10001 orchestra" in control_dockerfile
     assert "useradd --uid 10001 --gid orchestra" in control_dockerfile
@@ -419,6 +429,8 @@ def main() -> int:
     assert "docker compose pause" in backup_script
     assert "docker compose unpause" in backup_script
     assert 'task-workspaces.tar.gz' in backup_script
+    assert "--entrypoint tar workspace-volume-init" in backup_script
+    assert "--entrypoint tar workspace-manager" not in backup_script
     assert "--lock-wait-timeout=30s" in backup_script
     assert "timeout --foreground" in backup_script
     assert "sha256sum --check --strict --quiet SHA256SUMS" in verify_backup_script

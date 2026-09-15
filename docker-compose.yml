@@ -213,6 +213,7 @@ services:
       context: ./control_plane
       target: workspace-manager
     image: ai-development-department/workspace-manager:0.9.0
+    user: "0:0"
     restart: unless-stopped
     init: true
     read_only: true
@@ -262,6 +263,8 @@ services:
     cap_add:
       - DAC_OVERRIDE
       - FOWNER
+      - SETGID
+      - SETUID
     pids_limit: 96
     mem_limit: 512m
     cpus: 0.50

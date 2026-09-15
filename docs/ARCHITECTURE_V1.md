@@ -97,10 +97,13 @@ Legacy operator worktrees монтируются отдельно в
 запрещён, потому что он может скрыть managed named volume внутри OpenCode.
 Managed volume принадлежит UID/GID `10001:10001` с режимом `0700`. OpenCode
 получает `DAC_OVERRIDE` и `FOWNER`, чтобы его UID 0 мог изменять содержимое и file
-mode workspace. Workspace Manager работает как UID 10001 и получает те же две
-filesystem capabilities для гарантированной инспекции и cleanup созданных
-OpenCode root-owned путей; его rootfs и mirror mount остаются read-only, egress
-отсутствует. Execution Worker видит volume только read-only без capabilities.
+mode workspace. Workspace Manager запускается root только в fail-closed launcher,
+который переходит на UID/GID 10001 и перед exec оставляет в effective, permitted
+и ambient наборах только эти две filesystem capabilities. Временные
+`SETUID`/`SETGID` приложению не наследуются. Это позволяет инспектировать и
+очищать root-owned пути OpenCode; rootfs и mirror mount остаются read-only,
+egress отсутствует. Execution Worker видит volume только read-only без
+capabilities.
 
 Дополнительные правила:
 

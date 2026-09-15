@@ -34,10 +34,12 @@ One-shot initializer без сети и с read-only rootfs проверяет �
 `DAC_OVERRIDE` и `FOWNER`, необходимые его UID 0 для записи и изменения mode в
 этом volume; Docker socket, mirror, Git credentials и control-plane/provider
 secrets ему по-прежнему недоступны. Execution Worker монтирует тот же volume
-только read-only. Workspace Manager получает те же две filesystem capabilities
-только внутри своих mounts, чтобы гарантированно инспектировать, архивировать и
-удалять root-owned результаты OpenCode; rootfs остаётся read-only, mirror mount —
-read-only, а сеть — только `control-db`.
+только read-only. Workspace Manager стартует через fail-closed launcher: он
+сбрасывает root identity до `10001:10001`, удаляет supplementary groups и
+переносит в effective/permitted/ambient набор только две filesystem capabilities
+`DAC_OVERRIDE`/`FOWNER`. Временные `SETUID`/`SETGID` нужны launcher до exec и не
+остаются у приложения. Rootfs остаётся read-only, mirror mount — read-only, а
+сеть — только `control-db`.
 
 ## Durable lifecycle
 

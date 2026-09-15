@@ -18,6 +18,8 @@ COPY alembic.ini ./alembic.ini
 COPY migrations ./migrations
 COPY app ./app
 
+RUN chmod 0555 /app/app/workspace_manager_capability_launcher.py
+
 FROM application-base AS git-runtime
 
 RUN apt-get update \
@@ -39,7 +41,9 @@ CMD ["python", "-m", "app.repository_manager"]
 
 FROM git-runtime AS workspace-manager
 
-USER orchestra
+USER root
+
+ENTRYPOINT ["python", "/app/app/workspace_manager_capability_launcher.py"]
 
 CMD ["python", "-m", "app.workspace_manager"]
 

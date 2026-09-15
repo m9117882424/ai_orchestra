@@ -26,7 +26,7 @@ project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 repo_dir="$project_root/repos/$project"
 target="$project_root/worktrees/$project/$task_slug"
 container_repo="/workspace/repos/projects/$project"
-container_target="/workspace/worktrees/$project/$task_slug"
+container_target="/workspace/worktrees/manual/$project/$task_slug"
 
 if [[ ! -d "$repo_dir/.git" && ! -f "$repo_dir/.git" ]]; then
   echo "[FAIL] $repo_dir не является Git-репозиторием" >&2

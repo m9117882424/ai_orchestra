@@ -83,7 +83,7 @@ print('STARTED')
 
 
 def test_declared_schema_head_is_stable():
-    assert head_revision() == "20260908_0005"
+    assert head_revision() == "20260909_0007"
 
 
 def test_fresh_database_is_created_by_alembic(tmp_path):
@@ -120,19 +120,61 @@ def test_fresh_database_is_created_by_alembic(tmp_path):
             constraint["name"]
             for constraint in inspect(connection).get_check_constraints("repositories")
         }
+        workspace_columns = {
+            column["name"] for column in inspect(connection).get_columns("task_workspaces")
+        }
+        workspace_indexes = {
+            (tuple(index["column_names"]), bool(index["unique"]))
+            for index in inspect(connection).get_indexes("task_workspaces")
+        }
+        workspace_checks = {
+            constraint["name"]
+            for constraint in inspect(connection).get_check_constraints("task_workspaces")
+        }
+        execution_checks = {
+            constraint["name"]
+            for constraint in inspect(connection).get_check_constraints("execution_runs")
+        }
 
     assert set(Base.metadata.tables).issubset(tables)
-    assert revision == "20260908_0005"
+    assert revision == "20260909_0007"
     assert session_column["nullable"] is True
     assert "deadline_at" in execution_columns
     assert "cancel_requested_at" in execution_columns
+    assert {
+        "contract_version",
+        "repository_id",
+        "workspace_id",
+        "base_commit",
+        "workspace_path",
+        "workspace_tree",
+        "workspace_preflight_digest",
+        "workspace_preflight_completed_at",
+        "workspace_runtime_preflight_digest",
+        "workspace_runtime_verified_at",
+    }.issubset(execution_columns)
     assert ("status", "deadline_at") in execution_indexes
+    assert {
+        "ck_execution_runs_contract_version",
+        "ck_execution_runs_workspace_binding",
+        "ck_execution_runs_workspace_preflight",
+        "ck_execution_runs_workspace_runtime_preflight",
+    }.issubset(execution_checks)
     assert {
         "remote_identity",
         "remote_host",
         "auth_profile_ref",
         "last_known_commit",
         "last_fetched_at",
+        "sync_generation",
+        "sync_failure_count",
+        "sync_requested_at",
+        "sync_started_at",
+        "sync_finished_at",
+        "sync_next_at",
+        "sync_lease_owner",
+        "sync_lease_expires_at",
+        "last_sync_error_code",
         "assurance_tier",
         "assurance_profile",
         "version",
@@ -140,14 +182,45 @@ def test_fresh_database_is_created_by_alembic(tmp_path):
     assert (("name",), True) in repository_indexes
     assert (("remote_identity",), True) in repository_indexes
     assert (("enabled", "status"), False) in repository_indexes
+    assert (("enabled", "sync_next_at"), False) in repository_indexes
+    assert (("sync_lease_expires_at",), False) in repository_indexes
     assert repository_checks == {
         "ck_repositories_assurance_profile",
         "ck_repositories_assurance_tier",
         "ck_repositories_execution_profile",
         "ck_repositories_provider",
+        "ck_repositories_ready_state",
         "ck_repositories_status",
+        "ck_repositories_sync_failure_count",
+        "ck_repositories_sync_generation",
+        "ck_repositories_sync_lease_pair",
+        "ck_repositories_validating_state",
         "ck_repositories_version",
     }
+    assert {
+        "task_id",
+        "repository_id",
+        "status",
+        "base_commit",
+        "branch_name",
+        "opencode_path",
+        "initial_tree",
+        "preflight_digest",
+        "tracked_entries",
+        "generation",
+        "lease_owner",
+        "lease_expires_at",
+    }.issubset(workspace_columns)
+    assert (("opencode_path",), True) in workspace_indexes
+    assert (("status", "next_attempt_at"), False) in workspace_indexes
+    assert {
+        "ck_task_workspaces_status",
+        "ck_task_workspaces_active_lease",
+        "ck_task_workspaces_queue_state",
+        "ck_task_workspaces_ready_state",
+        "ck_task_workspaces_retained_state",
+        "ck_task_workspaces_removed_state",
+    }.issubset(workspace_checks)
 
 
 def test_matching_current_unversioned_database_is_verified_then_stamped(tmp_path):
@@ -163,7 +236,7 @@ def test_matching_current_unversioned_database_is_verified_then_stamped(tmp_path
 
     with engine.connect() as connection:
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert revision == "20260908_0005"
+    assert revision == "20260909_0007"
 
 
 def test_unversioned_historical_baseline_is_verified_then_migrated(tmp_path):
@@ -208,7 +281,7 @@ def test_unversioned_historical_baseline_is_verified_then_migrated(tmp_path):
             if column["name"] == "opencode_session_id"
         )
 
-    assert revision == "20260908_0005"
+    assert revision == "20260909_0007"
     assert marker == "Legacy marker"
     assert {
         "lease_owner",
@@ -250,7 +323,7 @@ def test_versioned_0002_database_upgrades_to_current_execution_schema(tmp_path):
         execution_columns = {
             column["name"] for column in inspect(connection).get_columns("execution_runs")
         }
-    assert revision == "20260908_0005"
+    assert revision == "20260909_0007"
     assert after["nullable"] is True
     assert "deadline_at" in execution_columns
     assert "cancel_requested_at" in execution_columns
@@ -312,7 +385,7 @@ def test_versioned_0003_backfills_only_active_execution_deadlines(tmp_path):
             ).all()
         )
 
-    assert revision == "20260908_0005"
+    assert revision == "20260909_0007"
     assert deadlines["queued-run"] is not None
     assert deadlines["completed-run"] is None
 
@@ -349,9 +422,141 @@ def test_versioned_0004_adds_registry_without_mutating_existing_data(tmp_path):
         ).scalar_one()
         tables = set(inspect(connection).get_table_names())
 
-    assert revision == "20260908_0005"
+    assert revision == "20260909_0007"
     assert marker == "marker"
     assert "repositories" in tables
+
+
+def test_versioned_0005_registry_is_requeued_without_losing_policy(tmp_path):
+    database_path = tmp_path / "revision-0005.db"
+    database_url = f"sqlite+pysqlite:///{database_path}"
+    created = _run_alembic_upgrade(database_url, "20260908_0005")
+    assert created.returncode == 0, created.stderr
+
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO repositories (
+                    id, name, remote_url, remote_identity, remote_host, provider,
+                    auth_profile_ref, default_branch, enabled, status,
+                    last_known_commit, last_fetched_at, execution_profile,
+                    assurance_tier, assurance_profile, version, created_at, updated_at
+                ) VALUES (
+                    '00000000-0000-4000-8000-000000000005', 'existing-repository',
+                    'https://github.com/example/existing.git',
+                    'github.com/example/existing', 'github.com', 'github',
+                    'git-readonly', 'main', 1, 'ready',
+                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    '2026-09-09 00:00:00', 'development',
+                    'general-high-assurance', NULL, 7,
+                    '2026-09-08 00:00:00', '2026-09-08 00:00:00'
+                )
+                """
+            )
+        )
+
+    migrated = _run_schema_cli(database_url, "migrate")
+    assert migrated.returncode == 0, migrated.stderr
+
+    with engine.connect() as connection:
+        revision = connection.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar_one()
+        row = connection.execute(
+            text(
+                """
+                SELECT name, remote_identity, auth_profile_ref, assurance_tier,
+                       version, status, sync_generation, sync_failure_count,
+                       sync_requested_at, sync_next_at
+                FROM repositories
+                WHERE id = '00000000-0000-4000-8000-000000000005'
+                """
+            )
+        ).one()
+
+    assert revision == "20260909_0007"
+    assert tuple(row[:5]) == (
+        "existing-repository",
+        "github.com/example/existing",
+        "git-readonly",
+        "general-high-assurance",
+        7,
+    )
+    assert row.status == "pending_validation"
+    assert row.sync_generation == 0
+    assert row.sync_failure_count == 0
+    assert row.sync_requested_at is not None
+    assert row.sync_next_at is not None
+
+
+def test_versioned_0006_preserves_legacy_execution_as_contract_v1(tmp_path):
+    database_path = tmp_path / "revision-0006.db"
+    database_url = f"sqlite+pysqlite:///{database_path}"
+    created = _run_alembic_upgrade(database_url, "20260909_0006")
+    assert created.returncode == 0, created.stderr
+
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO tasks (
+                    id, title, description, project, domain, priority, status,
+                    risk_level, owner_role, created_at, updated_at
+                ) VALUES (
+                    'legacy-contract-task', 'Legacy contract marker', '', 'general',
+                    'development', 'normal', 'in_progress', 'low', NULL,
+                    '2026-09-09 00:00:00', '2026-09-09 00:00:00'
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO execution_runs (
+                    id, task_id, status, stage, opencode_session_id, lead_role,
+                    assigned_roles, result, error, lease_generation, deadline_at,
+                    created_at, updated_at, finished_at
+                ) VALUES (
+                    'legacy-contract-run', 'legacy-contract-task', 'queued',
+                    'dispatch_pending', NULL, 'department-lead', '[]', '', '', 0,
+                    '2026-09-09 02:00:00',
+                    '2026-09-09 00:00:00', '2026-09-09 00:00:00', NULL
+                )
+                """
+            )
+        )
+
+    migrated = _run_schema_cli(database_url, "migrate")
+    assert migrated.returncode == 0, migrated.stderr
+
+    with engine.connect() as connection:
+        revision = connection.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar_one()
+        task_repository = connection.execute(
+            text("SELECT repository_id FROM tasks WHERE id = 'legacy-contract-task'")
+        ).scalar_one()
+        run = connection.execute(
+            text(
+                """
+                SELECT contract_version, repository_id, workspace_id, base_commit,
+                       workspace_path, status, stage
+                FROM execution_runs WHERE id = 'legacy-contract-run'
+                """
+            )
+        ).one()
+        workspace_count = connection.execute(
+            text("SELECT count(*) FROM task_workspaces")
+        ).scalar_one()
+
+    assert revision == "20260909_0007"
+    assert task_repository is None
+    assert tuple(run) == (1, None, None, None, None, "queued", "dispatch_pending")
+    assert workspace_count == 0
 
 
 def test_drifted_legacy_database_is_never_stamped(tmp_path):

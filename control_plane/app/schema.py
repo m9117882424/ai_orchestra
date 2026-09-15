@@ -24,17 +24,41 @@ _REVISION_EXCLUDED_COLUMNS = {
             ("execution_runs", "lease_expires_at"),
             ("execution_runs", "deadline_at"),
             ("execution_runs", "cancel_requested_at"),
+            ("execution_runs", "contract_version"),
+            ("execution_runs", "repository_id"),
+            ("execution_runs", "workspace_id"),
+            ("execution_runs", "base_commit"),
+            ("execution_runs", "workspace_path"),
+            ("execution_runs", "workspace_tree"),
+            ("execution_runs", "workspace_preflight_digest"),
+            ("execution_runs", "workspace_preflight_completed_at"),
+            ("execution_runs", "workspace_runtime_preflight_digest"),
+            ("execution_runs", "workspace_runtime_verified_at"),
+            ("tasks", "repository_id"),
         }
     )
 }
 _REVISION_ABSENT_TABLES = {
-    LEGACY_BASELINE_REVISION: frozenset({"repositories"}),
+    LEGACY_BASELINE_REVISION: frozenset({"repositories", "task_workspaces"}),
 }
 _REVISION_EXCLUDED_INDEXES = {
     LEGACY_BASELINE_REVISION: frozenset(
         {
             ("execution_runs", ("lease_expires_at",), False),
             ("execution_runs", ("status", "deadline_at"), False),
+            ("execution_runs", ("repository_id",), False),
+            ("execution_runs", ("workspace_id",), True),
+            ("tasks", ("repository_id",), False),
+        }
+    )
+}
+_REVISION_EXCLUDED_CHECKS = {
+    LEGACY_BASELINE_REVISION: frozenset(
+        {
+            ("execution_runs", "ck_execution_runs_contract_version"),
+            ("execution_runs", "ck_execution_runs_workspace_binding"),
+            ("execution_runs", "ck_execution_runs_workspace_preflight"),
+            ("execution_runs", "ck_execution_runs_workspace_runtime_preflight"),
         }
     )
 }
@@ -86,6 +110,7 @@ def _schema_diff(
     expected_absent_tables: frozenset[str] = frozenset(),
     excluded_columns: frozenset[tuple[str, str]] = frozenset(),
     excluded_indexes: frozenset[tuple[str, tuple[str, ...], bool]] = frozenset(),
+    excluded_checks: frozenset[tuple[str, str]] = frozenset(),
     nullable_overrides: dict[tuple[str, str], bool] | None = None,
 ) -> list[str]:
     """Compare a database with an exact declared schema shape.
@@ -152,6 +177,11 @@ def _schema_diff(
                 (constraint.ondelete or "").upper(),
             )
             for constraint in table.foreign_key_constraints
+            if constraint.referred_table.name not in expected_absent_tables
+            and not any(
+                (table_name, element.parent.name) in excluded_columns
+                for element in constraint.elements
+            )
         }
         actual_fks = {
             (
@@ -169,6 +199,7 @@ def _schema_diff(
             constraint.name
             for constraint in table.constraints
             if isinstance(constraint, CheckConstraint) and constraint.name
+            and (table_name, constraint.name) not in excluded_checks
         }
         actual_checks = {
             constraint.get("name")
@@ -214,6 +245,7 @@ def schema_diff_for_revision(bind: Engine | Connection, revision: str) -> list[s
         expected_absent_tables=_REVISION_ABSENT_TABLES.get(revision, frozenset()),
         excluded_columns=_REVISION_EXCLUDED_COLUMNS[revision],
         excluded_indexes=_REVISION_EXCLUDED_INDEXES[revision],
+        excluded_checks=_REVISION_EXCLUDED_CHECKS.get(revision, frozenset()),
         nullable_overrides=_REVISION_NULLABLE_OVERRIDES.get(revision),
     )
 

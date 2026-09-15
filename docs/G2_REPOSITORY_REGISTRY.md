@@ -3,12 +3,12 @@
 ## Назначение
 
 Repository Registry — первый инкремент G2. Он хранит идентичность и политику
-разрешённых Git-репозиториев, но намеренно не выполняет `clone`, `fetch`, `push`
-или другие внешние действия.
+разрешённых Git-репозиториев, но сам не выполняет `clone`, `fetch`, `push` или
+другие внешние действия.
 
-Новая запись всегда создаётся как `pending_validation`. Только отдельный trusted
-Repo Manager из следующего инкремента сможет проверить remote и перевести его в
-операционное состояние. До этого репозиторий не должен участвовать в execution.
+Новая запись всегда создаётся как `pending_validation`. Реализованный в G2.2
+отдельный trusted Repo Manager проверяет remote и переводит его в операционное
+состояние. До статуса `ready` репозиторий не должен участвовать в execution.
 
 ## Данные реестра
 
@@ -17,7 +17,7 @@ Repo Manager из следующего инкремента сможет про�
 - определённый по host provider: GitHub, GitLab, Bitbucket или generic;
 - непрозрачная ссылка на auth profile без credential;
 - `default_branch`, последний известный commit и время fetch — read-only
-  operational state для будущего Repo Manager;
+  operational state, которым владеет Repo Manager;
 - `enabled` и validation status;
 - execution profile;
 - assurance tier и обязательный domain profile для `regulated-critical`;
@@ -37,16 +37,16 @@ Repo Manager из следующего инкремента сможет про�
 Варианты одного GitHub/GitLab/Bitbucket remote с разным регистром или суффиксом
 `.git` получают одну `remote_identity` и не могут быть зарегистрированы дважды.
 
-Эта проверка не заменяет сетевую политику. Перед первым fetch Repo Manager обязан
-повторно проверить URL, разрешённый host, DNS resolution и конечный адрес каждого
-redirect. Registry не выполняет DNS-запросов и не делает ложный вывод о доступности
-remote.
+Эта проверка не заменяет сетевую политику. Перед каждым fetch Repo Manager
+повторно проверяет URL и все DNS addresses, закрепляет разрешённые addresses для
+TLS-соединения и запрещает redirect целиком. Registry не выполняет DNS-запросов и
+не делает ложный вывод о доступности remote.
 
 ## Секреты
 
 В таблице нет колонок для token, password, private key или credential. Поле
 `auth_profile_ref` принимает только короткий identifier и отклоняет распространённые
-token prefixes. Сам credential в будущем принадлежит Repo Manager/secret store и
+token prefixes. Сам credential принадлежит Repo Manager secret scope и
 никогда не передаётся Control Plane response, OpenCode или LLM.
 
 ## Состояние и конкурентные изменения
@@ -68,6 +68,7 @@ GET   /api/repositories
 GET   /api/repositories/{repository_id}
 POST  /api/repositories
 PATCH /api/repositories/{repository_id}
+POST  /api/repositories/{repository_id}/validate
 ```
 
 Mutation endpoints требуют manager authentication и `X-Control-Request`, как и
@@ -92,15 +93,14 @@ Alembic revision `20260908_0005` создаёт только новую пуст
    существующих данных.
 8. Schema drift по обязательным checks/indexes блокирует production startup.
 
-## Что остаётся в G2
+## Следующий инкремент
 
-- trusted Repo Manager и отдельная credential boundary;
-- network/redirect/DNS validation;
-- clone/fetch/prune и default-branch discovery;
-- task branch/worktree lifecycle;
-- обязательный workspace preflight до первого LLM inference;
-- привязка execution к immutable repository/base/worktree identity;
-- recovery и cleanup без потери незакоммиченных данных.
+Task branch/workspace lifecycle, обязательный preflight до inference, immutable
+execution binding и conservative recovery/cleanup реализуются в G2.3:
+[`G2_TASK_WORKSPACES.md`](G2_TASK_WORKSPACES.md).
+
+Trusted Repo Manager, credential boundary и read-only mirror lifecycle закрыты в
+[`G2_TRUSTED_REPO_MANAGER.md`](G2_TRUSTED_REPO_MANAGER.md).
 
 Push/PR/merge autonomy не входит в G2. Она остаётся закрытой до content-addressed
 approval и external-action reconciliation в G5.

@@ -65,11 +65,16 @@ table { width: 100%; border-collapse: collapse; }
 th { color: var(--muted); font-size: 10px; text-align: left; text-transform: uppercase; letter-spacing: .12em; font-weight: 700; padding: 0 12px 10px; }
 td { padding: 15px 12px; border-top: 1px solid var(--line); vertical-align: middle; }
 .task-title { display: block; font-weight: 700; }
-.task-meta { color: var(--muted); font-size: 12px; }
+.task-meta { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; overflow-wrap: anywhere; }
 .pill { display: inline-flex; align-items: center; min-height: 25px; padding: 0 9px; border: 1px solid var(--line); border-radius: 999px; color: #bdc8d5; background: var(--surface-2); font-size: 11px; white-space: nowrap; }
 .pill.high, .pill.critical { color: #ffc4c4; border-color: #63363a; background: #27171a; }
 .pill.medium, .pill.waiting_approval { color: #ffe3a2; border-color: #65532a; background: #282313; }
 .pill.done { color: #c9ffac; border-color: #42622e; background: #162411; }
+.pill.validating, .pill.pending_validation { color: #b9ddff; border-color: #315775; background: #122333; }
+.pill.pending, .pill.preparing, .pill.inspection_pending, .pill.inspecting, .pill.cleanup_pending, .pill.cleaning { color: #b9ddff; border-color: #315775; background: #122333; }
+.pill.ready, .pill.retained, .pill.removed { color: #c9ffac; border-color: #42622e; background: #162411; }
+.pill.unavailable, .pill.invalid, .pill.failed { color: #ffc4c4; border-color: #63363a; background: #27171a; }
 .status-select { max-width: 172px; }
 .guard-panel { background: linear-gradient(160deg, rgba(29, 24, 20, .95), rgba(17, 22, 30, .95) 60%); }
 .lock { color: var(--amber); border: 1px solid #66552d; padding: 4px 8px; border-radius: 6px; font: 700 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em; }

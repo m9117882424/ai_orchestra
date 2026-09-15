@@ -40,4 +40,32 @@ if [[ "$worker_health" != "healthy" ]]; then
 fi
 echo "[OK] Execution Worker запущен и healthy"
 
+repo_manager_id="$(docker compose ps --status running -q repo-manager)"
+if [[ -z "$repo_manager_id" ]]; then
+  echo "[FAIL] Repo Manager не запущен" >&2
+  docker compose logs --tail=100 repo-manager >&2 || true
+  exit 1
+fi
+repo_manager_health="$(docker inspect --format '{{.State.Health.Status}}' "$repo_manager_id" 2>/dev/null || true)"
+if [[ "$repo_manager_health" != "healthy" ]]; then
+  echo "[FAIL] Repo Manager не прошёл liveness: $repo_manager_health" >&2
+  docker compose logs --tail=100 repo-manager >&2 || true
+  exit 1
+fi
+echo "[OK] Repo Manager запущен и healthy"
+
+workspace_manager_id="$(docker compose ps --status running -q workspace-manager)"
+if [[ -z "$workspace_manager_id" ]]; then
+  echo "[FAIL] Workspace Manager не запущен" >&2
+  docker compose logs --tail=100 workspace-manager >&2 || true
+  exit 1
+fi
+workspace_manager_health="$(docker inspect --format '{{.State.Health.Status}}' "$workspace_manager_id" 2>/dev/null || true)"
+if [[ "$workspace_manager_health" != "healthy" ]]; then
+  echo "[FAIL] Workspace Manager не прошёл liveness: $workspace_manager_health" >&2
+  docker compose logs --tail=100 workspace-manager >&2 || true
+  exit 1
+fi
+echo "[OK] Workspace Manager запущен и healthy"
+
 echo "[OK] Smoke test завершен"

@@ -160,6 +160,19 @@ def test_prompt_async_sends_stable_message_and_part_ids():
     ]
 
 
+def test_scoped_client_sends_encoded_workspace_directory_on_every_request():
+    client = OpenCodeClient("http://opencode", "user", "password")
+    scoped = client.for_directory(
+        "/workspace/worktrees/managed/00000000-0000-4000-8000-000000000001"
+    )
+
+    assert "X-OpenCode-Directory" not in client.headers
+    assert scoped.headers["X-OpenCode-Directory"] == (
+        "%2Fworkspace%2Fworktrees%2Fmanaged%2F"
+        "00000000-0000-4000-8000-000000000001"
+    )
+
+
 def test_invalid_opencode_json_is_normalized_as_client_error(monkeypatch):
     client = OpenCodeClient("http://opencode", "user", "password")
     monkeypatch.setattr(

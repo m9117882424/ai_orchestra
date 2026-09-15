@@ -21,7 +21,9 @@ from .models import (
     ExecutionRun,
     Repository,
     Task,
+    TaskWorkspace,
     UsageEvent,
+    new_id,
 )
 from .repository_policy import (
     RepositoryPolicyError,
@@ -43,15 +45,27 @@ from .schemas import (
     RepositoryRead,
     RepositoryStatus,
     RepositoryUpdate,
+    RepositoryValidationRequest,
     TaskCreate,
     TaskRead,
+    TaskRepositoryUpdate,
     TaskStatusUpdate,
+    TaskWorkspaceRead,
     UsageCreate,
     UsageRead,
+    WorkspaceCleanupRequest,
 )
 from .services import current_month_cost, seed_defaults, write_audit
 from .opencode_client import OpenCodeClient, OpenCodeError
 from .settings import get_settings
+from .workspace_protocol import (
+    WorkspacePreflightError,
+    canonical_uuid,
+    normalize_commit,
+    validate_branch,
+    workspace_branch_name,
+    workspace_path_for,
+)
 
 
 TASK_TRANSITIONS = {
@@ -76,7 +90,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="AI Orchestra Control Plane",
-    version="0.7.0",
+    version="0.9.0",
     docs_url=None,
     redoc_url=None,
     lifespan=lifespan,
@@ -193,6 +207,7 @@ def create_repository(
     manager: Manager,
     _: Mutation,
 ) -> Repository:
+    now = datetime.now(timezone.utc)
     remote = normalize_repository_remote(payload.remote_url)
     if db.scalar(select(Repository.id).where(Repository.name == payload.name)) is not None:
         raise HTTPException(status_code=409, detail="Имя репозитория уже зарегистрировано")
@@ -216,6 +231,8 @@ def create_repository(
         execution_profile=payload.execution_profile,
         assurance_tier=payload.assurance_tier,
         assurance_profile=payload.assurance_profile,
+        sync_requested_at=now,
+        sync_next_at=now if payload.enabled else None,
         version=1,
     )
     db.add(repository)
@@ -292,7 +309,13 @@ def update_repository(
         return repository
 
     repository.version += 1
-    repository.updated_at = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    if "auth_profile_ref" in changes or "enabled" in changes:
+        repository.status = "pending_validation"
+        repository.sync_requested_at = now
+        repository.sync_next_at = now if repository.enabled else None
+        repository.last_sync_error_code = None
+    repository.updated_at = now
     write_audit(
         db,
         actor=manager,
@@ -300,6 +323,56 @@ def update_repository(
         entity_type="repository",
         entity_id=repository.id,
         details={"version": repository.version, "changes": changes},
+    )
+    db.commit()
+    db.refresh(repository)
+    return repository
+
+
+@app.post(
+    "/api/repositories/{repository_id}/validate",
+    response_model=RepositoryRead,
+)
+def request_repository_validation(
+    repository_id: str,
+    payload: RepositoryValidationRequest,
+    db: DbSession,
+    manager: Manager,
+    _: Mutation,
+) -> Repository:
+    repository = db.scalar(
+        select(Repository).where(Repository.id == repository_id).with_for_update()
+    )
+    if repository is None:
+        raise HTTPException(status_code=404, detail="Репозиторий не найден")
+    if repository.version != payload.expected_version:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Запись репозитория уже изменена: "
+                f"expected_version={payload.expected_version}, current_version={repository.version}"
+            ),
+        )
+    if not repository.enabled:
+        raise HTTPException(
+            status_code=409,
+            detail="Отключенный репозиторий нельзя проверить; сначала включите его",
+        )
+
+    now = datetime.now(timezone.utc)
+    repository.status = "pending_validation"
+    repository.sync_requested_at = now
+    repository.sync_next_at = now
+    repository.last_sync_error_code = None
+    repository.version += 1
+    repository.updated_at = now
+    write_audit(
+        db,
+        actor=manager,
+        action="repository.validation_requested",
+        entity_type="repository",
+        entity_id=repository.id,
+        details={"version": repository.version},
     )
     db.commit()
     db.refresh(repository)
@@ -322,6 +395,8 @@ def create_task(
     manager: Manager,
     _: Mutation,
 ) -> Task:
+    if payload.repository_id and db.get(Repository, payload.repository_id) is None:
+        raise HTTPException(status_code=404, detail="Репозиторий задачи не найден")
     task = Task(**payload.model_dump())
     db.add(task)
     db.flush()
@@ -331,7 +406,11 @@ def create_task(
         action="task.created",
         entity_type="task",
         entity_id=task.id,
-        details={"domain": task.domain, "risk_level": task.risk_level},
+        details={
+            "domain": task.domain,
+            "risk_level": task.risk_level,
+            "repository_id": task.repository_id,
+        },
     )
     db.commit()
     db.refresh(task)
@@ -364,6 +443,48 @@ def update_task_status(
         entity_type="task",
         entity_id=task.id,
         details={"from": previous, "to": payload.status},
+    )
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+@app.patch("/api/tasks/{task_id}/repository", response_model=TaskRead)
+def update_task_repository(
+    task_id: str,
+    payload: TaskRepositoryUpdate,
+    db: DbSession,
+    manager: Manager,
+    _: Mutation,
+) -> Task:
+    task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
+    if task is None:
+        raise HTTPException(status_code=404, detail="Задача не найдена")
+    active = db.scalar(
+        select(ExecutionRun.id).where(
+            ExecutionRun.task_id == task.id,
+            ExecutionRun.status.in_(("preparing", "queued", "running")),
+        )
+    )
+    if active is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Нельзя менять репозиторий во время активного запуска",
+        )
+    if payload.repository_id and db.get(Repository, payload.repository_id) is None:
+        raise HTTPException(status_code=404, detail="Репозиторий задачи не найден")
+    previous = task.repository_id
+    if previous == payload.repository_id:
+        return task
+    task.repository_id = payload.repository_id
+    task.updated_at = datetime.now(timezone.utc)
+    write_audit(
+        db,
+        actor=manager,
+        action="task.repository_changed",
+        entity_type="task",
+        entity_id=task.id,
+        details={"from": previous, "to": payload.repository_id},
     )
     db.commit()
     db.refresh(task)
@@ -527,6 +648,94 @@ def list_executions(
     )
 
 
+@app.get("/api/workspaces", response_model=list[TaskWorkspaceRead])
+def list_workspaces(
+    db: DbSession,
+    _: Manager,
+    task_id: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+) -> list[TaskWorkspace]:
+    statement = select(TaskWorkspace)
+    if task_id is not None:
+        statement = statement.where(TaskWorkspace.task_id == task_id)
+    return list(
+        db.scalars(statement.order_by(TaskWorkspace.created_at.desc()).limit(limit))
+    )
+
+
+@app.get("/api/workspaces/{workspace_id}", response_model=TaskWorkspaceRead)
+def get_workspace(workspace_id: str, db: DbSession, _: Manager) -> TaskWorkspace:
+    workspace = db.get(TaskWorkspace, workspace_id)
+    if workspace is None:
+        raise HTTPException(status_code=404, detail="Рабочий каталог не найден")
+    return workspace
+
+
+@app.post("/api/workspaces/{workspace_id}/cleanup", response_model=TaskWorkspaceRead)
+def request_workspace_cleanup(
+    workspace_id: str,
+    payload: WorkspaceCleanupRequest,
+    db: DbSession,
+    manager: Manager,
+    _: Mutation,
+) -> TaskWorkspace:
+    workspace = db.scalar(
+        select(TaskWorkspace)
+        .where(TaskWorkspace.id == workspace_id)
+        .with_for_update()
+    )
+    if workspace is None:
+        raise HTTPException(status_code=404, detail="Рабочий каталог не найден")
+    if workspace.version != payload.expected_version:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Запись рабочего каталога уже изменена: "
+                f"expected_version={payload.expected_version}, current_version={workspace.version}"
+            ),
+        )
+    if workspace.status != "retained":
+        raise HTTPException(
+            status_code=409,
+            detail="Удаление разрешено только после завершенной проверки рабочего каталога",
+        )
+    if (
+        workspace.has_changes is not False
+        or workspace.current_head_commit != workspace.base_commit
+        or workspace.current_tree != workspace.initial_tree
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Рабочий каталог изменён или не подтверждён; автоматическое удаление запрещено",
+        )
+    run = db.scalar(
+        select(ExecutionRun).where(ExecutionRun.workspace_id == workspace.id)
+    )
+    if run is None or run.status not in {"completed", "failed", "cancelled"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Связанный запуск не находится в терминальном состоянии",
+        )
+    now = datetime.now(timezone.utc)
+    workspace.status = "cleanup_pending"
+    workspace.cleanup_requested_at = now
+    workspace.next_attempt_at = now
+    workspace.last_error_code = None
+    workspace.version += 1
+    workspace.updated_at = now
+    write_audit(
+        db,
+        actor=manager,
+        action="workspace.cleanup_requested",
+        entity_type="workspace",
+        entity_id=workspace.id,
+        details={"execution_id": run.id, "expected_version": payload.expected_version},
+    )
+    db.commit()
+    db.refresh(workspace)
+    return workspace
+
+
 @app.post("/api/tasks/{task_id}/execute", response_model=ExecutionRead, status_code=status.HTTP_201_CREATED)
 def start_execution(
     task_id: str,
@@ -534,7 +743,7 @@ def start_execution(
     manager: Manager,
     _: Mutation,
 ) -> ExecutionRun:
-    """Persist execution intent transactionally; the worker owns external dispatch."""
+    """Persist a repository-bound intent; no inference occurs before preflight."""
     task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
     if task is None:
         raise HTTPException(status_code=404, detail="Задача не найдена")
@@ -542,25 +751,87 @@ def start_execution(
         raise HTTPException(status_code=409, detail="Execution V1 пока поддерживает только development-задачи")
     if task.status == "done":
         raise HTTPException(status_code=409, detail="Завершенную задачу нельзя запустить повторно")
+    if task.repository_id is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Для запуска задачи сначала назначьте репозиторий",
+        )
     active = db.scalar(
         select(ExecutionRun).where(
             ExecutionRun.task_id == task.id,
-            ExecutionRun.status.in_(("queued", "running")),
+            ExecutionRun.status.in_(("preparing", "queued", "running")),
         )
     )
     if active is not None:
         raise HTTPException(status_code=409, detail="Для задачи уже есть активный запуск")
 
+    repository = db.scalar(
+        select(Repository)
+        .where(Repository.id == task.repository_id)
+        .with_for_update()
+    )
+    if repository is None:
+        raise HTTPException(status_code=409, detail="Репозиторий задачи больше не существует")
+    if (
+        not repository.enabled
+        or repository.status != "ready"
+        or repository.default_branch is None
+        or repository.last_known_commit is None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Репозиторий не готов к безопасному запуску; дождитесь успешной синхронизации",
+        )
+
     now = datetime.now(timezone.utc)
-    run = ExecutionRun(
+    run_id = new_id()
+    workspace_id = new_id()
+    try:
+        canonical_uuid(task.id, field="task_id")
+        canonical_uuid(repository.id, field="repository_id")
+        base_commit = normalize_commit(repository.last_known_commit)
+        base_branch = validate_branch(repository.default_branch)
+        branch_name = workspace_branch_name(task.id, run_id)
+    except WorkspacePreflightError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Репозиторий или задача содержат некорректную immutable identity; "
+                "повторите безопасную синхронизацию"
+            ),
+        ) from exc
+    workspace_path = workspace_path_for(workspace_id)
+    workspace = TaskWorkspace(
+        id=workspace_id,
         task_id=task.id,
-        status="queued",
-        stage="dispatch_pending",
+        repository_id=repository.id,
+        status="pending",
+        base_commit=base_commit,
+        base_branch=base_branch,
+        branch_name=branch_name,
+        opencode_path=workspace_path,
+        requested_at=now,
+        next_attempt_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    run = ExecutionRun(
+        id=run_id,
+        task_id=task.id,
+        contract_version=2,
+        repository_id=repository.id,
+        workspace_id=workspace_id,
+        base_commit=base_commit,
+        workspace_path=workspace_path,
+        status="preparing",
+        stage="workspace_pending",
         opencode_session_id=None,
         assigned_roles=["department-lead"],
         deadline_at=now + timedelta(seconds=get_settings().execution_timeout_seconds),
+        created_at=now,
+        updated_at=now,
     )
-    db.add(run)
+    db.add_all([workspace, run])
     if task.status in {"backlog", "planned", "failed"}:
         task.status = "in_progress"
     task.updated_at = now
@@ -568,10 +839,31 @@ def start_execution(
     write_audit(
         db,
         actor=manager,
-        action="execution.queued",
+        action="workspace.requested",
+        entity_type="workspace",
+        entity_id=workspace.id,
+        details={
+            "task_id": task.id,
+            "execution_id": run.id,
+            "repository_id": repository.id,
+            "base_commit": base_commit,
+            "base_branch": base_branch,
+            "branch_name": branch_name,
+        },
+    )
+    write_audit(
+        db,
+        actor=manager,
+        action="execution.preparing",
         entity_type="execution",
         entity_id=run.id,
-        details={"task_id": task.id},
+        details={
+            "task_id": task.id,
+            "repository_id": repository.id,
+            "workspace_id": workspace.id,
+            "base_commit": base_commit,
+            "contract_version": 2,
+        },
     )
     db.commit()
     db.refresh(run)
@@ -588,10 +880,64 @@ def abort_execution(
     run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == execution_id).with_for_update())
     if run is None:
         raise HTTPException(status_code=404, detail="Запуск не найден")
-    if run.status not in {"queued", "running"} or run.cancel_requested_at is not None:
+    if run.status not in {"preparing", "queued", "running"} or run.cancel_requested_at is not None:
         return run
 
     now = datetime.now(timezone.utc)
+    if run.status == "preparing":
+        run.cancel_requested_at = now
+        run.status = "cancelled"
+        run.stage = "stopped"
+        run.error = ""
+        run.finished_at = now
+        run.heartbeat_at = now
+        run.lease_generation = int(run.lease_generation or 0) + 1
+        run.lease_owner = None
+        run.lease_expires_at = None
+        run.updated_at = now
+        workspace = db.scalar(
+            select(TaskWorkspace)
+            .where(TaskWorkspace.id == run.workspace_id)
+            .with_for_update()
+        )
+        if workspace is None:
+            raise HTTPException(
+                status_code=500,
+                detail="Нарушена связка запуска с рабочим каталогом",
+            )
+        workspace.status = "cleanup_pending"
+        workspace.cleanup_requested_at = now
+        workspace.next_attempt_at = now
+        workspace.generation += 1
+        workspace.lease_owner = None
+        workspace.lease_expires_at = None
+        workspace.last_error_code = None
+        workspace.version += 1
+        workspace.updated_at = now
+        task = db.get(Task, run.task_id)
+        if task and task.status in {"in_progress", "waiting_approval"}:
+            task.status = "failed"
+            task.updated_at = now
+        write_audit(
+            db,
+            actor=manager,
+            action="workspace.cleanup_requested",
+            entity_type="workspace",
+            entity_id=workspace.id,
+            details={"execution_id": run.id, "reason": "preflight_cancelled"},
+        )
+        write_audit(
+            db,
+            actor=manager,
+            action="execution.cancelled",
+            entity_type="execution",
+            entity_id=run.id,
+            details={"task_id": run.task_id, "previous_status": "preparing"},
+        )
+        db.commit()
+        db.refresh(run)
+        return run
+
     run.cancel_requested_at = now
     run.stage = "cancel_requested"
     run.error = ""
@@ -694,9 +1040,17 @@ def execution_progress(
             "error": run.error,
             "items": [],
         }
+    scoped_opencode = opencode
+    if run.contract_version == 2:
+        if not run.workspace_path:
+            raise HTTPException(
+                status_code=503,
+                detail="У запуска отсутствует неизменяемая привязка рабочего каталога",
+            )
+        scoped_opencode = opencode.for_directory(run.workspace_path)
     try:
-        statuses = opencode.session_statuses()
-        messages = opencode.messages(run.opencode_session_id)
+        statuses = scoped_opencode.session_statuses()
+        messages = scoped_opencode.messages(run.opencode_session_id)
     except OpenCodeError as exc:
         return {
             "execution_id": run.id,

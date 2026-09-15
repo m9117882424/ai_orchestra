@@ -19,13 +19,13 @@ down:
 	docker compose down
 
 restart:
-	docker compose up -d --force-recreate model-router model-gateway opencode control-plane execution-worker
+	docker compose up -d --force-recreate model-router model-gateway opencode control-plane execution-worker repo-manager workspace-manager
 
 logs:
-	docker compose logs -f --tail=200 model-router model-gateway opencode control-plane execution-worker postgres
+	docker compose logs -f --tail=200 model-router model-gateway opencode control-plane execution-worker repo-manager workspace-manager postgres
 
 manager-logs:
-	docker compose logs -f --tail=200 control-plane execution-worker
+	docker compose logs -f --tail=200 control-plane execution-worker repo-manager workspace-manager
 
 router-logs:
 	docker compose logs -f --tail=200 model-router model-gateway
@@ -65,6 +65,6 @@ dependency-check:
 
 validate: dependency-check
 	python3 -m json.tool config/opencode.gateway.json >/dev/null
-	python3 -m compileall -q control_plane/app control_plane/migrations control_plane/tests scripts/model_router_smoke.py scripts/static_security_check.py scripts/verify_dependency_locks.py
+	python3 -m compileall -q control_plane/app control_plane/migrations control_plane/tests scripts/model_router_smoke.py scripts/static_security_check.py scripts/verify_dependency_locks.py scripts/workspace_restore_verifier.py
 	docker compose config --quiet
 	python3 scripts/static_security_check.py

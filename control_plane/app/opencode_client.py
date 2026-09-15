@@ -7,6 +7,8 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
+from .workspace_protocol import opencode_directory_header
+
 
 class OpenCodeError(RuntimeError):
     pass
@@ -109,14 +111,33 @@ def decorate_progress_messages(messages: list[dict]) -> list[dict]:
 
 
 class OpenCodeClient:
-    def __init__(self, base_url: str, username: str, password: str):
+    def __init__(
+        self,
+        base_url: str,
+        username: str,
+        password: str,
+        *,
+        directory: str | None = None,
+    ):
         self.base_url = base_url.rstrip("/")
         token = base64.b64encode(f"{username}:{password}".encode()).decode()
         self.headers = {
             "Authorization": f"Basic {token}",
             "Accept": "application/json",
         }
+        self.directory = directory
+        if directory is not None:
+            self.headers["X-OpenCode-Directory"] = opencode_directory_header(directory)
         self._last_statuses: dict = {}
+
+    def for_directory(self, directory: str) -> "OpenCodeClient":
+        """Return an isolated client whose every request is bound to one workspace."""
+        scoped = copy.copy(self)
+        scoped.headers = dict(self.headers)
+        scoped.headers["X-OpenCode-Directory"] = opencode_directory_header(directory)
+        scoped.directory = directory
+        scoped._last_statuses = {}
+        return scoped
 
     def _request(self, method: str, path: str, payload: dict | None = None):
         data = None

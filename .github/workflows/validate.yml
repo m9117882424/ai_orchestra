@@ -24,7 +24,8 @@ jobs:
         run: |
           cp .env.example .env
           cp .env.providers.example .env.providers
-          chmod 600 .env .env.providers
+          cp .env.repositories.example .env.repositories
+          chmod 600 .env .env.providers .env.repositories
           cp config/opencode.gateway.json runtime/opencode.json
           cp config/model-router.shared.yaml runtime/model-router.yaml
 
@@ -40,7 +41,7 @@ jobs:
               assert isinstance(data, dict) and isinstance(data.get('model_list'), list) and data['model_list'], path
           print('[OK] router YAML parsed')
           PY
-          python3 -m compileall -q control_plane/app control_plane/migrations control_plane/tests scripts/model_router_smoke.py scripts/static_security_check.py scripts/verify_dependency_locks.py scripts/temporal_durable_poc.py
+          python3 -m compileall -q control_plane/app control_plane/migrations control_plane/tests scripts/model_router_smoke.py scripts/static_security_check.py scripts/verify_dependency_locks.py scripts/temporal_durable_poc.py scripts/workspace_restore_verifier.py
           node --check control_plane/app/static/app.js
 
       - name: Проверить shell-скрипты
@@ -59,7 +60,11 @@ jobs:
           bash -n scripts/export-backup-offsite.sh
           bash -n scripts/backup-restore-smoke.sh
           bash -n scripts/temporal-durable-smoke.sh
+          bash -n control_plane/app/repo_manager_git_wrapper.sh
+          bash -n control_plane/app/workspace_volume_init.sh
           shellcheck scripts/*.sh
+          shellcheck control_plane/app/repo_manager_git_wrapper.sh
+          shellcheck control_plane/app/workspace_volume_init.sh
 
       - name: Проверить dependency locks
         run: |
@@ -105,3 +110,68 @@ jobs:
             command -v node >/dev/null &&
             rg --version | head -n 1
           '
+
+      - name: Проверить isolated Git worker toolchains and workspace ownership
+        run: |
+          echo "[CHECK] Control Plane has no Git toolchain"
+          docker compose run --rm -T --no-deps control-plane sh -lc '
+            ! command -v git
+          '
+          echo "[OK] Control Plane has no Git toolchain"
+          echo "[CHECK] Repo Manager non-root Git wrapper"
+          docker compose run --rm -T --no-deps repo-manager sh -lc '
+            test "$(id -u)" != 0 &&
+            test -x /app/app/repo_manager_askpass.py &&
+            test -x /app/app/repo_manager_git_wrapper.sh &&
+            REPO_MANAGER_GIT_MAX_FILE_BLOCKS=2048 /app/app/repo_manager_git_wrapper.sh --version
+          '
+          echo "[OK] Repo Manager non-root Git wrapper"
+          echo "[CHECK] Task workspace volume initialization"
+          docker compose run --rm -T --no-deps workspace-volume-init
+          echo "[OK] Task workspace volume initialization"
+          echo "[CHECK] Workspace Manager write access"
+          docker compose run --rm -T --no-deps workspace-manager sh -lc '
+            test "$(id -u)" = 10001 &&
+            test "$(id -g)" = 10001 &&
+            test "$(awk '\''/^CapEff:/ {print $2}'\'' /proc/self/status)" = 000000000000000a &&
+            test "$(awk '\''/^CapPrm:/ {print $2}'\'' /proc/self/status)" = 000000000000000a &&
+            test "$(awk '\''/^CapAmb:/ {print $2}'\'' /proc/self/status)" = 000000000000000a &&
+            command -v git >/dev/null &&
+            printf "workspace-manager\n" > /workspace/worktrees/managed/.ci-workspace-boundary &&
+            chmod 0600 /workspace/worktrees/managed/.ci-workspace-boundary
+          '
+          echo "[OK] Workspace Manager write access"
+          echo "[CHECK] OpenCode write access to the same named volume"
+          docker compose run --rm -T --no-deps --entrypoint sh opencode -lc '
+            test "$(id -u)" = 0 &&
+            test -f /workspace/worktrees/managed/.ci-workspace-boundary &&
+            printf "opencode-write\n" >> /workspace/worktrees/managed/.ci-workspace-boundary &&
+            grep -Fxq opencode-write /workspace/worktrees/managed/.ci-workspace-boundary &&
+            chmod 0640 /workspace/worktrees/managed/.ci-workspace-boundary &&
+            test "$(stat -c %a /workspace/worktrees/managed/.ci-workspace-boundary)" = 640 &&
+            mkdir /workspace/worktrees/managed/.ci-root-owned &&
+            printf "root-owned\n" > /workspace/worktrees/managed/.ci-root-owned/output.txt &&
+            chmod 0700 /workspace/worktrees/managed/.ci-root-owned &&
+            chmod 0600 /workspace/worktrees/managed/.ci-root-owned/output.txt &&
+            test "$(stat -c %u:%g /workspace/worktrees/managed/.ci-root-owned)" = 0:0
+          '
+          echo "[OK] OpenCode write access to the same named volume"
+          echo "[CHECK] Execution Worker read-only access"
+          docker compose run --rm -T --no-deps execution-worker sh -lc '
+            test "$(id -u)" = 10001 &&
+            command -v git >/dev/null &&
+            test -f /workspace/worktrees/managed/.ci-workspace-boundary &&
+            grep -Fxq opencode-write /workspace/worktrees/managed/.ci-workspace-boundary &&
+            if sh -c "printf forbidden >> /workspace/worktrees/managed/.ci-workspace-boundary" 2>/dev/null; then
+              echo "[FAIL] Execution Worker unexpectedly wrote to task workspace" >&2
+              exit 1
+            fi
+          '
+          echo "[OK] Execution Worker read-only access"
+          echo "[CHECK] Workspace Manager cleanup access"
+          docker compose run --rm -T --no-deps workspace-manager sh -lc '
+            grep -Fxq root-owned /workspace/worktrees/managed/.ci-root-owned/output.txt &&
+            rm -r /workspace/worktrees/managed/.ci-root-owned &&
+            rm /workspace/worktrees/managed/.ci-workspace-boundary
+          '
+          echo "[OK] Workspace Manager cleanup access"

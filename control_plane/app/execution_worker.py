@@ -22,7 +22,7 @@ from .execution_protocol import (
     execution_prompt,
     execution_session_title,
 )
-from .models import ExecutionRun, Task
+from .models import ExecutionRun, Repository, Task, TaskWorkspace
 from .opencode_client import (
     OpenCodeClient,
     OpenCodeError,
@@ -32,6 +32,17 @@ from .opencode_client import (
 from .schema import assert_database_shape
 from .services import write_audit
 from .settings import get_settings
+from .workspace_manager import request_workspace_inspection
+from .workspace_protocol import (
+    DEFAULT_OPENCODE_WORKSPACE_ROOT,
+    WorkspaceBinding,
+    WorkspacePreflightError,
+    canonical_uuid,
+    normalize_commit,
+    validate_branch,
+    verify_runtime_workspace,
+    workspace_path_for,
+)
 
 
 LOGGER = logging.getLogger("ai_orchestra.execution_worker")
@@ -80,6 +91,8 @@ class ExecutionLease:
     opencode_session_id: str | None
     deadline_at: datetime
     cancel_requested_at: datetime | None
+    workspace_path: str | None
+    workspace_binding: WorkspaceBinding | None
 
 
 class ExecutionLeaseManager:
@@ -96,14 +109,22 @@ class ExecutionLeaseManager:
         *,
         lease_seconds: int = 120,
         execution_timeout_seconds: int = 7200,
+        workspace_root: Path = DEFAULT_OPENCODE_WORKSPACE_ROOT,
+        workspace_max_files: int = 100_000,
     ):
         if lease_seconds < 30:
             raise ValueError("lease_seconds must be at least 30")
         if not 60 <= execution_timeout_seconds <= 604800:
             raise ValueError("execution_timeout_seconds must be between 60 and 604800")
+        if not workspace_root.is_absolute():
+            raise ValueError("workspace_root must be absolute")
+        if not 1 <= workspace_max_files <= 1_000_000:
+            raise ValueError("workspace_max_files must be between 1 and 1000000")
         self.worker_id = worker_id
         self.lease_seconds = lease_seconds
         self.execution_timeout_seconds = execution_timeout_seconds
+        self.workspace_root = workspace_root
+        self.workspace_max_files = workspace_max_files
 
     @property
     def audit_actor(self) -> str:
@@ -111,6 +132,112 @@ class ExecutionLeaseManager:
 
     def _deadline(self, now: datetime) -> datetime:
         return now + timedelta(seconds=self.lease_seconds)
+
+    def _workspace_binding(
+        self,
+        db: Session,
+        run: ExecutionRun,
+    ) -> WorkspaceBinding | None:
+        if run.contract_version == 1:
+            return None
+        if run.contract_version != 2 or not run.workspace_id:
+            raise WorkspacePreflightError("workspace_binding_missing")
+        workspace = db.scalar(
+            select(TaskWorkspace)
+            .where(TaskWorkspace.id == run.workspace_id)
+            .with_for_update()
+        )
+        if workspace is None:
+            raise WorkspacePreflightError("workspace_binding_missing")
+        if workspace.status != "ready":
+            raise WorkspacePreflightError("workspace_not_ready")
+        if (
+            workspace.task_id != run.task_id
+            or workspace.repository_id != run.repository_id
+            or workspace.base_commit != run.base_commit
+            or workspace.opencode_path != run.workspace_path
+            or workspace.initial_tree != run.workspace_tree
+            or workspace.preflight_digest != run.workspace_preflight_digest
+            or run.workspace_preflight_completed_at is None
+        ):
+            raise WorkspacePreflightError("workspace_database_binding_mismatch")
+        canonical_uuid(run.id, field="execution_id")
+        canonical_uuid(run.task_id, field="task_id")
+        canonical_uuid(workspace.repository_id, field="repository_id")
+        canonical_uuid(workspace.id, field="workspace_id")
+        base_commit = normalize_commit(workspace.base_commit)
+        initial_tree = normalize_commit(
+            str(workspace.initial_tree), field="initial_tree"
+        )
+        branch_name = validate_branch(workspace.branch_name)
+        if workspace.opencode_path != workspace_path_for(
+            workspace.id,
+            root=self.workspace_root,
+        ):
+            raise WorkspacePreflightError("workspace_path_mismatch")
+        if (
+            isinstance(workspace.tracked_entries, bool)
+            or not isinstance(workspace.tracked_entries, int)
+            or workspace.tracked_entries < 0
+            or not isinstance(workspace.preflight_digest, str)
+            or len(workspace.preflight_digest) != 64
+            or any(character not in "0123456789abcdef" for character in workspace.preflight_digest)
+        ):
+            raise WorkspacePreflightError("workspace_preflight_evidence_invalid")
+        return WorkspaceBinding(
+            execution_id=run.id,
+            task_id=run.task_id,
+            repository_id=workspace.repository_id,
+            workspace_id=workspace.id,
+            base_commit=base_commit,
+            branch_name=branch_name,
+            workspace_path=workspace.opencode_path,
+            initial_tree=initial_tree,
+            tracked_entries=workspace.tracked_entries,
+            preflight_digest=workspace.preflight_digest,
+        )
+
+    def _reject_invalid_workspace_binding(
+        self,
+        db: Session,
+        run: ExecutionRun,
+        code: str,
+        now: datetime,
+    ) -> None:
+        run.status = "failed"
+        run.stage = "workspace_binding_rejected"
+        run.error = f"Workspace binding rejected: {code}"
+        run.finished_at = now
+        run.heartbeat_at = now
+        run.lease_generation = int(run.lease_generation or 0) + 1
+        run.lease_owner = None
+        run.lease_expires_at = None
+        run.updated_at = now
+        workspace = db.get(TaskWorkspace, run.workspace_id) if run.workspace_id else None
+        if workspace is not None:
+            workspace.status = "invalid"
+            workspace.next_attempt_at = None
+            workspace.lease_owner = None
+            workspace.lease_expires_at = None
+            workspace.last_error_code = code
+            workspace.version += 1
+            workspace.updated_at = now
+        task = db.get(Task, run.task_id)
+        if task and task.status in {"in_progress", "waiting_approval"}:
+            task.status = "failed"
+            task.updated_at = now
+        write_audit(
+            db,
+            actor=self.audit_actor,
+            action="execution.workspace_binding_rejected",
+            entity_type="execution",
+            entity_id=run.id,
+            details={
+                "task_id": run.task_id,
+                "workspace_id": run.workspace_id,
+                "error_code": code,
+            },
+        )
 
     def claim_available(
         self,
@@ -139,6 +266,16 @@ class ExecutionLeaseManager:
         )
         leases: list[ExecutionLease] = []
         for run in rows:
+            try:
+                workspace_binding = self._workspace_binding(db, run)
+            except (WorkspacePreflightError, TypeError, ValueError) as exc:
+                code = (
+                    exc.code
+                    if isinstance(exc, WorkspacePreflightError)
+                    else "workspace_binding_invalid"
+                )
+                self._reject_invalid_workspace_binding(db, run, code, now)
+                continue
             if run.deadline_at is None:
                 # Migration 0004 backfills every active production row. This
                 # fallback also bounds rows created by old fixtures/manual tools.
@@ -182,6 +319,8 @@ class ExecutionLeaseManager:
                     opencode_session_id=run.opencode_session_id,
                     deadline_at=_as_utc(run.deadline_at) or now,
                     cancel_requested_at=_as_utc(run.cancel_requested_at),
+                    workspace_path=run.workspace_path if run.contract_version == 2 else None,
+                    workspace_binding=workspace_binding,
                 )
             )
         db.commit()
@@ -259,6 +398,105 @@ class ExecutionLeaseManager:
         db.commit()
         return True
 
+    def mark_runtime_workspace_verified(
+        self,
+        db: Session,
+        lease: ExecutionLease,
+        digest: str,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        now = now or utc_now()
+        run = self._locked_owned_run(db, lease, now)
+        if run is None or run.status != "queued":
+            db.rollback()
+            return False
+        binding = lease.workspace_binding
+        if (
+            binding is None
+            or digest != binding.preflight_digest
+            or run.workspace_preflight_digest != digest
+        ):
+            db.rollback()
+            return False
+        first_verification = run.workspace_runtime_verified_at is None
+        run.workspace_runtime_preflight_digest = digest
+        run.workspace_runtime_verified_at = now
+        run.stage = "dispatch_preflight_verified"
+        run.heartbeat_at = now
+        run.lease_expires_at = self._deadline(now)
+        run.updated_at = now
+        if first_verification:
+            write_audit(
+                db,
+                actor=self.audit_actor,
+                action="execution.workspace_runtime_verified",
+                entity_type="execution",
+                entity_id=run.id,
+                details={
+                    "task_id": run.task_id,
+                    "workspace_id": run.workspace_id,
+                    "preflight_digest": digest,
+                    "generation": lease.generation,
+                },
+            )
+        db.commit()
+        return True
+
+    def mark_runtime_workspace_rejected(
+        self,
+        db: Session,
+        lease: ExecutionLease,
+        code: str,
+        *,
+        now: datetime | None = None,
+    ) -> str:
+        now = now or utc_now()
+        run = self._locked_owned_run(db, lease, now)
+        if run is None:
+            db.rollback()
+            return "lost"
+        self._reject_invalid_workspace_binding(db, run, code, now)
+        db.commit()
+        return "rejected"
+
+    def request_safety_cancel(
+        self,
+        db: Session,
+        lease: ExecutionLease,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        now = now or utc_now()
+        run = self._locked_owned_run(db, lease, now)
+        if run is None or run.status != "queued":
+            db.rollback()
+            return False
+        if run.cancel_requested_at is None:
+            run.cancel_requested_at = now
+            run.stage = "safety_abort_requested"
+            run.error = (
+                "A pre-existing OpenCode message has no durable runtime workspace "
+                "verification evidence"
+            )
+            run.heartbeat_at = now
+            run.lease_expires_at = self._deadline(now)
+            run.updated_at = now
+            write_audit(
+                db,
+                actor=self.audit_actor,
+                action="execution.safety_abort_requested",
+                entity_type="execution",
+                entity_id=run.id,
+                details={
+                    "task_id": run.task_id,
+                    "workspace_id": run.workspace_id,
+                    "generation": lease.generation,
+                },
+            )
+        db.commit()
+        return True
+
     def mark_dispatched(
         self,
         db: Session,
@@ -278,6 +516,12 @@ class ExecutionLeaseManager:
             db.rollback()
             return False
         if run.opencode_session_id != session_id:
+            db.rollback()
+            return False
+        if run.contract_version == 2 and (
+            run.workspace_runtime_preflight_digest != run.workspace_preflight_digest
+            or run.workspace_runtime_verified_at is None
+        ):
             db.rollback()
             return False
         run.status = "running"
@@ -345,6 +589,12 @@ class ExecutionLeaseManager:
             if task and task.status in {"in_progress", "waiting_approval"}:
                 task.status = "qa"
                 task.updated_at = now
+            request_workspace_inspection(
+                db,
+                run,
+                actor=self.audit_actor,
+                now=now,
+            )
             write_audit(
                 db,
                 actor=self.audit_actor,
@@ -437,6 +687,12 @@ class ExecutionLeaseManager:
         if task and task.status in {"in_progress", "waiting_approval"}:
             task.status = "failed"
             task.updated_at = now
+        request_workspace_inspection(
+            db,
+            run,
+            actor=self.audit_actor,
+            now=now,
+        )
         write_audit(
             db,
             actor=self.audit_actor,
@@ -516,6 +772,12 @@ class ExecutionLeaseManager:
         if task and task.status in {"in_progress", "waiting_approval"}:
             task.status = "failed"
             task.updated_at = now
+        request_workspace_inspection(
+            db,
+            run,
+            actor=self.audit_actor,
+            now=now,
+        )
         write_audit(
             db,
             actor=self.audit_actor,
@@ -536,7 +798,7 @@ class ExecutionLeaseManager:
 def _queued_dispatch_context(
     manager: ExecutionLeaseManager,
     lease: ExecutionLease,
-) -> tuple[str | None, str, str] | None:
+) -> tuple[str | None, str, str, bool] | None:
     """Read a fenced queued run without holding its DB transaction over network I/O."""
     with SessionLocal() as db:
         now = utc_now()
@@ -551,8 +813,49 @@ def _queued_dispatch_context(
         session_id = run.opencode_session_id
         title = execution_session_title(task, run.id)
         prompt = execution_prompt(task)
+        runtime_verified = run.contract_version == 1 or (
+            run.workspace_runtime_preflight_digest
+            == run.workspace_preflight_digest
+            and run.workspace_runtime_verified_at is not None
+        )
         db.rollback()
-        return session_id, title, prompt
+        return session_id, title, prompt, runtime_verified
+
+
+def _verify_workspace_before_inference(
+    manager: ExecutionLeaseManager,
+    lease: ExecutionLease,
+) -> bool:
+    binding = lease.workspace_binding
+    if binding is None:
+        return True
+    try:
+        verify_runtime_workspace(
+            binding,
+            workspace_root=manager.workspace_root,
+            max_files=manager.workspace_max_files,
+        )
+    except (WorkspacePreflightError, OSError) as exc:
+        code = (
+            exc.code
+            if isinstance(exc, WorkspacePreflightError)
+            else "workspace_runtime_unavailable"
+        )
+        LOGGER.error(
+            "Runtime workspace rejected execution=%s generation=%s code=%s",
+            lease.execution_id,
+            lease.generation,
+            code,
+        )
+        with SessionLocal() as db:
+            manager.mark_runtime_workspace_rejected(db, lease, code)
+        return False
+    with SessionLocal() as db:
+        return manager.mark_runtime_workspace_verified(
+            db,
+            lease,
+            binding.preflight_digest,
+        )
 
 
 def _renew_before_external_side_effect(
@@ -562,6 +865,74 @@ def _renew_before_external_side_effect(
     """Fence an external POST with a lease renewed immediately before the call."""
     with SessionLocal() as db:
         return manager.heartbeat(db, lease)
+
+
+def _prompt_with_repository_trust_gate(
+    manager: ExecutionLeaseManager,
+    client: OpenCodeClient,
+    lease: ExecutionLease,
+    session_id: str,
+    prompt: str,
+    *,
+    message_id: str,
+    part_id: str,
+) -> str:
+    """Start inference only while the bound repository remains trusted.
+
+    Contract-v2 dispatch holds the Registry row lock across the one HTTP call
+    that can start inference. A concurrent disable/revalidation therefore either
+    commits first and blocks this call, or waits until the already-authorized
+    call has crossed its side-effect boundary.
+    """
+    binding = lease.workspace_binding
+    if binding is None:
+        if not _renew_before_external_side_effect(manager, lease):
+            return "lost"
+        client.prompt_async(
+            session_id,
+            prompt,
+            message_id=message_id,
+            part_id=part_id,
+        )
+        return "prompted"
+
+    rejection_code: str | None = None
+    with SessionLocal() as db:
+        repository = db.scalar(
+            select(Repository)
+            .where(Repository.id == binding.repository_id)
+            .with_for_update()
+        )
+        if repository is None or not repository.enabled:
+            rejection_code = "repository_trust_revoked"
+        elif repository.status != "ready":
+            rejection_code = "repository_not_ready"
+        else:
+            now = utc_now()
+            run = manager._locked_owned_run(db, lease, now)
+            if run is None or run.status != "queued" or run.cancel_requested_at is not None:
+                db.rollback()
+                return "lost"
+            deadline_at = _as_utc(run.deadline_at)
+            if deadline_at is not None and deadline_at <= now:
+                db.rollback()
+                return "deadline"
+            run.heartbeat_at = now
+            run.lease_expires_at = manager._deadline(now)
+            run.updated_at = now
+            client.prompt_async(
+                session_id,
+                prompt,
+                message_id=message_id,
+                part_id=part_id,
+            )
+            db.commit()
+            return "prompted"
+        db.rollback()
+
+    assert rejection_code is not None
+    with SessionLocal() as db:
+        return manager.mark_runtime_workspace_rejected(db, lease, rejection_code)
 
 
 def _renew_before_cleanup_side_effect(
@@ -718,7 +1089,10 @@ def dispatch_execution(
     context = _queued_dispatch_context(manager, lease)
     if context is None:
         return "lost"
-    session_id, title, prompt = context
+    session_id, title, prompt, runtime_verified_before = context
+
+    if not _verify_workspace_before_inference(manager, lease):
+        return "rejected"
 
     if not session_id:
         matches = client.sessions_for_execution(lease.execution_id)
@@ -753,15 +1127,30 @@ def dispatch_execution(
     message_id = execution_message_id(lease.execution_id)
     part_id = execution_part_id(lease.execution_id)
     existing_message = client.message(session_id, message_id)
+    if existing_message is not None and lease.workspace_binding is not None:
+        if not runtime_verified_before:
+            with SessionLocal() as db:
+                if not manager.request_safety_cancel(db, lease):
+                    return "lost"
+            return cancel_execution(manager, client, lease)
     if existing_message is None:
-        if not _renew_before_external_side_effect(manager, lease):
-            return "lost"
-        client.prompt_async(
+        # A session POST can take time. Re-check the filesystem immediately
+        # before the only call that starts inference.
+        if not _verify_workspace_before_inference(manager, lease):
+            return "rejected"
+        prompt_outcome = _prompt_with_repository_trust_gate(
+            manager,
+            client,
+            lease,
             session_id,
             prompt,
             message_id=message_id,
             part_id=part_id,
         )
+        if prompt_outcome == "deadline":
+            return timeout_execution(manager, client, lease)
+        if prompt_outcome != "prompted":
+            return prompt_outcome
 
     if _deadline_elapsed(lease):
         return timeout_execution(manager, client, lease)
@@ -779,6 +1168,8 @@ def poll_execution(
 ) -> str:
     try:
         client = client_factory()
+        if lease.workspace_path is not None:
+            client = client.for_directory(lease.workspace_path)
         if lease.cancel_requested_at is not None:
             return cancel_execution(manager, client, lease)
         if _deadline_elapsed(lease):
@@ -910,6 +1301,18 @@ def main() -> int:
             "/tmp/ai-orchestra-execution-worker.heartbeat",
         )
     )
+    workspace_root = Path(
+        os.getenv(
+            "CONTROL_PLANE_TASK_WORKSPACE_ROOT",
+            str(DEFAULT_OPENCODE_WORKSPACE_ROOT),
+        )
+    )
+    workspace_max_files = _positive_int(
+        "CONTROL_PLANE_WORKSPACE_MANAGER_MAX_FILES",
+        100_000,
+        minimum=1,
+        maximum=1_000_000,
+    )
 
     with SessionLocal() as db:
         assert_database_shape(db.get_bind())
@@ -918,6 +1321,8 @@ def main() -> int:
         worker_id,
         lease_seconds=lease_seconds,
         execution_timeout_seconds=settings.execution_timeout_seconds,
+        workspace_root=workspace_root,
+        workspace_max_files=workspace_max_files,
     )
 
     def client_factory() -> OpenCodeClient:

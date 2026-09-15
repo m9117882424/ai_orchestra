@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import IntegrityError
@@ -32,7 +34,7 @@ def test_dashboard_exposes_repository_registry_without_credentials(auth):
         response = client.get("/", auth=auth)
 
     assert response.status_code == 200
-    assert "G2 Repository Registry" in response.text
+    assert "G2 Trusted Repo Manager" in response.text
     assert "Credentials сюда не вводятся" in response.text
     assert "password" not in response.text.lower()
     assert "token" not in response.text.lower()
@@ -389,6 +391,77 @@ def test_repository_table_constraints_reject_forged_operational_state():
         db.rollback()
 
 
+def test_repository_table_constraints_require_complete_ready_and_validating_evidence():
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        db.add(
+            Repository(
+                name="disabled-ready",
+                remote_url="https://github.com/owner/disabled-ready.git",
+                remote_identity="github.com/owner/disabled-ready",
+                remote_host="github.com",
+                provider="github",
+                enabled=False,
+                status="ready",
+                default_branch="main",
+                last_known_commit="a" * 40,
+                last_fetched_at=now,
+                sync_finished_at=now,
+                sync_next_at=now + timedelta(hours=1),
+                execution_profile="development",
+                assurance_tier="general-standard",
+                version=1,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            db.commit()
+        db.rollback()
+
+        db.add(
+            Repository(
+                name="ready-with-null-branch",
+                remote_url="https://github.com/owner/null-branch.git",
+                remote_identity="github.com/owner/null-branch",
+                remote_host="github.com",
+                provider="github",
+                enabled=True,
+                status="ready",
+                default_branch=None,
+                last_known_commit="a" * 40,
+                last_fetched_at=now,
+                sync_finished_at=now,
+                sync_next_at=now + timedelta(hours=1),
+                execution_profile="development",
+                assurance_tier="general-standard",
+                version=1,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            db.commit()
+        db.rollback()
+
+        db.add(
+            Repository(
+                name="validating-without-start",
+                remote_url="https://github.com/owner/validating-without-start.git",
+                remote_identity="github.com/owner/validating-without-start",
+                remote_host="github.com",
+                provider="github",
+                enabled=True,
+                status="validating",
+                sync_generation=1,
+                sync_lease_owner="worker",
+                sync_lease_expires_at=now + timedelta(minutes=5),
+                execution_profile="development",
+                assurance_tier="general-standard",
+                version=1,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            db.commit()
+        db.rollback()
+
+
 def test_repository_schema_has_auth_reference_but_no_credential_columns():
     columns = set(Repository.__table__.columns.keys())
 
@@ -430,3 +503,94 @@ def test_repository_audit_rows_are_committed_atomically(auth, mutation_headers):
 
     assert repository is not None
     assert event is not None
+
+
+def test_manager_can_request_versioned_validation_without_setting_operational_state(
+    auth,
+    mutation_headers,
+):
+    with TestClient(app) as client:
+        created = _register(client, auth, mutation_headers).json()
+        requested = client.post(
+            f"/api/repositories/{created['id']}/validate",
+            auth=auth,
+            headers=mutation_headers,
+            json={"expected_version": 1},
+        )
+        stale = client.post(
+            f"/api/repositories/{created['id']}/validate",
+            auth=auth,
+            headers=mutation_headers,
+            json={"expected_version": 1},
+        )
+        audit = client.get("/api/audit", auth=auth).json()
+
+    assert requested.status_code == 200
+    payload = requested.json()
+    assert payload["status"] == "pending_validation"
+    assert payload["version"] == 2
+    assert payload["sync_requested_at"] is not None
+    assert payload["sync_next_at"] is not None
+    assert payload["default_branch"] is None
+    assert payload["last_known_commit"] is None
+    assert stale.status_code == 409
+    event = next(
+        item for item in audit if item["action"] == "repository.validation_requested"
+    )
+    assert event["details"] == {"version": 2}
+
+
+def test_disabled_repository_cannot_be_queued_for_validation(auth, mutation_headers):
+    with TestClient(app) as client:
+        created = _register(
+            client,
+            auth,
+            mutation_headers,
+            name="disabled-repository",
+            remote_url="https://github.com/example/disabled-repository.git",
+            enabled=False,
+        ).json()
+        requested = client.post(
+            f"/api/repositories/{created['id']}/validate",
+            auth=auth,
+            headers=mutation_headers,
+            json={"expected_version": 1},
+        )
+
+    assert created["sync_next_at"] is None
+    assert requested.status_code == 409
+
+
+def test_auth_profile_change_revokes_ready_state_and_schedules_revalidation(
+    auth,
+    mutation_headers,
+):
+    with TestClient(app) as client:
+        created = _register(client, auth, mutation_headers).json()
+
+    with SessionLocal() as db:
+        repository = db.get(Repository, created["id"])
+        repository.status = "ready"
+        repository.default_branch = "main"
+        repository.last_known_commit = "a" * 40
+        repository.last_fetched_at = repository.created_at
+        repository.sync_finished_at = repository.created_at
+        repository.sync_next_at = repository.created_at
+        db.commit()
+
+    with TestClient(app) as client:
+        changed = client.patch(
+            f"/api/repositories/{created['id']}",
+            auth=auth,
+            headers=mutation_headers,
+            json={
+                "expected_version": 1,
+                "auth_profile_ref": "git-readonly-secondary",
+            },
+        )
+
+    assert changed.status_code == 200, changed.text
+    payload = changed.json()
+    assert payload["status"] == "pending_validation"
+    assert payload["sync_next_at"] is not None
+    assert payload["version"] == 2

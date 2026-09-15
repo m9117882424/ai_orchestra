@@ -1,5 +1,6 @@
 .env
 .env.providers
+.env.repositories
 runtime/opencode.json
 runtime/model-router.yaml
 data/

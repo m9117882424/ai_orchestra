@@ -100,10 +100,13 @@ post-deploy smoke. Фактические identifiers и ограничения 
 
 # G2 — Repository & Workspace Platform
 
-Статус: **активный engineering gate**. Первый инкремент — fail-closed Repository
-Registry; gate остаётся открытым до Repo Manager, task worktrees и обязательного
-workspace preflight. Контракт Registry описан в
-[`G2_REPOSITORY_REGISTRY.md`](G2_REPOSITORY_REGISTRY.md).
+Статус: **engineering candidate 0.9.0, ещё не принят в production**. G2.1
+fail-closed Registry, G2.2 trusted Repo Manager и G2.3 durable task workspaces
+реализованы в feature-ветке. Gate закрывается только после зелёного Docker CI,
+review и migration-first production rollout. Контракты описаны в
+[`G2_REPOSITORY_REGISTRY.md`](G2_REPOSITORY_REGISTRY.md) и
+[`G2_TRUSTED_REPO_MANAGER.md`](G2_TRUSTED_REPO_MANAGER.md), а workspace lifecycle
+— в [`G2_TASK_WORKSPACES.md`](G2_TASK_WORKSPACES.md).
 
 ### Repository Registry
 Для любого Git repository:
@@ -117,12 +120,14 @@ workspace preflight. Контракт Registry описан в
 
 ### Repo Manager
 Отдельный trusted service:
-- register/validate;
-- clone/fetch/prune;
-- default branch detection;
-- task branch/worktree;
-- status/diff/tree identity;
-- cleanup;
+- [x] register/validate;
+- [x] read-only bare mirror fetch/prune;
+- [x] default branch detection и commit reconciliation;
+- [x] DNS/IP/TLS validation, redirect deny и отдельная credential boundary;
+- [x] durable lease/fencing, retry/recovery и audit;
+- [x] isolated task branch/workspace из локального mirror без remote;
+- [x] immutable execution binding и status/diff/tree identity;
+- [x] fail-closed inspection и conservative cleanup;
 - prepare commit;
 - push только через scoped policy/approval.
 
@@ -130,12 +135,15 @@ AI/OpenCode не получает Git credentials.
 
 ### Workspace preflight
 До первого LLM inference:
-- repo доступен;
-- base SHA существует;
-- worktree создан;
-- expected files доступны;
-- toolchain готов;
-- workspace writable/read-only policy соответствует роли.
+- [x] repo имеет trusted `ready` state;
+- [x] exact base SHA существует в локальном mirror;
+- [x] standalone workspace создан атомарно;
+- [x] tracked files, tree, symlinks и manifest проверены;
+- [x] write/read-only policy соответствует Workspace Manager, OpenCode и worker;
+- [x] проверка повторена execution-worker непосредственно перед prompt.
+
+Проверка произвольного project toolchain и безопасный запуск build/test scripts
+относятся к disposable runner G3.
 
 Если preflight не пройден — inference не запускается.
 

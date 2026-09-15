@@ -60,6 +60,8 @@ OpenCode никогда не получает provider API keys или `MODEL_RO
 
 - `.env` — operational/control credentials, router admin credential и отдельный inference client credential;
 - `.env.providers` — только реальные ключи AI-провайдеров; файл получает только `model-router`;
+- `.env.repositories` — host-bound read-only Git profiles; файл получает только
+  `repo-manager`;
 - OpenCode не получает пароли control-plane/PostgreSQL, provider keys или router admin key;
 - GitHub write token не передается агентскому контейнеру;
 - `/connect` в OpenCode не используется для production credentials;
@@ -69,9 +71,9 @@ OpenCode никогда не получает provider API keys или `MODEL_RO
 
 ```text
 control-db (internal)
-  postgres <-> control-plane
+  postgres <-> control-plane / execution-worker / repo-manager / workspace-manager
 
-model-net
+model-net (internal)
   opencode <-> model-gateway
 
 router-backend (internal)
@@ -79,12 +81,37 @@ router-backend (internal)
 
 provider-egress
   model-router -> AI provider APIs
+
+repository-egress
+  repo-manager -> разрешённые HTTPS Git remotes
+
+repository-mirrors volume
+  repo-manager (rw) -> workspace-manager (ro)
+
+task-workspaces volume
+  workspace-manager (rw) -> opencode (rw) / execution-worker (ro)
 ```
+
+Legacy operator worktrees монтируются отдельно в
+`/workspace/worktrees/manual`; bind mount на общий `/workspace/worktrees`
+запрещён, потому что он может скрыть managed named volume внутри OpenCode.
+Managed volume принадлежит UID/GID `10001:10001` с режимом `0700`. OpenCode
+получает `DAC_OVERRIDE` и `FOWNER`, чтобы его UID 0 мог изменять содержимое и file
+mode workspace. Workspace Manager запускается root только в fail-closed launcher,
+который переходит на UID/GID 10001 и перед exec оставляет в effective, permitted
+и ambient наборах только эти две filesystem capabilities. Временные
+`SETUID`/`SETGID` приложению не наследуются. Это позволяет инспектировать и
+очищать root-owned пути OpenCode; rootfs и mirror mount остаются read-only,
+egress отсутствует. Execution Worker видит volume только read-only без
+capabilities.
 
 Дополнительные правила:
 
 - PostgreSQL control-plane недоступен агентскому контейнеру;
 - admin endpoint Model Router недоступен агентскому контейнеру;
+- Git credentials и mirror недоступны OpenCode и Execution Worker;
+- Workspace Manager не имеет network egress, а task workspace создаёт только из
+  локального read-only mirror;
 - Docker socket хоста не монтируется;
 - web ports публикуются только на `127.0.0.1`;
 - CPU/RAM limits и log rotation заданы в Compose;
@@ -131,5 +158,8 @@ Trading Platform — отдельный проект. Допустимо име�
 - OpenCode использует только `MODEL_ROUTER_CLIENT_KEY`;
 - runtime OpenCode/Router config соответствует выбранному `KEY_MODE`;
 - Docker network membership соответствует этой схеме;
+- task execution до inference связан с exact repository/base/workspace identity
+  и проходит повторную read-only filesystem verification;
+- workspace с изменениями или неоднозначным evidence не удаляется автоматически;
 - в core-моделях Orchestra нет продуктовых trading risk parameters;
 - runtime версии закреплены, а не используют `latest`.

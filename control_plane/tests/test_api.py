@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 import pytest
 
-from control_plane.app.db import SessionLocal
+from control_plane.app.db import SessionLocal, engine
 from control_plane.app.main import app
 from control_plane.app.models import ExecutionRun, Repository, Task, TaskWorkspace
 from control_plane.app.opencode_client import OpenCodeError
@@ -279,6 +279,36 @@ def test_development_execution_is_durably_preparing_before_opencode(auth, mutati
         assert workspace is not None
         assert workspace.status == "pending"
         assert workspace.base_commit == started.json()["base_commit"]
+
+
+def test_development_execution_respects_workspace_fk_order(auth, mutation_headers):
+    # Production PostgreSQL enforces execution_runs.workspace_id immediately.
+    # Keep SQLite lightweight for the suite, but enforce FKs in this regression.
+    with engine.connect() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        connection.commit()
+
+    try:
+        with TestClient(app) as client:
+            task_id = _create_development_task(client, auth, mutation_headers)
+            started = client.post(
+                f"/api/tasks/{task_id}/execute",
+                auth=auth,
+                headers=mutation_headers,
+            )
+
+        assert started.status_code == 201
+        workspace_id = started.json()["workspace_id"]
+        with SessionLocal() as db:
+            workspace = db.get(TaskWorkspace, workspace_id)
+            run = db.get(ExecutionRun, started.json()["id"])
+            assert workspace is not None
+            assert run is not None
+            assert run.workspace_id == workspace.id
+    finally:
+        with engine.connect() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            connection.commit()
 
 
 def test_second_execute_is_rejected_while_first_is_preparing(auth, mutation_headers):

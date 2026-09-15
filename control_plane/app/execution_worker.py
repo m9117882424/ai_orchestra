@@ -22,7 +22,7 @@ from .execution_protocol import (
     execution_prompt,
     execution_session_title,
 )
-from .models import ExecutionRun, Task, TaskWorkspace
+from .models import ExecutionRun, Repository, Task, TaskWorkspace
 from .opencode_client import (
     OpenCodeClient,
     OpenCodeError,
@@ -867,6 +867,74 @@ def _renew_before_external_side_effect(
         return manager.heartbeat(db, lease)
 
 
+def _prompt_with_repository_trust_gate(
+    manager: ExecutionLeaseManager,
+    client: OpenCodeClient,
+    lease: ExecutionLease,
+    session_id: str,
+    prompt: str,
+    *,
+    message_id: str,
+    part_id: str,
+) -> str:
+    """Start inference only while the bound repository remains trusted.
+
+    Contract-v2 dispatch holds the Registry row lock across the one HTTP call
+    that can start inference. A concurrent disable/revalidation therefore either
+    commits first and blocks this call, or waits until the already-authorized
+    call has crossed its side-effect boundary.
+    """
+    binding = lease.workspace_binding
+    if binding is None:
+        if not _renew_before_external_side_effect(manager, lease):
+            return "lost"
+        client.prompt_async(
+            session_id,
+            prompt,
+            message_id=message_id,
+            part_id=part_id,
+        )
+        return "prompted"
+
+    rejection_code: str | None = None
+    with SessionLocal() as db:
+        repository = db.scalar(
+            select(Repository)
+            .where(Repository.id == binding.repository_id)
+            .with_for_update()
+        )
+        if repository is None or not repository.enabled:
+            rejection_code = "repository_trust_revoked"
+        elif repository.status != "ready":
+            rejection_code = "repository_not_ready"
+        else:
+            now = utc_now()
+            run = manager._locked_owned_run(db, lease, now)
+            if run is None or run.status != "queued" or run.cancel_requested_at is not None:
+                db.rollback()
+                return "lost"
+            deadline_at = _as_utc(run.deadline_at)
+            if deadline_at is not None and deadline_at <= now:
+                db.rollback()
+                return "deadline"
+            run.heartbeat_at = now
+            run.lease_expires_at = manager._deadline(now)
+            run.updated_at = now
+            client.prompt_async(
+                session_id,
+                prompt,
+                message_id=message_id,
+                part_id=part_id,
+            )
+            db.commit()
+            return "prompted"
+        db.rollback()
+
+    assert rejection_code is not None
+    with SessionLocal() as db:
+        return manager.mark_runtime_workspace_rejected(db, lease, rejection_code)
+
+
 def _renew_before_cleanup_side_effect(
     manager: ExecutionLeaseManager,
     lease: ExecutionLease,
@@ -1070,14 +1138,19 @@ def dispatch_execution(
         # before the only call that starts inference.
         if not _verify_workspace_before_inference(manager, lease):
             return "rejected"
-        if not _renew_before_external_side_effect(manager, lease):
-            return "lost"
-        client.prompt_async(
+        prompt_outcome = _prompt_with_repository_trust_gate(
+            manager,
+            client,
+            lease,
             session_id,
             prompt,
             message_id=message_id,
             part_id=part_id,
         )
+        if prompt_outcome == "deadline":
+            return timeout_execution(manager, client, lease)
+        if prompt_outcome != "prompted":
+            return prompt_outcome
 
     if _deadline_elapsed(lease):
         return timeout_execution(manager, client, lease)

@@ -24,7 +24,9 @@ dependency scripts остаётся задачей G3.
 `workspace-manager` находится только в `control-db`, не имеет egress, порта,
 provider key или Git credential. Он создаёт workspace исключительно из уже
 проверенного локального mirror. `execution-worker` не может изменить workspace,
-а OpenCode не видит mirror и не может получить remote credential.
+а OpenCode не видит mirror и не может получить remote credential. `model-net`
+является internal Docker network: прямой Internet egress OpenCode закрыт, а
+provider network доступен только Model Router.
 
 Named volume принадлежит UID/GID `10001:10001` и имеет режим `0700`.
 One-shot initializer без сети и с read-only rootfs проверяет этот invariant до
@@ -32,7 +34,10 @@ One-shot initializer без сети и с read-only rootfs проверяет �
 `DAC_OVERRIDE` и `FOWNER`, необходимые его UID 0 для записи и изменения mode в
 этом volume; Docker socket, mirror, Git credentials и control-plane/provider
 secrets ему по-прежнему недоступны. Execution Worker монтирует тот же volume
-только read-only.
+только read-only. Workspace Manager получает те же две filesystem capabilities
+только внутри своих mounts, чтобы гарантированно инспектировать, архивировать и
+удалять root-owned результаты OpenCode; rootfs остаётся read-only, mirror mount —
+read-only, а сеть — только `control-db`.
 
 ## Durable lifecycle
 
@@ -53,8 +58,10 @@ secrets ему по-прежнему недоступны. Execution Worker мо
    в `ready`, а execution — в `queued`. Поэтому отзыв repository trust во время
    checkout не может пересечь границу публикации очереди.
 6. Execution Worker сверяет DB binding и read-only filesystem evidence, затем
-   повторяет проверку непосредственно перед единственным prompt, запускающим
-   inference.
+    повторяет проверку непосредственно перед единственным prompt, запускающим
+    inference. На границе prompt он удерживает row lock Repository и требует
+    `enabled + ready`: конкурентный отзыв trust либо завершается первым и
+    блокирует inference, либо ждёт завершения уже авторизованного prompt POST.
 7. Все OpenCode calls выполняются с `X-OpenCode-Directory`, привязанным к этому
    workspace.
 8. После `completed`, `failed`, timeout или cancellation workspace ставится в
@@ -179,8 +186,10 @@ Leases имеют owner, expiry, generation и record version. Retry испол�
 
 - Workspace — логическая изоляция между задачами, но ещё не G3 sandbox для
   запуска недоверенного кода.
-- OpenCode по назначению может писать только в task workspace volume; это не
-  разрешает внешние Git actions.
+- OpenCode policy запрещает `external_directory`; это ограничивает штатные tools
+  назначенным task workspace, но не заменяет будущую OS-level изоляцию G3.
+- OpenCode не имеет прямого egress и по назначению может писать только в task
+  workspace volume; это не разрешает внешние Git actions.
 - Mirror после DR пересоздаётся Repo Manager из remote; credentials восстанавливаются
   отдельным secret process.
 - Push/PR/merge/deploy остаются DENY до content-addressed approvals и

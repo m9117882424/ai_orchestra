@@ -325,6 +325,7 @@ assert nets("workspace-manager")=={"control-db"}, nets("workspace-manager")
 assert nets("opencode")=={"model-net"}, nets("opencode")
 assert nets("model-gateway")=={"model-net","router-backend"}, nets("model-gateway")
 assert nets("model-router")=={"router-backend","provider-egress"}, nets("model-router")
+assert (cfg.get("networks") or {}).get("model-net", {}).get("internal") is True
 assert not (nets("opencode") & nets("model-router")), "OpenCode must not share a network with router admin service"
 assert not (nets("repo-manager") & nets("opencode")), "Repo Manager must not share an OpenCode network"
 assert not (nets("repo-manager") & nets("model-router")), "Repo Manager must not share a router network"
@@ -354,6 +355,8 @@ mounts=repo.get("volumes") or []
 assert len(mounts)==1 and mounts[0].get("target")=="/var/lib/ai-orchestra/repositories", mounts
 workspace=services["workspace-manager"]
 assert not workspace.get("ports"), "Workspace Manager must not publish ports"
+assert set(workspace.get("cap_drop") or [])=={"ALL"}
+assert set(workspace.get("cap_add") or [])=={"DAC_OVERRIDE","FOWNER"}
 workspace_env=workspace.get("environment") or {}
 assert workspace_env.get("CONTROL_PLANE_SERVER_PASSWORD")=="workspace-manager-does-not-use-manager-auth"
 assert workspace_env.get("CONTROL_PLANE_OPENCODE_PASSWORD")=="workspace-manager-does-not-use-opencode-auth"

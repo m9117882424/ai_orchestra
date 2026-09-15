@@ -179,7 +179,7 @@ docker exec "$db_container" psql -U "$db_user" -d "$db_name" -AtF $'\t' \
 workspace_restore_file="$staging_dir/task-workspace-restore.json"
 python3 - \
   "$backup_format" "$workspace_restore_root" "$workspace_rows_file" \
-  "$workspace_restore_file" <<'PY'
+  "$workspace_restore_file" "$project_root" <<'PY'
 import hashlib
 import json
 from pathlib import Path
@@ -187,7 +187,10 @@ import re
 import stat
 import sys
 
-backup_format, root_raw, rows_raw, evidence_raw = sys.argv[1:]
+backup_format, root_raw, rows_raw, evidence_raw, project_root = sys.argv[1:]
+sys.path.insert(0, project_root)
+from scripts.workspace_restore_verifier import verify_restored_git_workspace
+
 root = Path(root_raw)
 rows = []
 for line in Path(rows_raw).read_text(encoding="utf-8").splitlines():
@@ -359,6 +362,7 @@ def verify_manifest(row, final: Path) -> None:
             or payload.get("tracked_entries") != row["tracked_entries"]
         ):
             raise ValueError("manifest/database preflight evidence mismatch")
+    verify_restored_git_workspace(final, payload, status=row["status"])
     workspace_manifests_verified += 1
 
 required_workspace_directories_verified = 0

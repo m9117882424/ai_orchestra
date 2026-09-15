@@ -828,6 +828,46 @@ class _SuccessfulInferenceClient:
         ]
 
 
+class _RevokingInferenceClient(_SuccessfulInferenceClient):
+    def __init__(self, repository_id: str):
+        super().__init__()
+        self.repository_id = repository_id
+
+    def create_session(self, title, *, metadata=None):
+        session = super().create_session(title, metadata=metadata)
+        _revoke_repository(self.repository_id)
+        return session
+
+
+def test_repository_revocation_after_session_creation_blocks_prompt(tmp_path):
+    repository_id = str(uuid4())
+    mirror_root, commit = _build_mirror(tmp_path, repository_id)
+    workspace_root = tmp_path / "workspaces"
+    filesystem = _filesystem(mirror_root, workspace_root)
+    source_lease = _lease(workspace_root, repository_id, commit)
+    prepared = filesystem.prepare(source_lease, heartbeat=lambda: True)
+    _seed_ready_bound_execution(source_lease, prepared)
+    manager = ExecutionLeaseManager(
+        "runtime-revoked",
+        lease_seconds=60,
+        workspace_root=workspace_root,
+    )
+    fake = _RevokingInferenceClient(repository_id)
+
+    with SessionLocal() as db:
+        [dispatch_lease] = manager.claim_available(db, limit=1)
+    assert poll_execution(manager, lambda: fake, dispatch_lease) == "rejected"
+
+    with SessionLocal() as db:
+        run = db.get(ExecutionRun, source_lease.execution_id)
+        workspace = db.get(TaskWorkspace, source_lease.workspace_id)
+    assert fake.create_calls == 1
+    assert fake.prompt_calls == 0
+    assert run is not None and run.status == "failed"
+    assert run.error.endswith("repository_trust_revoked")
+    assert workspace is not None and workspace.status == "invalid"
+
+
 def test_verified_workspace_dispatches_and_terminal_run_queues_inspection(tmp_path):
     repository_id = str(uuid4())
     mirror_root, commit = _build_mirror(tmp_path, repository_id)

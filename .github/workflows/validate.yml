@@ -41,7 +41,7 @@ jobs:
               assert isinstance(data, dict) and isinstance(data.get('model_list'), list) and data['model_list'], path
           print('[OK] router YAML parsed')
           PY
-          python3 -m compileall -q control_plane/app control_plane/migrations control_plane/tests scripts/model_router_smoke.py scripts/static_security_check.py scripts/verify_dependency_locks.py scripts/temporal_durable_poc.py
+          python3 -m compileall -q control_plane/app control_plane/migrations control_plane/tests scripts/model_router_smoke.py scripts/static_security_check.py scripts/verify_dependency_locks.py scripts/temporal_durable_poc.py scripts/workspace_restore_verifier.py
           node --check control_plane/app/static/app.js
 
       - name: Проверить shell-скрипты
@@ -144,7 +144,12 @@ jobs:
             printf "opencode-write\n" >> /workspace/worktrees/managed/.ci-workspace-boundary &&
             grep -Fxq opencode-write /workspace/worktrees/managed/.ci-workspace-boundary &&
             chmod 0640 /workspace/worktrees/managed/.ci-workspace-boundary &&
-            test "$(stat -c %a /workspace/worktrees/managed/.ci-workspace-boundary)" = 640
+            test "$(stat -c %a /workspace/worktrees/managed/.ci-workspace-boundary)" = 640 &&
+            mkdir /workspace/worktrees/managed/.ci-root-owned &&
+            printf "root-owned\n" > /workspace/worktrees/managed/.ci-root-owned/output.txt &&
+            chmod 0700 /workspace/worktrees/managed/.ci-root-owned &&
+            chmod 0600 /workspace/worktrees/managed/.ci-root-owned/output.txt &&
+            test "$(stat -c %u:%g /workspace/worktrees/managed/.ci-root-owned)" = 0:0
           '
           echo "[OK] OpenCode write access to the same named volume"
           echo "[CHECK] Execution Worker read-only access"
@@ -161,6 +166,8 @@ jobs:
           echo "[OK] Execution Worker read-only access"
           echo "[CHECK] Workspace Manager cleanup access"
           docker compose run --rm -T --no-deps workspace-manager sh -lc '
+            grep -Fxq root-owned /workspace/worktrees/managed/.ci-root-owned/output.txt &&
+            rm -r /workspace/worktrees/managed/.ci-root-owned &&
             rm /workspace/worktrees/managed/.ci-workspace-boundary
           '
           echo "[OK] Workspace Manager cleanup access"

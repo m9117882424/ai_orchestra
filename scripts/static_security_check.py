@@ -88,6 +88,7 @@ def main() -> int:
     assert network_set(services["model-router"]) == {"router-backend", "provider-egress"}
     assert network_set(services["model-gateway"]) == {"model-net", "router-backend"}
     assert network_set(services["opencode"]) == {"model-net"}
+    assert (cfg.get("networks") or {}).get("model-net", {}).get("internal") is True
     assert not (network_set(services["repo-manager"]) & network_set(services["opencode"]))
     assert not (network_set(services["repo-manager"]) & network_set(services["model-router"]))
     assert not (network_set(services["workspace-manager"]) & network_set(services["opencode"]))
@@ -178,6 +179,11 @@ def main() -> int:
         )
     assert not workspace_manager.get("ports")
     assert workspace_manager.get("read_only") is True
+    assert set(workspace_manager.get("cap_drop") or []) == {"ALL"}
+    assert set(workspace_manager.get("cap_add") or []) == {
+        "DAC_OVERRIDE",
+        "FOWNER",
+    }
     assert workspace_manager.get("command") == ["python", "-m", "app.workspace_manager"]
     assert workspace_manager.get("image") != services["control-plane"].get("image")
     assert (workspace_manager.get("build") or {}).get("target") == "workspace-manager"
@@ -261,6 +267,7 @@ def main() -> int:
 
     # OpenCode talks only to the inference gateway with a non-admin client credential.
     gateway = json.loads((ROOT / "config/opencode.gateway.json").read_text(encoding="utf-8"))
+    assert gateway["permission"]["external_directory"] == "deny"
     assert set(gateway["provider"]) == {"orchestra"}
     options = gateway["provider"]["orchestra"]["options"]
     assert options["baseURL"] == "http://model-gateway:8080/v1"
@@ -430,6 +437,7 @@ def main() -> int:
     assert "task_workspace_restore" in restore_drill_script
     assert "task-workspaces.tar.gz" in restore_drill_script
     assert "Restored workspace directories missing database rows" in restore_drill_script
+    assert "verify_restored_git_workspace" in restore_drill_script
     assert "docker compose exec" not in restore_drill_script, "Restore drill must never execute against production Compose services"
     assert "BACKUP_OFFSITE_ENCRYPTION_AT_REST_CONFIRMED" in offsite_script
     assert "BACKUP_OFFSITE_AUTHENTICATED_TRANSPORT_CONFIRMED" in offsite_script

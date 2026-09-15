@@ -206,17 +206,21 @@ trusted Repo Manager. Для public repositories он остаётся пуст�
 ## Docker isolation
 
 - `control-db` — только PostgreSQL + control-plane, internal network;
-- `model-net` — только OpenCode + Model Gateway;
+- `model-net` — internal network только для OpenCode + Model Gateway, без прямого
+  Internet egress;
 - `router-backend` — только Model Gateway + Model Router, internal network;
 - `provider-egress` — Model Router для исходящих AI API;
 - `repository-egress` — только trusted Repo Manager для HTTPS Git read;
 - Workspace Manager находится только в `control-db`, читает mirror read-only и
   один владеет lifecycle task workspace volume;
 - Execution Worker видит task workspace volume read-only, OpenCode — read/write;
+- Workspace Manager имеет только `DAC_OVERRIDE`/`FOWNER` для гарантированной
+  инспекции, backup и cleanup root-owned результатов OpenCode внутри volume;
 - legacy operator worktrees доступны OpenCode через отдельный
   `/workspace/worktrees/manual`; родительский bind mount не может скрыть managed
   task workspace volume;
 - OpenCode не находится в сети control-plane DB или router admin service;
+- OpenCode policy запрещает доступ tools за пределы назначенного workspace;
 - Repo Manager не находится в сетях OpenCode, Gateway или Model Router;
 - Docker socket хоста не монтируется;
 - все web/diagnostic ports привязаны только к `127.0.0.1`;

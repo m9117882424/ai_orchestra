@@ -46,7 +46,9 @@ This proves archive integrity/structure. It does **not** prove recoverability by
 4. runs the **current checked-out Control Plane image** against the restored copy only;
 5. executes `python -m app.schema_cli migrate` and `check` on the copy;
 6. extracts the workspace snapshot only into an isolated temporary directory and
-   reconciles directory/manifest identity against restored DB workspace rows;
+   reconciles directory/manifest identity against restored DB workspace rows,
+   then runs bounded Git `rev-parse`, `fsck`, index and status checks. A `ready`
+   workspace must still equal its clean preflight evidence;
 7. records the resulting Alembic revision and row counts for every public table;
 8. destroys the disposable database/network/volume;
 9. writes evidence under `backups/drills/restore-drill-*.json` with mode `600`.

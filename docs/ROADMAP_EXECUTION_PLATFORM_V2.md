@@ -152,14 +152,15 @@ AI/OpenCode не получает Git credentials.
 # G3 — Isolated Execution & Multi-Agent Department
 
 ### Execution sandbox
-- disposable runner;
-- no Docker socket;
-- no host `/root`/`.env`;
-- no management DB/control-plane network;
-- CPU/RAM/PID/time limits;
-- egress policy;
-- explicit writable workspace;
-- untrusted install/build/test scripts только здесь.
+- [x] disposable runner boundary (G3.1);
+- [x] no Docker socket in agents/Runner Manager/sandbox;
+- [x] no host `/root`/`.env` in sandbox;
+- [x] no management DB/control-plane network in sandbox;
+- [x] CPU/RAM/PID/time limits;
+- [x] egress deny-by-default (`network=none`) for current sandbox profile;
+- [x] read-only authoritative source + disposable writable workspace;
+- [x] durable `runner_jobs`, lease/fencing/recovery and trust recheck (G3.2);
+- [ ] route all untrusted install/build/test child-runs through Runner Manager automatically.
 
 ### Real orchestration
 Не prompt-only delegation.

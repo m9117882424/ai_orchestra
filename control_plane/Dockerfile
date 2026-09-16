@@ -53,6 +53,12 @@ USER orchestra
 
 CMD ["python", "-m", "app.execution_worker"]
 
+FROM application-base AS runner-manager
+
+USER orchestra
+
+CMD ["python", "-m", "app.runner_manager"]
+
 FROM application-base AS control-plane
 
 USER orchestra

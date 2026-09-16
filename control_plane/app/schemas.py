@@ -1,6 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -347,6 +348,66 @@ class TaskWorkspaceRead(BaseModel):
     last_error_code: str | None
     version: int
     created_at: datetime
+    updated_at: datetime
+
+
+RunnerJobStatus = Literal[
+    "queued",
+    "running",
+    "completed",
+    "failed",
+    "timed_out",
+    "cleanup_uncertain",
+    "rejected",
+]
+
+
+class RunnerJobCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: UUID
+    argv: list[str] = Field(min_length=1, max_length=128)
+    timeout_seconds: int = Field(default=300, ge=1, le=3600, strict=True)
+
+    @field_validator("argv")
+    @classmethod
+    def validate_argv(cls, value: list[str]) -> list[str]:
+        total = 0
+        for item in value:
+            if not item or len(item) > 4096 or "\x00" in item:
+                raise ValueError("argv contains an invalid argument")
+            total += len(item.encode("utf-8"))
+        if total > 32768:
+            raise ValueError("argv is too large")
+        return value
+
+
+class RunnerJobRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    execution_id: str
+    repository_id: str
+    workspace_id: str
+    idempotency_key: str
+    status: RunnerJobStatus
+    argv: list[str]
+    timeout_seconds: int
+    base_commit: str
+    preflight_digest: str
+    runner_image_id: str | None
+    exit_code: int | None
+    stdout: str
+    stderr: str
+    output_truncated: bool
+    cleanup_confirmed: bool | None
+    lease_generation: int
+    heartbeat_at: datetime | None
+    failure_count: int
+    last_error_code: str | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
     updated_at: datetime
 
 

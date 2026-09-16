@@ -11,8 +11,8 @@ RUN groupadd --gid "${RUNNER_GID}" orchestra \
     && rm -rf /var/lib/apt/lists/* \
     && chmod 0755 /home/orchestra
 
-COPY entrypoint.py /opt/ai-orchestra-runner/entrypoint.py
-RUN chmod 0555 /opt/ai-orchestra-runner/entrypoint.py
+COPY entrypoint.py source_snapshot.py /opt/ai-orchestra-runner/
+RUN chmod 0555 /opt/ai-orchestra-runner/entrypoint.py /opt/ai-orchestra-runner/source_snapshot.py
 
 WORKDIR /workspace
 USER orchestra

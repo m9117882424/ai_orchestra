@@ -40,7 +40,7 @@ REPO_ID="$(uuid)"
 TASK_ID="$(uuid)"
 WS_ID="$(uuid)"
 EX_ID="$(uuid)"
-COMMIT="$(git rev-parse HEAD)"
+COMMIT=""
 DIGEST="$(python3 -c 'print("d"*64)')"
 
 cleanup() {
@@ -114,6 +114,23 @@ docker build --pull --target control-plane -t "$CONTROL_TAG" \
 
 echo "[2/9] create authoritative workspace and host runnerd"
 docker volume create "$VOLUME" >/dev/null
+export WS_ID
+docker run --rm --user 0:0 --entrypoint sh \
+  -v "$VOLUME:/v" -e WS_ID "$IMAGE_ID" -lc '
+set -eu
+root="/v/$WS_ID"
+mkdir -p "$root"
+git -C "$root" init -q
+git -C "$root" config user.email smoke@example.invalid
+git -C "$root" config user.name smoke
+printf "authoritative\n" > "$root/marker"
+git -C "$root" add marker
+GIT_AUTHOR_DATE=2026-09-16T00:00:00Z GIT_COMMITTER_DATE=2026-09-16T00:00:00Z \
+  git -C "$root" commit -qm initial
+chown -R 10001:10001 "$root"
+chmod 700 "$root" "$root/.git"
+'
+COMMIT="$(docker run --rm --entrypoint git -v "$VOLUME:/v:ro" -e WS_ID "$IMAGE_ID" -C "/v/$WS_ID" rev-parse HEAD)"
 export WS_ID EX_ID COMMIT DIGEST
 docker run --rm --user 0:0 --entrypoint python3 \
   -v "$VOLUME:/v" -e WS_ID -e EX_ID -e COMMIT -e DIGEST \
@@ -121,8 +138,6 @@ docker run --rm --user 0:0 --entrypoint python3 \
 import json, os
 from pathlib import Path
 root = Path("/v") / os.environ["WS_ID"]
-git_dir = root / ".git"
-git_dir.mkdir(parents=True)
 manifest = {
     "contract_version": 1,
     "workspace_id": os.environ["WS_ID"],
@@ -131,12 +146,9 @@ manifest = {
     "preflight_digest": os.environ["DIGEST"],
     "workspace_path": f"/workspace/worktrees/managed/{os.environ['"'"'WS_ID'"'"']}",
 }
-(git_dir / "ai-orchestra-workspace.json").write_text(json.dumps(manifest))
-(root / "marker").write_text("authoritative\n")
-for path in (root, git_dir, root / "marker", git_dir / "ai-orchestra-workspace.json"):
-    os.chown(path, 10001, 10001)
-root.chmod(0o700)
-git_dir.chmod(0o700)
+path = root / ".git" / "ai-orchestra-workspace.json"
+path.write_text(json.dumps(manifest))
+os.chown(path, 10001, 10001)
 '
 export RUNNERD_SOCKET_PATH="$SOCKET"
 export RUNNERD_WORKSPACE_VOLUME="$VOLUME"

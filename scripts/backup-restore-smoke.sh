@@ -4,12 +4,17 @@ set -Eeuo pipefail
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$project_root"
 
-export COMPOSE_PROJECT_NAME="ai-orchestra-backup-restore-smoke-${GITHUB_RUN_ID:-$$}"
-if [[ "$COMPOSE_PROJECT_NAME" == "ai-development-department" ]]; then
-  echo "[FAIL] Refusing destructive backup/restore smoke in production Compose namespace" >&2
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-ai-orchestra-backup-restore-smoke-${GITHUB_RUN_ID:-$$}}"
+if [[ ! "$COMPOSE_PROJECT_NAME" =~ ^ai-orchestra-backup-restore-smoke-[A-Za-z0-9_.-]+$ ]]; then
+  echo "[FAIL] Backup/restore smoke requires an isolated ai-orchestra-backup-restore-smoke-* namespace" >&2
   exit 1
 fi
-BACKUP_ROOT="$(mktemp -d /tmp/ai-orchestra-backup-smoke.XXXXXX)"
+BACKUP_ROOT="${BACKUP_ROOT:-$(mktemp -d /tmp/ai-orchestra-backup-smoke.XXXXXX)}"
+if [[ "$BACKUP_ROOT" != /tmp/ai-orchestra-backup-smoke.* ]]; then
+  echo "[FAIL] Backup/restore smoke BACKUP_ROOT must be an isolated /tmp path" >&2
+  exit 1
+fi
+mkdir -p "$BACKUP_ROOT"
 export BACKUP_ROOT
 SMOKE_TMP="$(mktemp -d /tmp/ai-orchestra-backup-runtime.XXXXXX)"
 SMOKE_CONTROL_IMAGE="ai-orchestra/control-plane-backup-smoke:${GITHUB_RUN_ID:-$$}"
@@ -148,7 +153,7 @@ sha = hashlib.sha256(archive.read_bytes()).hexdigest()
 assert payload["result"] == "success"
 assert payload["source_backup_sha256"] == sha
 assert payload["pre_migration_revision"] == "unversioned"
-assert payload["post_migration_revision"] == "20260916_0008"
+assert payload["post_migration_revision"] == "20260916_0009"
 assert payload["restored_table_counts"].get("audit_events", 0) >= 1
 assert payload["restored_table_counts"].get("alembic_version", 0) == 1
 assert payload["restored_table_counts"].get("repositories") == 0
@@ -161,10 +166,10 @@ assert payload["task_workspace_restore"] == {
     "required_workspace_directories_verified": 0,
     "workspace_manifests_verified": 0,
 }
-assert payload["runner_job_restore"] == {"bindings_verified": 0, "database_rows": 0}
+assert payload["runner_job_restore"] == {"bindings_verified": 0, "checkpoint_bindings_verified": 0, "database_rows": 0}
 assert payload["observed_restore_rto_seconds"] >= 0
 assert payload["observed_backup_age_seconds"] >= 0
-print("[OK] Historical 0001 backup was restored, adopted to 0008 and retained the seeded audit marker")
+print("[OK] Historical 0001 backup was restored, adopted to 0009 and retained the seeded audit marker")
 PY
 
 echo "[INFO] Creating current-head backup with durable runner-job evidence"
@@ -191,6 +196,8 @@ idempotency_key = str(uuid4())
 commit = "a" * 40
 tree = "b" * 40
 digest = "c" * 64
+snapshot_digest = "e" * 64
+checkpoint_digest = "f" * 64
 image_id = "sha256:" + "d" * 64
 with SessionLocal() as db:
     db.add(Repository(
@@ -222,8 +229,9 @@ with SessionLocal() as db:
         id=job_id, execution_id=run_id, repository_id=repo_id, workspace_id=workspace_id,
         idempotency_key=idempotency_key, status="completed",
         argv=["python3", "-c", "print('ok')"], timeout_seconds=30,
-        base_commit=commit, preflight_digest=digest, runner_image_id=image_id,
-        exit_code=0, stdout="ok\n", stderr="", output_truncated=False,
+        base_commit=commit, preflight_digest=digest, source_snapshot_digest=snapshot_digest,
+        checkpoint_digest=checkpoint_digest, checkpoint_command_index=0, checkpoint_label="dr-checkpoint",
+        runner_image_id=image_id, exit_code=0, stdout="ok\n", stderr="", output_truncated=False,
         cleanup_confirmed=True, lease_generation=1, failure_count=0,
         started_at=now, finished_at=now,
     ))
@@ -238,10 +246,10 @@ evidence="$(find "$BACKUP_ROOT/drills" -maxdepth 1 -type f -name 'restore-drill-
 python3 - "$evidence" <<'PYCHECK'
 import json, pathlib, sys
 payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-assert payload["pre_migration_revision"] == "20260916_0008"
-assert payload["post_migration_revision"] == "20260916_0008"
+assert payload["pre_migration_revision"] == "20260916_0009"
+assert payload["post_migration_revision"] == "20260916_0009"
 assert payload["restored_table_counts"].get("runner_jobs") == 1
-assert payload["runner_job_restore"] == {"bindings_verified": 1, "database_rows": 1}
+assert payload["runner_job_restore"] == {"bindings_verified": 1, "checkpoint_bindings_verified": 1, "database_rows": 1}
 assert payload["restored_table_counts"].get("task_workspaces") == 1
 print("[OK] Current-head runner job survived backup/restore with immutable binding verified")
 PYCHECK

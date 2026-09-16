@@ -4,8 +4,14 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 from pathlib import Path
 from uuid import UUID
+
+if __package__:
+    from .source_snapshot import SourceSnapshotError, source_snapshot_digest
+else:
+    from source_snapshot import SourceSnapshotError, source_snapshot_digest
 
 SOURCE = Path("/source")
 WORKSPACE = Path("/workspace")
@@ -41,6 +47,41 @@ def expected_env() -> dict[str, str]:
     digest(values["base_commit"], "base_commit", {40, 64})
     digest(values["preflight_digest"], "preflight_digest", {64})
     return values
+
+
+def expected_snapshot_digest() -> str | None:
+    value = os.environ.get("AI_ORCHESTRA_RUNNER_SOURCE_SNAPSHOT_DIGEST")
+    if value is None:
+        return None
+    return digest(value, "source_snapshot_digest", {64})
+
+
+def verify_git_head(root: Path, expected_base_commit: str) -> None:
+    git_dir = root / ".git"
+    if git_dir.is_symlink() or not git_dir.is_dir():
+        raise RuntimeError("runner git directory invalid")
+    env = dict(os.environ)
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD^{commit}"],
+            cwd=root, env=env, check=True, capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("runner git head unavailable") from exc
+    if result.stdout.strip().lower() != expected_base_commit:
+        raise RuntimeError("runner git head mismatch")
+
+
+def verify_source_snapshot(root: Path, expected_digest: str | None) -> None:
+    if expected_digest is None:
+        return
+    try:
+        actual = source_snapshot_digest(root)
+    except SourceSnapshotError as exc:
+        raise RuntimeError(str(exc)) from exc
+    if actual != expected_digest:
+        raise RuntimeError("runner source snapshot mismatch")
 
 
 def read_manifest() -> dict:
@@ -81,9 +122,14 @@ def copy_source() -> None:
 
 def main() -> int:
     expected = expected_env()
+    snapshot_digest = expected_snapshot_digest()
     payload = read_manifest()
     verify_manifest(payload, expected)
+    verify_git_head(SOURCE, expected["base_commit"])
+    verify_source_snapshot(SOURCE, snapshot_digest)
     copy_source()
+    verify_git_head(WORKSPACE, expected["base_commit"])
+    verify_source_snapshot(WORKSPACE, snapshot_digest)
     os.chdir(WORKSPACE)
     argv = os.sys.argv[1:]
     if not argv:

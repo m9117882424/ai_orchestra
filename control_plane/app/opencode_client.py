@@ -280,6 +280,28 @@ def detect_stalled_tool_call(
     return max(candidates, key=lambda item: item["age_seconds"])
 
 
+def extract_last_assistant_message(messages: list[dict]) -> tuple[str, str] | None:
+    """Return the latest successful assistant message id and visible text."""
+    for item in reversed(messages):
+        info = item.get("info") or {}
+        if info.get("role") != "assistant" or info.get("error"):
+            continue
+        chunks = [
+            str(part["text"])
+            for part in (item.get("parts") or [])
+            if part.get("type") == "text"
+            and part.get("text")
+            and not part.get("progress_only")
+        ]
+        if not chunks:
+            continue
+        message_id = info.get("id")
+        if not isinstance(message_id, str) or not message_id:
+            return None
+        return message_id, "\n".join(chunks).strip()
+    return None
+
+
 def extract_last_assistant_text(messages: list[dict]) -> str:
     for item in reversed(messages):
         info = item.get("info") or {}

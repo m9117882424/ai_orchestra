@@ -288,3 +288,23 @@ def test_runnerd_payload_exposes_only_declared_protocol_fields():
     }
     forbidden = {"volume", "host_path", "network", "environment", "secrets", "image"}
     assert forbidden.isdisjoint(payload)
+
+
+def test_runnerd_payload_carries_optional_source_snapshot_digest():
+    job_id = _seed_job()
+    with SessionLocal() as db:
+        job = db.get(RunnerJob, job_id)
+        job.source_snapshot_digest = "e" * 64
+        db.commit()
+    manager = RunnerJobLeaseManager("worker-a")
+    lease = _claim(manager, job_id)
+    payload = RunnerdClient._payload(lease)
+    assert payload["source_snapshot_digest"] == "e" * 64
+
+
+def test_runnerd_payload_omits_snapshot_for_legacy_manual_job():
+    job_id = _seed_job()
+    manager = RunnerJobLeaseManager("worker-a")
+    lease = _claim(manager, job_id)
+    payload = RunnerdClient._payload(lease)
+    assert "source_snapshot_digest" not in payload

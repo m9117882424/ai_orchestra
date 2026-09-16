@@ -25,7 +25,7 @@ DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 VOLUME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 REQUEST_KEYS = frozenset({
     "version", "operation", "request_id", "workspace_id", "execution_id",
-    "base_commit", "preflight_digest", "argv", "timeout_seconds",
+    "base_commit", "preflight_digest", "source_snapshot_digest", "argv", "timeout_seconds",
 })
 
 
@@ -106,6 +106,7 @@ class RunRequest:
     execution_id: str
     base_commit: str
     preflight_digest: str
+    source_snapshot_digest: str | None
     argv: tuple[str, ...]
     timeout_seconds: int
 
@@ -123,10 +124,16 @@ def parse_run_request(payload: object, config: RunnerConfig) -> RunRequest:
     execution_id = canonical_uuid(payload.get("execution_id"), "execution_id")
     base_commit = payload.get("base_commit")
     preflight_digest = payload.get("preflight_digest")
+    source_snapshot_digest = payload.get("source_snapshot_digest")
     if not isinstance(base_commit, str) or not COMMIT_RE.fullmatch(base_commit):
         raise ValueError("base_commit must be an immutable hex commit")
     if not isinstance(preflight_digest, str) or not DIGEST_RE.fullmatch(preflight_digest):
         raise ValueError("preflight_digest must be a sha256 hex digest")
+    if source_snapshot_digest is not None and (
+        not isinstance(source_snapshot_digest, str)
+        or not DIGEST_RE.fullmatch(source_snapshot_digest)
+    ):
+        raise ValueError("source_snapshot_digest must be a sha256 hex digest")
     argv = payload.get("argv")
     if not isinstance(argv, list) or not 1 <= len(argv) <= 64:
         raise ValueError("argv must contain between 1 and 64 strings")
@@ -146,7 +153,7 @@ def parse_run_request(payload: object, config: RunnerConfig) -> RunRequest:
         raise ValueError("timeout_seconds is outside the allowed range")
     return RunRequest(
         request_id, workspace_id, execution_id, base_commit, preflight_digest,
-        tuple(normalized), timeout,
+        source_snapshot_digest, tuple(normalized), timeout,
     )
 
 
@@ -185,6 +192,11 @@ def build_docker_command(config: RunnerConfig, request: RunRequest) -> list[str]
         "--env", f"AI_ORCHESTRA_RUNNER_EXECUTION_ID={request.execution_id}",
         "--env", f"AI_ORCHESTRA_RUNNER_BASE_COMMIT={request.base_commit}",
         "--env", f"AI_ORCHESTRA_RUNNER_PREFLIGHT_DIGEST={request.preflight_digest}",
+        *(
+            ["--env", f"AI_ORCHESTRA_RUNNER_SOURCE_SNAPSHOT_DIGEST={request.source_snapshot_digest}"]
+            if request.source_snapshot_digest is not None
+            else []
+        ),
         config.image_id,
         *request.argv,
     ]

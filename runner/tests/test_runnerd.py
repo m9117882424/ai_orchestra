@@ -152,3 +152,22 @@ def test_cleanup_fails_closed_on_ambiguous_docker_error(monkeypatch):
 
     monkeypatch.setattr(runnerd.subprocess, "run", lambda *a, **k: Result())
     assert DockerRunner(config()).cleanup(str(uuid4())) is False
+
+
+def test_snapshot_digest_is_optional_for_legacy_jobs_but_bound_when_present():
+    raw = payload()
+    legacy = parse_run_request(raw, config())
+    assert legacy.source_snapshot_digest is None
+    raw["source_snapshot_digest"] = "d" * 64
+    request = parse_run_request(raw, config())
+    assert request.source_snapshot_digest == "d" * 64
+    command = build_docker_command(config(), request)
+    joined = "\n".join(command)
+    assert "AI_ORCHESTRA_RUNNER_SOURCE_SNAPSHOT_DIGEST=" + "d" * 64 in joined
+
+
+def test_snapshot_digest_rejects_invalid_value():
+    raw = payload()
+    raw["source_snapshot_digest"] = "d" * 63
+    with pytest.raises(ValueError, match="source_snapshot_digest"):
+        parse_run_request(raw, config())

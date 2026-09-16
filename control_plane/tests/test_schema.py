@@ -83,7 +83,7 @@ print('STARTED')
 
 
 def test_declared_schema_head_is_stable():
-    assert head_revision() == "20260916_0008"
+    assert head_revision() == "20260916_0009"
 
 
 def test_fresh_database_is_created_by_alembic(tmp_path):
@@ -148,7 +148,7 @@ def test_fresh_database_is_created_by_alembic(tmp_path):
         }
 
     assert set(Base.metadata.tables).issubset(tables)
-    assert revision == "20260916_0008"
+    assert revision == "20260916_0009"
     assert session_column["nullable"] is True
     assert "deadline_at" in execution_columns
     assert "cancel_requested_at" in execution_columns
@@ -242,6 +242,10 @@ def test_fresh_database_is_created_by_alembic(tmp_path):
         "timeout_seconds",
         "base_commit",
         "preflight_digest",
+        "source_snapshot_digest",
+        "checkpoint_digest",
+        "checkpoint_command_index",
+        "checkpoint_label",
         "runner_image_id",
         "cleanup_confirmed",
         "lease_owner",
@@ -252,6 +256,7 @@ def test_fresh_database_is_created_by_alembic(tmp_path):
     assert (("execution_id", "idempotency_key"), True) in runner_indexes
     assert (("status", "next_attempt_at"), False) in runner_indexes
     assert (("lease_expires_at",), False) in runner_indexes
+    assert (("execution_id", "checkpoint_digest", "checkpoint_command_index"), True) in runner_indexes
     assert {
         "ck_runner_jobs_status",
         "ck_runner_jobs_timeout",
@@ -267,6 +272,9 @@ def test_fresh_database_is_created_by_alembic(tmp_path):
         "ck_runner_jobs_terminal_time",
         "ck_runner_jobs_cleanup_state",
         "ck_runner_jobs_exit_code",
+        "ck_runner_jobs_source_snapshot_digest",
+        "ck_runner_jobs_checkpoint_digest",
+        "ck_runner_jobs_checkpoint_binding",
     }.issubset(runner_checks)
 
 
@@ -283,7 +291,7 @@ def test_matching_current_unversioned_database_is_verified_then_stamped(tmp_path
 
     with engine.connect() as connection:
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert revision == "20260916_0008"
+    assert revision == "20260916_0009"
 
 
 def test_unversioned_historical_baseline_is_verified_then_migrated(tmp_path):
@@ -328,7 +336,7 @@ def test_unversioned_historical_baseline_is_verified_then_migrated(tmp_path):
             if column["name"] == "opencode_session_id"
         )
 
-    assert revision == "20260916_0008"
+    assert revision == "20260916_0009"
     assert marker == "Legacy marker"
     assert {
         "lease_owner",
@@ -370,7 +378,7 @@ def test_versioned_0002_database_upgrades_to_current_execution_schema(tmp_path):
         execution_columns = {
             column["name"] for column in inspect(connection).get_columns("execution_runs")
         }
-    assert revision == "20260916_0008"
+    assert revision == "20260916_0009"
     assert after["nullable"] is True
     assert "deadline_at" in execution_columns
     assert "cancel_requested_at" in execution_columns
@@ -432,7 +440,7 @@ def test_versioned_0003_backfills_only_active_execution_deadlines(tmp_path):
             ).all()
         )
 
-    assert revision == "20260916_0008"
+    assert revision == "20260916_0009"
     assert deadlines["queued-run"] is not None
     assert deadlines["completed-run"] is None
 
@@ -469,7 +477,7 @@ def test_versioned_0004_adds_registry_without_mutating_existing_data(tmp_path):
         ).scalar_one()
         tables = set(inspect(connection).get_table_names())
 
-    assert revision == "20260916_0008"
+    assert revision == "20260916_0009"
     assert marker == "marker"
     assert "repositories" in tables
 
@@ -523,7 +531,7 @@ def test_versioned_0005_registry_is_requeued_without_losing_policy(tmp_path):
             )
         ).one()
 
-    assert revision == "20260916_0008"
+    assert revision == "20260916_0009"
     assert tuple(row[:5]) == (
         "existing-repository",
         "github.com/example/existing",
@@ -600,7 +608,7 @@ def test_versioned_0006_preserves_legacy_execution_as_contract_v1(tmp_path):
             text("SELECT count(*) FROM task_workspaces")
         ).scalar_one()
 
-    assert revision == "20260916_0008"
+    assert revision == "20260916_0009"
     assert task_repository is None
     assert tuple(run) == (1, None, None, None, None, "queued", "dispatch_pending")
     assert workspace_count == 0

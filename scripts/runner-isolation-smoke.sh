@@ -17,7 +17,7 @@ cleanup() {
     kill "$RUNNER_PID" 2>/dev/null || true
     wait "$RUNNER_PID" 2>/dev/null || true
   fi
-  for request_id in "${REQ_A:-}" "${REQ_NET:-}" "${REQ_BAD:-}" "${REQ_TIME:-}"; do
+  for request_id in "${REQ_A:-}" "${REQ_NET:-}" "${REQ_BAD:-}" "${REQ_SNAPSHOT:-}" "${REQ_TIME:-}"; do
     if [[ -n "$request_id" ]]; then
       docker rm -f "ai-orchestra-runner-${request_id//-/}" >/dev/null 2>&1 || true
     fi
@@ -28,33 +28,49 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "[1/8] build immutable runner image"
+echo "[1/9] build immutable runner image"
 docker build --pull -t "$TAG" -f runner/Dockerfile runner >/dev/null
 IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$TAG")"
 [[ "$IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]
 echo "[OK] image=$IMAGE_ID"
 
-echo "[2/8] create isolated test volume"
+echo "[2/9] create isolated test volume"
 docker volume create "$VOLUME" >/dev/null
 WS_A="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 WS_B="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 EX_A="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 REQ_A="$(python3 -c 'import uuid; print(uuid.uuid4())')"
-COMMIT="$(git rev-parse HEAD)"
 DIGEST="$(python3 -c 'print("d"*64)')"
 
-export WS_A WS_B EX_A COMMIT DIGEST
+export WS_A WS_B EX_A DIGEST
+docker run --rm --user 0:0 --entrypoint sh \
+  -v "$VOLUME:/v" -e WS_A -e WS_B "$IMAGE_ID" -lc '
+set -eu
+for item in "$WS_A:A" "$WS_B:B"; do
+  workspace_id="${item%%:*}"
+  marker="${item##*:}"
+  root="/v/$workspace_id"
+  mkdir -p "$root"
+  git -C "$root" init -q
+  git -C "$root" config user.email smoke@example.invalid
+  git -C "$root" config user.name smoke
+  printf "%s\n" "$marker" > "$root/marker"
+  git -C "$root" add marker
+  GIT_AUTHOR_DATE=2026-09-16T00:00:00Z GIT_COMMITTER_DATE=2026-09-16T00:00:00Z \
+    git -C "$root" commit -qm initial
+  chown -R 10001:10001 "$root"
+  chmod 700 "$root" "$root/.git"
+done
+'
+COMMIT="$(docker run --rm --entrypoint git -v "$VOLUME:/v:ro" "$IMAGE_ID" -C "/v/$WS_A" rev-parse HEAD)"
+export COMMIT
 docker run --rm --user 0:0 --entrypoint python3 \
-  -v "$VOLUME:/v" \
-  -e WS_A -e WS_B -e EX_A -e COMMIT -e DIGEST \
+  -v "$VOLUME:/v" -e WS_A -e WS_B -e EX_A -e COMMIT -e DIGEST \
   "$IMAGE_ID" -c '
 import json, os
 from pathlib import Path
-for key, marker in (("WS_A", "A"), ("WS_B", "B")):
+for key in ("WS_A", "WS_B"):
     workspace_id = os.environ[key]
-    root = Path("/v") / workspace_id
-    git_dir = root / ".git"
-    git_dir.mkdir(parents=True)
     manifest = {
         "contract_version": 1,
         "workspace_id": workspace_id,
@@ -63,15 +79,20 @@ for key, marker in (("WS_A", "A"), ("WS_B", "B")):
         "preflight_digest": os.environ["DIGEST"],
         "workspace_path": f"/workspace/worktrees/managed/{workspace_id}",
     }
-    (git_dir / "ai-orchestra-workspace.json").write_text(json.dumps(manifest))
-    (root / "marker").write_text(marker + "\n")
-    for path in (root, git_dir, root / "marker", git_dir / "ai-orchestra-workspace.json"):
-        os.chown(path, 10001, 10001)
-    root.chmod(0o700)
-    git_dir.chmod(0o700)
+    path = Path("/v") / workspace_id / ".git" / "ai-orchestra-workspace.json"
+    path.write_text(json.dumps(manifest))
+    os.chown(path, 10001, 10001)
 '
+SNAPSHOT="$(docker run --rm --entrypoint python3 -v "$VOLUME:/v:ro" -e WS_A "$IMAGE_ID" -c '
+import os, sys
+from pathlib import Path
+sys.path.insert(0, "/opt/ai-orchestra-runner")
+from source_snapshot import source_snapshot_digest
+print(source_snapshot_digest(Path("/v") / os.environ["WS_A"]))
+')"
+[[ "$SNAPSHOT" =~ ^[0-9a-f]{64}$ ]]
 
-echo "[3/8] start host runner broker"
+echo "[3/9] start host runner broker"
 export RUNNERD_SOCKET_PATH="$SOCKET"
 export RUNNERD_WORKSPACE_VOLUME="$VOLUME"
 export RUNNERD_IMAGE_ID="$IMAGE_ID"
@@ -88,13 +109,14 @@ done
 python3 runner/runnerctl.py --socket "$SOCKET" health | grep -q '"status": "ok"'
 echo "[OK] runnerd healthy"
 
-echo "[4/8] verify exact workspace subpath and readonly rootfs"
+echo "[4/9] verify exact workspace subpath, snapshot, and readonly rootfs"
 RUN_OUT="$TMP_DIR/run-ok.json"
 python3 runner/runnerctl.py --socket "$SOCKET" run \
   --workspace-id "$WS_A" \
   --execution-id "$EX_A" \
   --base-commit "$COMMIT" \
   --preflight-digest "$DIGEST" \
+  --source-snapshot-digest "$SNAPSHOT" \
   --request-id "$REQ_A" \
   --timeout 30 -- sh -lc \
   "test \"\$(cat marker)\" = A; test ! -e /workspace/../$WS_B; test ! -S /var/run/docker.sock; ! touch /rootfs-write; ! sh -c 'printf BAD > /source/marker'; printf runner-ok > runner-output.txt; test \"\$(cat runner-output.txt)\" = runner-ok" \
@@ -107,7 +129,7 @@ assert p["cleanup_confirmed"] is True, p
 PY
 echo "[OK] exact workspace only; rootfs/socket boundaries hold"
 
-echo "[5/8] verify network and secret isolation"
+echo "[5/9] verify network and secret isolation"
 NET_OUT="$TMP_DIR/run-net.json"
 REQ_NET="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 python3 runner/runnerctl.py --socket "$SOCKET" run \
@@ -123,7 +145,7 @@ assert p["status"] == "completed" and p["exit_code"] == 0, p
 PY
 echo "[OK] no inherited secrets and no network egress"
 
-echo "[6/8] reject immutable binding mismatch"
+echo "[6/9] reject immutable binding mismatch"
 BAD_OUT="$TMP_DIR/run-bad.json"
 REQ_BAD="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 set +e
@@ -144,7 +166,33 @@ assert "manifest mismatch" in p["stderr"], p
 PY
 echo "[OK] manifest mismatch fails before command execution"
 
-echo "[7/8] enforce timeout and confirm cleanup"
+echo "[7/9] reject exact source snapshot drift"
+SNAP_OUT="$TMP_DIR/run-snapshot.json"
+REQ_SNAPSHOT="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+docker run --rm --user 0:0 --entrypoint sh -v "$VOLUME:/v" -e WS_A "$IMAGE_ID" -lc \
+  'printf "MUTATED\n" > "/v/$WS_A/marker"; chown 10001:10001 "/v/$WS_A/marker"'
+set +e
+python3 runner/runnerctl.py --socket "$SOCKET" run \
+  --workspace-id "$WS_A" --execution-id "$EX_A" \
+  --base-commit "$COMMIT" --preflight-digest "$DIGEST" \
+  --source-snapshot-digest "$SNAPSHOT" \
+  --request-id "$REQ_SNAPSHOT" --timeout 30 -- sh -c 'echo SHOULD_NOT_RUN' \
+  >"$SNAP_OUT"
+SNAP_RC=$?
+set -e
+[[ "$SNAP_RC" -ne 0 ]]
+python3 - "$SNAP_OUT" <<'PY'
+import json, sys
+p=json.load(open(sys.argv[1]))
+assert p["status"] == "failed" and p["exit_code"] != 0, p
+assert "SHOULD_NOT_RUN" not in p["stdout"], p
+assert "source snapshot mismatch" in p["stderr"], p
+PY
+docker run --rm --user 0:0 --entrypoint sh -v "$VOLUME:/v" -e WS_A "$IMAGE_ID" -lc \
+  'printf "A\n" > "/v/$WS_A/marker"; chown 10001:10001 "/v/$WS_A/marker"'
+echo "[OK] stale source snapshot rejected before command execution"
+
+echo "[8/9] enforce timeout and confirm cleanup"
 TIME_OUT="$TMP_DIR/run-timeout.json"
 REQ_TIME="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 set +e
@@ -169,7 +217,7 @@ if docker container inspect "ai-orchestra-runner-${REQ_TIME//-/}" >/dev/null 2>&
 fi
 echo "[OK] timeout is terminal failure and container cleanup confirmed"
 
-echo "[8/8] verify workspace effect is scoped"
+echo "[9/9] verify workspace effect is scoped"
 docker run --rm --pull never --network none --read-only \
   --user 10001:10001 --entrypoint sh \
   -e WS_A -e WS_B -v "$VOLUME:/v:ro" "$IMAGE_ID" -lc '
@@ -178,7 +226,7 @@ docker run --rm --pull never --network none --read-only \
     test ! -e "/v/$WS_A/runner-output.txt"
     test ! -e "/v/$WS_B/runner-output.txt"
   '
-for request_id in "$REQ_A" "$REQ_NET" "$REQ_BAD" "$REQ_TIME"; do
+for request_id in "$REQ_A" "$REQ_NET" "$REQ_BAD" "$REQ_SNAPSHOT" "$REQ_TIME"; do
   if docker container inspect "ai-orchestra-runner-${request_id//-/}" >/dev/null 2>&1; then
     echo "[FAIL] disposable runner container leaked: $request_id" >&2
     exit 1

@@ -225,6 +225,22 @@ if docker compose exec -T postgres \
   exit 1
 fi
 
+if docker compose exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U ai_orchestra -d ai_orchestra \
+  -c "UPDATE runner_jobs SET source_snapshot_digest='bad'
+      WHERE id='55555555-5555-4555-8555-555555555555';" >/dev/null 2>&1; then
+  echo "[FAIL] PostgreSQL accepted invalid runner source snapshot digest" >&2
+  exit 1
+fi
+
+if docker compose exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U ai_orchestra -d ai_orchestra \
+  -c "UPDATE runner_jobs SET checkpoint_digest='dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
+      WHERE id='55555555-5555-4555-8555-555555555555';" >/dev/null 2>&1; then
+  echo "[FAIL] PostgreSQL accepted partial runner checkpoint binding" >&2
+  exit 1
+fi
+
 echo "[OK] PostgreSQL Runner Manager constraints reject forged state"
 
 echo "[INFO] PostgreSQL drift refusal smoke"
@@ -243,6 +259,12 @@ docker compose exec -T postgres \
 docker compose exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U ai_orchestra -d ai_orchestra \
   -c 'ALTER TABLE runner_jobs DROP CONSTRAINT ck_runner_jobs_cleanup_state;' >/dev/null
+docker compose exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U ai_orchestra -d ai_orchestra \
+  -c 'ALTER TABLE runner_jobs DROP CONSTRAINT ck_runner_jobs_checkpoint_binding;' >/dev/null
+docker compose exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U ai_orchestra -d ai_orchestra \
+  -c 'DROP INDEX ux_runner_jobs_checkpoint_command;' >/dev/null
 
 if schema_cli check; then
   echo "[FAIL] schema check accepted deliberately removed index/constraint" >&2

@@ -458,6 +458,58 @@ def verify_tracked_files(
             raise WorkspacePreflightError("workspace_tracked_type_invalid")
 
 
+def verify_checkpoint_workspace_identity(
+    binding: WorkspaceBinding,
+    *,
+    workspace_root: Path = DEFAULT_OPENCODE_WORKSPACE_ROOT,
+    max_files: int = 200_000,
+) -> Path:
+    """Re-verify immutable workspace identity while allowing working-tree edits."""
+    expected_path = workspace_path_for(binding.workspace_id, root=workspace_root)
+    if binding.workspace_path != expected_path:
+        raise WorkspacePreflightError("workspace_path_mismatch")
+    workspace = Path(binding.workspace_path)
+    try:
+        expected_root = workspace_root.resolve(strict=True)
+        if workspace.is_symlink() or workspace.resolve(strict=True) != expected_root / binding.workspace_id:
+            raise WorkspacePreflightError("workspace_path_invalid")
+    except (OSError, RuntimeError) as exc:
+        raise WorkspacePreflightError("workspace_path_invalid") from exc
+
+    payload = read_manifest(workspace)
+    expected = {
+        "contract_version": WORKSPACE_CONTRACT_VERSION,
+        "execution_id": binding.execution_id,
+        "task_id": binding.task_id,
+        "repository_id": binding.repository_id,
+        "workspace_id": binding.workspace_id,
+        "base_commit": binding.base_commit,
+        "branch_name": binding.branch_name,
+        "workspace_path": binding.workspace_path,
+        "initial_tree": binding.initial_tree,
+        "tracked_entries": binding.tracked_entries,
+        "preflight_digest": binding.preflight_digest,
+    }
+    if payload != expected:
+        raise WorkspacePreflightError("workspace_manifest_binding_mismatch")
+
+    head = str(run_git(["rev-parse", "--verify", "HEAD^{commit}"], workspace=workspace, failure_code="workspace_head_invalid")).strip().lower()
+    tree = str(run_git(["rev-parse", "--verify", "HEAD^{tree}"], workspace=workspace, failure_code="workspace_tree_invalid")).strip().lower()
+    branch = str(run_git(["symbolic-ref", "--short", "HEAD"], workspace=workspace, failure_code="workspace_branch_invalid")).strip()
+    if head != binding.base_commit:
+        raise WorkspacePreflightError("workspace_head_mismatch")
+    if tree != binding.initial_tree:
+        raise WorkspacePreflightError("workspace_tree_mismatch")
+    if branch != binding.branch_name:
+        raise WorkspacePreflightError("workspace_branch_mismatch")
+    verify_tracked_files(
+        workspace,
+        expected_count=binding.tracked_entries,
+        max_files=max_files,
+    )
+    return workspace
+
+
 def verify_runtime_workspace(
     binding: WorkspaceBinding,
     *,

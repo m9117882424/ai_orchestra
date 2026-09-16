@@ -639,6 +639,10 @@ def main() -> int:
     assert "RUNNERD_ALLOW_NONROOT" not in runner_service
     runner_env_example = (ROOT / "runner/runnerd.env.example").read_text(encoding="utf-8")
     assert "RUNNERD_ALLOW_NONROOT" not in runner_env_example
+    assert "{{.Mountpoint}}" not in runner_smoke
+    assert "/var/lib/docker/volumes" not in runner_smoke
+    assert '-v "$VOLUME:/v:ro"' in runner_smoke
+    assert "docker ps -aq --filter 'name=^ai-orchestra-runner-'" not in runner_smoke
 
     shared = (ROOT / "config/model-router.shared.yaml").read_text(encoding="utf-8")
     direct = (ROOT / "config/model-router.separate.yaml").read_text(encoding="utf-8")

@@ -170,13 +170,18 @@ fi
 echo "[OK] timeout is terminal failure and container cleanup confirmed"
 
 echo "[8/8] verify workspace effect is scoped"
-MOUNT="$(docker volume inspect --format '{{.Mountpoint}}' "$VOLUME")"
-[[ ! -e "$MOUNT/$WS_A/runner-output.txt" ]]
-[[ ! -e "$MOUNT/$WS_B/runner-output.txt" ]]
-[[ "$(cat "$MOUNT/$WS_A/marker")" == "A" ]]
-[[ "$(cat "$MOUNT/$WS_B/marker")" == "B" ]]
-if docker ps -aq --filter 'name=^ai-orchestra-runner-' | grep -q .; then
-  echo "[FAIL] disposable runner container leaked" >&2
-  exit 1
-fi
+docker run --rm --pull never --network none --read-only \
+  --user 10001:10001 --entrypoint sh \
+  -e WS_A -e WS_B -v "$VOLUME:/v:ro" "$IMAGE_ID" -lc '
+    test "$(cat "/v/$WS_A/marker")" = A
+    test "$(cat "/v/$WS_B/marker")" = B
+    test ! -e "/v/$WS_A/runner-output.txt"
+    test ! -e "/v/$WS_B/runner-output.txt"
+  '
+for request_id in "$REQ_A" "$REQ_NET" "$REQ_BAD" "$REQ_TIME"; do
+  if docker container inspect "ai-orchestra-runner-${request_id//-/}" >/dev/null 2>&1; then
+    echo "[FAIL] disposable runner container leaked: $request_id" >&2
+    exit 1
+  fi
+done
 echo "[OK] G3 runner isolation smoke passed"

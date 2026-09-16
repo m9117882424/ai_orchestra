@@ -74,6 +74,13 @@ def assert_compose_runs_disable_tty(path: Path, text: str) -> None:
 def main() -> int:
     cfg = resolved_compose()
     services = cfg["services"]
+    for service_name, service in services.items():
+        for mount in service.get("volumes") or []:
+            source = str(mount.get("source") or "")
+            target = str(mount.get("target") or "")
+            assert "/var/run/docker.sock" not in {source, target}, (
+                f"Docker socket must never be mounted into Compose service {service_name}"
+            )
 
     opencode_env = set((services["opencode"].get("environment") or {}).keys())
     leaked = sorted(opencode_env & FORBIDDEN_OPENCODE_ENV)
@@ -605,6 +612,29 @@ def main() -> int:
             f"Workspace protocol safety marker missing: {marker}"
         )
     assert "shell=True" not in workspace_protocol_text
+
+    runnerd_text = (ROOT / "runner/runnerd.py").read_text(encoding="utf-8")
+    runner_entrypoint = (ROOT / "runner/entrypoint.py").read_text(encoding="utf-8")
+    runner_dockerfile = (ROOT / "runner/Dockerfile").read_text(encoding="utf-8")
+    runner_service = (ROOT / "runner/systemd/ai-orchestra-runnerd.service").read_text(encoding="utf-8")
+    runner_smoke = (ROOT / "scripts/runner-isolation-smoke.sh").read_text(encoding="utf-8")
+    for marker in (
+        '"--network", "none"', '"--read-only"', '"--cap-drop", "ALL"',
+        'no-new-privileges:true', 'volume-subpath=', 'dst=/source', 'readonly',
+        '/workspace:rw,nosuid,nodev,size=', '"--pull", "never"', 'cleanup_uncertain',
+    ):
+        assert marker in runnerd_text, f"Disposable runner safety marker missing: {marker}"
+    assert "shell=True" not in runnerd_text
+    assert "/var/run/docker.sock" not in runnerd_text
+    for marker in ('SOURCE = Path("/source")', 'WORKSPACE = Path("/workspace")',
+                   "verify_manifest", "shutil.copytree", "os.execvp"):
+        assert marker in runner_entrypoint, f"Runner entrypoint safety marker missing: {marker}"
+    assert re.search(r"^FROM python:3\.12-slim@sha256:[0-9a-f]{64}$", runner_dockerfile, re.MULTILINE)
+    for marker in ("PrivateNetwork=true", "PrivateDevices=true", "ProtectSystem=strict",
+                   "ProtectHome=true", "RestrictAddressFamilies=AF_UNIX",
+                   "CapabilityBoundingSet=", "NoNewPrivileges=true"):
+        assert marker in runner_service, f"runnerd systemd hardening missing: {marker}"
+    assert "G3 runner isolation smoke passed" in runner_smoke
 
     shared = (ROOT / "config/model-router.shared.yaml").read_text(encoding="utf-8")
     direct = (ROOT / "config/model-router.separate.yaml").read_text(encoding="utf-8")

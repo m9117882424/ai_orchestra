@@ -41,7 +41,7 @@ jobs:
               assert isinstance(data, dict) and isinstance(data.get('model_list'), list) and data['model_list'], path
           print('[OK] router YAML parsed')
           PY
-          python3 -m compileall -q control_plane/app control_plane/migrations control_plane/tests scripts/model_router_smoke.py scripts/static_security_check.py scripts/verify_dependency_locks.py scripts/temporal_durable_poc.py scripts/workspace_restore_verifier.py
+          python3 -m compileall -q control_plane/app control_plane/migrations control_plane/tests runner scripts/model_router_smoke.py scripts/static_security_check.py scripts/verify_dependency_locks.py scripts/temporal_durable_poc.py scripts/workspace_restore_verifier.py
           node --check control_plane/app/static/app.js
 
       - name: Проверить shell-скрипты
@@ -60,6 +60,7 @@ jobs:
           bash -n scripts/export-backup-offsite.sh
           bash -n scripts/backup-restore-smoke.sh
           bash -n scripts/temporal-durable-smoke.sh
+          bash -n scripts/runner-isolation-smoke.sh
           bash -n control_plane/app/repo_manager_git_wrapper.sh
           bash -n control_plane/app/workspace_volume_init.sh
           shellcheck scripts/*.sh
@@ -86,10 +87,13 @@ jobs:
         run: python3 -m pip install --require-hashes --requirement control_plane/requirements-dev.lock
 
       - name: Проверить API и migration safety
-        run: python3 -m pytest control_plane/tests
+        run: python3 -m pytest control_plane/tests runner/tests
 
       - name: Проверить Docker buildability with current upstream bases
         run: docker compose build --pull
+
+      - name: Проверить disposable runner isolation boundary
+        run: bash ./scripts/runner-isolation-smoke.sh
 
       - name: Проверить Temporal durable-workflow PoC
         run: bash ./scripts/temporal-durable-smoke.sh

@@ -1,4 +1,4 @@
-.PHONY: init shared separate build up down restart logs manager-logs router-logs status preflight smoke validate test backup backup-verify backup-offsite restore-drill migrate schema-check dependency-check
+.PHONY: init shared separate build up down restart logs manager-logs router-logs status preflight smoke validate test runner-isolation-smoke backup backup-verify backup-offsite restore-drill migrate schema-check dependency-check
 
 init:
 	./scripts/bootstrap.sh
@@ -40,7 +40,10 @@ smoke:
 	./scripts/smoke.sh
 
 test:
-	python3 -m pytest control_plane/tests
+	python3 -m pytest control_plane/tests runner/tests
+
+runner-isolation-smoke:
+	bash ./scripts/runner-isolation-smoke.sh
 
 backup:
 	./scripts/backup.sh
@@ -65,6 +68,6 @@ dependency-check:
 
 validate: dependency-check
 	python3 -m json.tool config/opencode.gateway.json >/dev/null
-	python3 -m compileall -q control_plane/app control_plane/migrations control_plane/tests scripts/model_router_smoke.py scripts/static_security_check.py scripts/verify_dependency_locks.py scripts/workspace_restore_verifier.py
+	python3 -m compileall -q control_plane/app control_plane/migrations control_plane/tests runner scripts/model_router_smoke.py scripts/static_security_check.py scripts/verify_dependency_locks.py scripts/workspace_restore_verifier.py
 	docker compose config --quiet
 	python3 scripts/static_security_check.py

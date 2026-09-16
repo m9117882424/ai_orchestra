@@ -3,6 +3,7 @@ from uuid import uuid4
 
 from control_plane.app.db import SessionLocal
 import control_plane.app.execution_worker as worker
+from control_plane.app.execution_protocol import execution_prompt
 from control_plane.app.execution_worker import (
     ExecutionLeaseManager,
     _ensure_runner_checkpoint_jobs,
@@ -99,14 +100,19 @@ class _CheckpointOpenCode:
         self.prompt_calls: list[tuple[str, str, str, str]] = []
         self.set_assistant("msg-checkpoint", checkpoint_text)
 
-    def set_assistant(self, message_id: str, text: str) -> None:
+    def set_assistant(
+        self, message_id: str, text: str, *, parent_id: str | None = None
+    ) -> None:
+        info = {
+            "id": message_id,
+            "role": "assistant",
+            "finish": "stop",
+            "time": {"completed": 1},
+        }
+        if parent_id is not None:
+            info["parentID"] = parent_id
         self._messages = [{
-            "info": {
-                "id": message_id,
-                "role": "assistant",
-                "finish": "stop",
-                "time": {"completed": 1},
-            },
+            "info": info,
             "parts": [{"type": "text", "text": text}],
         }]
 
@@ -208,3 +214,114 @@ def test_changed_workspace_without_stable_assistant_id_fails_closed(monkeypatch)
         assert run.status == "failed"
         assert run.stage == "runner_completion_rejected"
         assert "stable assistant message id" in run.error
+
+
+def test_execution_prompt_declares_checkpoint_as_machine_only_message():
+    task = Task(
+        title="Prompt contract",
+        project="test",
+        description="verify",
+        domain="development",
+        priority="normal",
+        risk_level="low",
+    )
+    prompt = execution_prompt(task)
+    assert "checkpoint является машинным сообщением" in prompt
+    assert "не пиши перед ним" in prompt
+    assert "весь text content checkpoint-сообщения" in prompt
+
+
+def _production_wrapped_checkpoint_text() -> str:
+    return (
+        "Отлично. Файл содержит ровно одну строку с требуемым текстом. "
+        "Теперь запускаю runner checkpoint с двумя командами верификации.\n\n"
+        "## Шаг 3: Executable verification через Runner Manager\n\n"
+        + _checkpoint_text()
+    )
+
+
+def test_wrapped_valid_checkpoint_gets_one_machine_only_repair(monkeypatch):
+    manager, lease, execution_id = _seed_verified_execution()
+    snapshot = "8" * 64
+    monkeypatch.setattr(
+        worker, "_checkpoint_workspace_snapshot", lambda *_: (snapshot, True)
+    )
+    fake = _CheckpointOpenCode(
+        lease.opencode_session_id, _production_wrapped_checkpoint_text()
+    )
+
+    assert poll_execution(manager, lambda: fake, lease) == "running"
+    assert len(fake.prompt_calls) == 1
+    repair_message_id = fake.prompt_calls[0][1]
+    repair_prompt = fake.prompt_calls[0][3]
+    assert "РОВНО этот блок" in repair_prompt
+    assert repair_prompt.rstrip().endswith("</AI_ORCHESTRA_RUNNER_CHECKPOINT>")
+    with SessionLocal() as db:
+        run = db.get(ExecutionRun, execution_id)
+        assert run is not None
+        assert run.status == "running"
+        assert run.stage == "runner_checkpoint_format_repair"
+        assert db.query(RunnerJob).filter(
+            RunnerJob.execution_id == execution_id
+        ).count() == 0
+
+    fake.set_assistant(
+        "msg-repaired", _checkpoint_text(), parent_id=repair_message_id
+    )
+    assert poll_execution(manager, lambda: fake, lease) == "running"
+    with SessionLocal() as db:
+        jobs = list(db.query(RunnerJob).filter(
+            RunnerJob.execution_id == execution_id
+        ))
+        assert len(jobs) == 1
+        assert jobs[0].status == "queued"
+        assert jobs[0].source_snapshot_digest == snapshot
+
+
+def test_wrapped_checkpoint_repeated_after_repair_fails_closed(monkeypatch):
+    manager, lease, execution_id = _seed_verified_execution()
+    snapshot = "7" * 64
+    monkeypatch.setattr(
+        worker, "_checkpoint_workspace_snapshot", lambda *_: (snapshot, True)
+    )
+    wrapped = _production_wrapped_checkpoint_text()
+    fake = _CheckpointOpenCode(lease.opencode_session_id, wrapped)
+
+    assert poll_execution(manager, lambda: fake, lease) == "running"
+    repair_message_id = fake.prompt_calls[0][1]
+    fake.set_assistant("msg-repeat", wrapped, parent_id=repair_message_id)
+    assert poll_execution(manager, lambda: fake, lease) == "failed"
+
+    with SessionLocal() as db:
+        run = db.get(ExecutionRun, execution_id)
+        assert run is not None
+        assert run.status == "failed"
+        assert run.stage == "runner_checkpoint_format_repeated"
+        assert db.query(RunnerJob).filter(
+            RunnerJob.execution_id == execution_id
+        ).count() == 0
+
+
+def test_wrapped_invalid_checkpoint_is_not_repaired(monkeypatch):
+    manager, lease, execution_id = _seed_verified_execution()
+    monkeypatch.setattr(
+        worker, "_checkpoint_workspace_snapshot", lambda *_: ("6" * 64, True)
+    )
+    malformed = (
+        "Запускаю проверку\n"
+        "<AI_ORCHESTRA_RUNNER_CHECKPOINT>\n"
+        "{not-json}\n"
+        "</AI_ORCHESTRA_RUNNER_CHECKPOINT>"
+    )
+    fake = _CheckpointOpenCode(lease.opencode_session_id, malformed)
+
+    assert poll_execution(manager, lambda: fake, lease) == "failed"
+    assert fake.prompt_calls == []
+    with SessionLocal() as db:
+        run = db.get(ExecutionRun, execution_id)
+        assert run is not None
+        assert run.status == "failed"
+        assert run.stage == "runner_checkpoint_rejected"
+        assert db.query(RunnerJob).filter(
+            RunnerJob.execution_id == execution_id
+        ).count() == 0

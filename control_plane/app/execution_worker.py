@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -1421,8 +1422,10 @@ def _require_runner_validation_before_completion(
 
     prompt = (
         "В authoritative workspace есть изменения, но для текущего snapshot нет успешного "
-        "Runner Manager evidence. Не запускай shell/tools для project commands. Ответь только "
-        "standalone checkpoint следующего формата (1-8 команд, timeout <= 900):\n"
+        "Runner Manager evidence. Не запускай shell/tools для project commands. Это машинный "
+        "protocol turn: ответь НЕМЕДЛЕННО и ТОЛЬКО standalone checkpoint. Не добавляй перед "
+        "блоком фразы, Markdown-заголовки или пояснения и ничего не добавляй после блока "
+        "(1-8 команд, timeout <= 900):\n"
         f"{CHECKPOINT_BEGIN}\n"
         '{"version":1,"commands":[{"label":"tests","argv":["python3","-m","pytest"],"timeout_seconds":300}]}\n'
         "</AI_ORCHESTRA_RUNNER_CHECKPOINT>"
@@ -1430,6 +1433,71 @@ def _require_runner_validation_before_completion(
     outcome = _prompt_running_with_repository_trust_gate(
         manager, client, lease, session_id, prompt,
         message_id=message_id, part_id=part_id, stage="runner_required",
+    )
+    if outcome == "deadline":
+        return timeout_execution(manager, client, lease)
+    return "running" if outcome == "prompted" else outcome
+
+
+def _repair_wrapped_runner_checkpoint(
+    manager: ExecutionLeaseManager,
+    client: OpenCodeClient,
+    lease: ExecutionLease,
+    session_id: str,
+    assistant_message_id: str,
+    assistant_text: str,
+    messages: list[dict],
+) -> str | None:
+    """Request one clean machine-only replay when a valid checkpoint has wrapper text."""
+    if (
+        assistant_text.count(CHECKPOINT_BEGIN) != 1
+        or assistant_text.count("</AI_ORCHESTRA_RUNNER_CHECKPOINT>") != 1
+    ):
+        return None
+    start = assistant_text.index(CHECKPOINT_BEGIN)
+    end_marker = "</AI_ORCHESTRA_RUNNER_CHECKPOINT>"
+    end = assistant_text.index(end_marker, start) + len(end_marker)
+    block = assistant_text[start:end]
+    try:
+        embedded = parse_runner_checkpoint(block)
+    except RunnerCheckpointError:
+        return None
+    if embedded is None:
+        return None
+    try:
+        source_snapshot, _ = _checkpoint_workspace_snapshot(manager, lease)
+    except WorkspacePreflightError as exc:
+        return _fail_runner_gate(
+            manager, lease, code="runner_checkpoint_rejected",
+            detail=f"Runner checkpoint format repair rejected: {exc.code}",
+        )
+
+    compact = lease.execution_id.replace("-", "")
+    checkpoint_key = hashlib.sha256(embedded.canonical_json.encode("utf-8")).hexdigest()[:16]
+    message_id = f"msg_orchestra_runner_format_{compact}_{source_snapshot[:12]}_{checkpoint_key}"
+    part_id = f"prt_orchestra_runner_format_{compact}_{source_snapshot[:12]}_{checkpoint_key}"
+    existing = client.message(session_id, message_id)
+    if existing is not None:
+        if _assistant_parent_id(messages, assistant_message_id) == message_id:
+            return _fail_runner_gate(
+                manager, lease, code="runner_checkpoint_format_repeated",
+                detail="Lead repeated wrapper text after machine-only checkpoint repair prompt",
+            )
+        return _fail_runner_gate(
+            manager, lease, code="runner_checkpoint_format_conflict",
+            detail="Checkpoint format repair already exists for this snapshot and command set",
+        )
+
+    clean_block = f"{CHECKPOINT_BEGIN}\n{embedded.canonical_json}\n</AI_ORCHESTRA_RUNNER_CHECKPOINT>"
+    prompt = (
+        "Предыдущий ответ содержал валидный Runner checkpoint, но нарушил машинный протокол: "
+        "в сообщении был текст или Markdown до/после блока. Ничего не объясняй, не вызывай tools "
+        "и не меняй команды. Следующий assistant response должен содержать РОВНО этот блок и ни "
+        "одного символа текста до или после него:\n" + clean_block
+    )
+    outcome = _prompt_running_with_repository_trust_gate(
+        manager, client, lease, session_id, prompt,
+        message_id=message_id, part_id=part_id, stage="runner_checkpoint_format_repair",
     )
     if outcome == "deadline":
         return timeout_execution(manager, client, lease)
@@ -1827,6 +1895,15 @@ def poll_execution(
             try:
                 checkpoint = parse_runner_checkpoint(result)
             except RunnerCheckpointError as exc:
+                if exc.code == "runner_checkpoint_must_be_standalone" and assistant is not None:
+                    assistant_message_id, assistant_text = assistant
+                    if assistant_text == result:
+                        repair = _repair_wrapped_runner_checkpoint(
+                            manager, client, lease, lease.opencode_session_id,
+                            assistant_message_id, assistant_text, messages,
+                        )
+                        if repair is not None:
+                            return repair
                 return _fail_runner_gate(
                     manager, lease, code="runner_checkpoint_rejected",
                     detail=f"Malformed runner checkpoint: {exc.code}",

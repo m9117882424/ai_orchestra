@@ -18,7 +18,12 @@ COPY alembic.ini ./alembic.ini
 COPY migrations ./migrations
 COPY app ./app
 
-RUN chmod 0555 /app/app/workspace_manager_capability_launcher.py
+# Git checkout permissions depend on the host umask. Production uses a restrictive
+# umask, so normalize runtime readability inside the image rather than trusting
+# host-side 0644 bits. No secrets are copied under /app/app or /app/migrations.
+RUN chmod -R a+rX /app/app /app/migrations \
+    && chmod 0444 /app/alembic.ini \
+    && chmod 0555 /app/app/workspace_manager_capability_launcher.py
 
 FROM application-base AS git-runtime
 

@@ -163,7 +163,10 @@ assert p["status"] == "timed_out", p
 assert p["cleanup_confirmed"] is True, p
 assert p["exit_code"] is None, p
 PY
-! docker container inspect "ai-orchestra-runner-${REQ_TIME//-/}" >/dev/null 2>&1
+if docker container inspect "ai-orchestra-runner-${REQ_TIME//-/}" >/dev/null 2>&1; then
+  echo "[FAIL] timed-out runner container still exists" >&2
+  exit 1
+fi
 echo "[OK] timeout is terminal failure and container cleanup confirmed"
 
 echo "[8/8] verify workspace effect is scoped"

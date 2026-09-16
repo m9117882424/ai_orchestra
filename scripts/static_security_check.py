@@ -367,6 +367,8 @@ def main() -> int:
     assert "sha256sum --check dependency-locks.sha256" in control_dockerfile
     assert "--require-hashes --requirement requirements.lock" in control_dockerfile
     assert "runtime-lock.sha256" in control_dockerfile
+    assert "chmod -R a+rX /app/app /app/migrations" in control_dockerfile
+    assert "chmod 0444 /app/alembic.ini" in control_dockerfile
     assert "app.production:app" in control_dockerfile
     assert "FROM application-base AS control-plane" in control_dockerfile
     assert "FROM git-runtime AS repo-manager" in control_dockerfile

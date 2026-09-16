@@ -77,7 +77,7 @@ export RUNNERD_WORKSPACE_VOLUME="$VOLUME"
 export RUNNERD_IMAGE_ID="$IMAGE_ID"
 export RUNNERD_MAX_TIMEOUT_SECONDS=120
 export RUNNERD_MAX_CONCURRENT=1
-python3 runner/runnerd.py serve >"$LOG" 2>&1 &
+RUNNERD_ALLOW_NONROOT=1 python3 runner/runnerd.py serve >"$LOG" 2>&1 &
 RUNNER_PID=$!
 for _ in $(seq 1 50); do
   [[ -S "$SOCKET" ]] && break

@@ -635,6 +635,10 @@ def main() -> int:
                    "CapabilityBoundingSet=", "NoNewPrivileges=true"):
         assert marker in runner_service, f"runnerd systemd hardening missing: {marker}"
     assert "G3 runner isolation smoke passed" in runner_smoke
+    assert "RUNNERD_ALLOW_NONROOT=1 python3 runner/runnerd.py serve" in runner_smoke
+    assert "RUNNERD_ALLOW_NONROOT" not in runner_service
+    runner_env_example = (ROOT / "runner/runnerd.env.example").read_text(encoding="utf-8")
+    assert "RUNNERD_ALLOW_NONROOT" not in runner_env_example
 
     shared = (ROOT / "config/model-router.shared.yaml").read_text(encoding="utf-8")
     direct = (ROOT / "config/model-router.separate.yaml").read_text(encoding="utf-8")

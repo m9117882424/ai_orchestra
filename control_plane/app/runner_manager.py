@@ -66,6 +66,7 @@ class RunnerJobLease:
     timeout_seconds: int
     base_commit: str
     preflight_digest: str
+    source_snapshot_digest: str | None
 
 
 class RunnerdClient:
@@ -79,7 +80,7 @@ class RunnerdClient:
 
     @staticmethod
     def _payload(lease: RunnerJobLease) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "version": 1,
             "operation": "run",
             "request_id": lease.job_id,
@@ -90,6 +91,9 @@ class RunnerdClient:
             "argv": list(lease.argv),
             "timeout_seconds": lease.timeout_seconds,
         }
+        if lease.source_snapshot_digest is not None:
+            payload["source_snapshot_digest"] = lease.source_snapshot_digest
+        return payload
 
     def run(self, lease: RunnerJobLease) -> dict[str, Any]:
         payload = self._payload(lease)
@@ -240,6 +244,7 @@ class RunnerJobLeaseManager:
                     timeout_seconds=job.timeout_seconds,
                     base_commit=job.base_commit,
                     preflight_digest=job.preflight_digest,
+                    source_snapshot_digest=job.source_snapshot_digest,
                 )
             )
         db.commit()
@@ -379,6 +384,9 @@ class RunnerJobLeaseManager:
                 "generation": lease.generation,
                 "base_commit": job.base_commit,
                 "preflight_digest": job.preflight_digest,
+                "source_snapshot_digest": job.source_snapshot_digest,
+                "checkpoint_digest": job.checkpoint_digest,
+                "checkpoint_command_index": job.checkpoint_command_index,
             },
         )
         db.commit()

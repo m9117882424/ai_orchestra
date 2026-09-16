@@ -466,16 +466,27 @@ if [[ "$runner_job_invalid_bindings" != "0" ]]; then
   echo "[FAIL] Restored runner_jobs contain invalid immutable bindings: $runner_job_invalid_bindings" >&2
   exit 1
 fi
+runner_checkpoint_rows="$(docker exec "$db_container" psql -U "$db_user" -d "$db_name" -Atc "SELECT count(*) FROM runner_jobs WHERE checkpoint_digest IS NOT NULL")"
+runner_checkpoint_invalid="$(docker exec "$db_container" psql -U "$db_user" -d "$db_name" -Atc "
+SELECT count(*) FROM runner_jobs
+WHERE checkpoint_digest IS NOT NULL
+  AND (source_snapshot_digest IS NULL OR checkpoint_command_index IS NULL OR checkpoint_label IS NULL)
+")"
+if [[ "$runner_checkpoint_invalid" != "0" ]]; then
+  echo "[FAIL] Restored runner checkpoint bindings are incomplete: $runner_checkpoint_invalid" >&2
+  exit 1
+fi
 
 runner_job_restore_file="$staging_dir/runner-job-restore.json"
-python3 - "$runner_job_rows" "$runner_job_restore_file" <<'PYRUNNER'
+python3 - "$runner_job_rows" "$runner_checkpoint_rows" "$runner_job_restore_file" <<'PYRUNNER'
 import json, pathlib, sys
 rows = int(sys.argv[1])
-payload = {"database_rows": rows, "bindings_verified": rows}
-pathlib.Path(sys.argv[2]).write_text(
+checkpoint_rows = int(sys.argv[2])
+payload = {"database_rows": rows, "bindings_verified": rows, "checkpoint_bindings_verified": checkpoint_rows}
+pathlib.Path(sys.argv[3]).write_text(
     json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8"
 )
-print(f"[OK] Runner job restore reconciled: database_rows={rows}")
+print(f"[OK] Runner job restore reconciled: database_rows={rows}, checkpoint_bindings={checkpoint_rows}")
 PYRUNNER
 
 table_counts_file="$staging_dir/table-counts.tsv"

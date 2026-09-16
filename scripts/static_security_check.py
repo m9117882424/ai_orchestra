@@ -312,6 +312,9 @@ def main() -> int:
     assert gateway["permission"]["external_directory"] == "deny"
     assert gateway["permission"]["todowrite"] == "allow"
     assert gateway["permission"]["question"] == "deny"
+    assert gateway["permission"]["bash"] == "deny"
+    for agent_name, agent in gateway.get("agent", {}).items():
+        assert agent.get("permission", {}).get("bash") == "deny", f"{agent_name} must not execute project shell"
     assert set(gateway["provider"]) == {"orchestra"}
     options = gateway["provider"]["orchestra"]["options"]
     assert options["baseURL"] == "http://model-gateway:8080/v1"
@@ -488,17 +491,20 @@ def main() -> int:
     assert 'evidence_dir="${BACKUP_ROOT:-$project_root/backups}/drills"' in restore_drill_script
     backup_restore_smoke = (ROOT / "scripts/backup-restore-smoke.sh").read_text(encoding="utf-8")
     postgres_schema_smoke = (ROOT / "scripts/postgres-schema-smoke.sh").read_text(encoding="utf-8")
-    assert 'COMPOSE_PROJECT_NAME="ai-orchestra-backup-restore-smoke-' in backup_restore_smoke
+    assert 'export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-ai-orchestra-backup-restore-smoke-' in backup_restore_smoke
+    assert 'if [[ ! "$COMPOSE_PROJECT_NAME" =~ ^ai-orchestra-backup-restore-smoke-' in backup_restore_smoke
     assert 'COMPOSE_PROJECT_NAME="ai-orchestra-postgres-schema-smoke-' in postgres_schema_smoke
     assert 'rm -rf "$project_root/backups"' not in backup_restore_smoke
-    assert 'BACKUP_ROOT="$(mktemp -d /tmp/ai-orchestra-backup-smoke.' in backup_restore_smoke
+    assert 'BACKUP_ROOT="${BACKUP_ROOT:-$(mktemp -d /tmp/ai-orchestra-backup-smoke.' in backup_restore_smoke
+    assert 'if [[ "$BACKUP_ROOT" != /tmp/ai-orchestra-backup-smoke.* ]]' in backup_restore_smoke
+    assert 'Backup/restore smoke BACKUP_ROOT must be an isolated /tmp path' in backup_restore_smoke
     for destructive_smoke in (backup_restore_smoke, postgres_schema_smoke):
         assert 'docker compose down -v --remove-orphans' in destructive_smoke
-        assert 'ai-development-department' in destructive_smoke
-        assert 'Refusing destructive' in destructive_smoke
         assert 'COMPOSE_FILE=' in destructive_smoke
         assert 'ai-orchestra/' in destructive_smoke
         assert 'docker image rm -f' in destructive_smoke
+    assert 'ai-development-department' in postgres_schema_smoke
+    assert 'Refusing destructive schema smoke in production Compose namespace' in postgres_schema_smoke
     assert 'control-plane-schema-smoke:' in postgres_schema_smoke
     assert 'control-plane-backup-smoke:' in backup_restore_smoke
     assert 'workspace-manager-backup-smoke:' in backup_restore_smoke

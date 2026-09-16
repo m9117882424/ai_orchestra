@@ -91,3 +91,22 @@ def test_copy_source_rejects_nonempty_disposable_workspace(tmp_path, monkeypatch
     monkeypatch.setattr(entrypoint, "WORKSPACE", workspace)
     with pytest.raises(RuntimeError, match="not empty"):
         entrypoint.copy_source()
+
+
+def test_expected_snapshot_digest_is_optional_and_validated(monkeypatch):
+    monkeypatch.delenv("AI_ORCHESTRA_RUNNER_SOURCE_SNAPSHOT_DIGEST", raising=False)
+    assert entrypoint.expected_snapshot_digest() is None
+    monkeypatch.setenv("AI_ORCHESTRA_RUNNER_SOURCE_SNAPSHOT_DIGEST", "c" * 64)
+    assert entrypoint.expected_snapshot_digest() == "c" * 64
+    monkeypatch.setenv("AI_ORCHESTRA_RUNNER_SOURCE_SNAPSHOT_DIGEST", "c" * 63)
+    with pytest.raises(RuntimeError, match="invalid source_snapshot_digest"):
+        entrypoint.expected_snapshot_digest()
+
+
+def test_verify_source_snapshot_detects_drift(tmp_path):
+    (tmp_path / "a.txt").write_text("one", encoding="utf-8")
+    expected = entrypoint.source_snapshot_digest(tmp_path)
+    entrypoint.verify_source_snapshot(tmp_path, expected)
+    (tmp_path / "a.txt").write_text("two", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="runner source snapshot mismatch"):
+        entrypoint.verify_source_snapshot(tmp_path, expected)

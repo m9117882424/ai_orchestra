@@ -395,6 +395,10 @@ class RunnerJobRead(BaseModel):
     timeout_seconds: int
     base_commit: str
     preflight_digest: str
+    source_snapshot_digest: str | None
+    checkpoint_digest: str | None
+    checkpoint_command_index: int | None
+    checkpoint_label: str | None
     runner_image_id: str | None
     exit_code: int | None
     stdout: str

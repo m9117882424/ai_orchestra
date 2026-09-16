@@ -514,6 +514,21 @@ class RunnerJob(Base):
             "AND exit_code IS NULL) OR status = 'cleanup_uncertain')",
             name="ck_runner_jobs_exit_code",
         ),
+        CheckConstraint(
+            "source_snapshot_digest IS NULL OR length(source_snapshot_digest) = 64",
+            name="ck_runner_jobs_source_snapshot_digest",
+        ),
+        CheckConstraint(
+            "checkpoint_digest IS NULL OR length(checkpoint_digest) = 64",
+            name="ck_runner_jobs_checkpoint_digest",
+        ),
+        CheckConstraint(
+            "((checkpoint_digest IS NULL AND checkpoint_command_index IS NULL "
+            "AND checkpoint_label IS NULL) OR "
+            "(checkpoint_digest IS NOT NULL AND checkpoint_command_index IS NOT NULL "
+            "AND checkpoint_command_index >= 0 AND source_snapshot_digest IS NOT NULL))",
+            name="ck_runner_jobs_checkpoint_binding",
+        ),
         Index(
             "ux_runner_jobs_execution_idempotency",
             "execution_id",
@@ -524,6 +539,13 @@ class RunnerJob(Base):
         Index("ix_runner_jobs_lease", "lease_expires_at"),
         Index("ix_runner_jobs_execution", "execution_id", "status"),
         Index("ix_runner_jobs_repository", "repository_id", "status"),
+        Index(
+            "ux_runner_jobs_checkpoint_command",
+            "execution_id",
+            "checkpoint_digest",
+            "checkpoint_command_index",
+            unique=True,
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -542,6 +564,10 @@ class RunnerJob(Base):
     timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     base_commit: Mapped[str] = mapped_column(String(64), nullable=False)
     preflight_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_snapshot_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    checkpoint_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    checkpoint_command_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    checkpoint_label: Mapped[str | None] = mapped_column(String(80), nullable=True)
     runner_image_id: Mapped[str | None] = mapped_column(String(71), nullable=True)
     exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     stdout: Mapped[str] = mapped_column(Text, default="")

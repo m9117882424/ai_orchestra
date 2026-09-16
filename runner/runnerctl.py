@@ -35,6 +35,7 @@ def main() -> int:
     run.add_argument("--execution-id", required=True)
     run.add_argument("--base-commit", required=True)
     run.add_argument("--preflight-digest", required=True)
+    run.add_argument("--source-snapshot-digest", default=None)
     run.add_argument("--request-id", default=None)
     run.add_argument("--timeout", type=int, default=60)
     run.add_argument("argv", nargs=argparse.REMAINDER)
@@ -58,6 +59,8 @@ def main() -> int:
             "argv": argv,
             "timeout_seconds": args.timeout,
         }
+        if args.source_snapshot_digest:
+            payload["source_snapshot_digest"] = args.source_snapshot_digest
     response = request(Path(args.socket), payload)
     print(json.dumps(response, ensure_ascii=False, sort_keys=True))
     return 0 if response.get("status") in {"ok", "completed"} else 1

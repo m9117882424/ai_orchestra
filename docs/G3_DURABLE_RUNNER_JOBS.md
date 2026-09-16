@@ -1,6 +1,6 @@
 # G3.2 — Durable Runner Jobs
 
-Статус: engineering candidate. Не является разрешением на production rollout.
+Статус: **production accepted 2026-09-16**.
 
 ## Цель
 
@@ -19,7 +19,9 @@ Control Plane принимает от manager только:
 - `argv` как массив строк;
 - bounded `timeout_seconds`.
 
-Клиент не передает repository/workspace/base/preflight identity. Эти поля копируются сервером из уже verified execution contract v2.Перед enqueue обязательны:
+Клиент не передает repository/workspace/base/preflight identity. Эти поля копируются сервером из уже verified execution contract v2.
+
+Перед enqueue обязательны:
 - execution contract v2;
 - immutable repository/workspace binding;
 - workspace preflight evidence;
@@ -39,7 +41,9 @@ Lease длиннее максимального runner timeout плюс response
 
 После expiry новый Runner Manager может получить новую generation. Старый manager больше не может зафиксировать результат.
 
-Перед Unix-socket side effect Manager повторно сверяет execution, workspace и repository trust.## Terminal evidence
+Перед Unix-socket side effect Manager повторно сверяет execution, workspace и repository trust.
+
+## Terminal evidence
 
 DB constraints не позволяют объявить `completed`, `failed` или `timed_out` без:
 - exact runner image identity;
@@ -61,7 +65,9 @@ Runner Manager поставляется отдельным opt-in Compose overla
 
 ## Evidence gates
 
-Unit/API/schema tests проверяют idempotency, immutable binding, trust recheck, lease generation и stale-owner rejection.`scripts/postgres-schema-smoke.sh` проверяет constraints непосредственно в PostgreSQL и schema-drift refusal.
+Unit/API/schema tests проверяют idempotency, immutable binding, trust recheck, lease generation и stale-owner rejection.
+
+`scripts/postgres-schema-smoke.sh` проверяет constraints непосредственно в PostgreSQL и schema-drift refusal.
 
 `scripts/runner-manager-durable-smoke.sh` выполняет реальный E2E:
 1. мигрирует изолированный PostgreSQL до `20260916_0008`;
@@ -73,6 +79,20 @@ Unit/API/schema tests проверяют idempotency, immutable binding, trust r
 7. восстанавливает job новой lease generation;
 8. проверяет trust revocation до runner side effect;
 9. подтверждает неизменность authoritative workspace и runtime isolation Manager.
+
+## Production acceptance 2026-09-16
+
+- merge/main SHA: `1496caf717bbf06cbacb2437ba931e227711a508`;
+- schema: `20260916_0008`;
+- host `runnerd` active, Unix socket `root:ai-orchestra-runner` mode `0660`;
+- Runner Manager container healthy и имеет только `control-db` + read-only runnerd socket;
+- pinned disposable image: `sha256:4eefe1580c38fdc3a536e9eb1f8a25adc55d8703675da376c68b6de3d55f06d2`;
+- acceptance execution: `5d612636-3e75-43a9-b1ac-e67230925753`;
+- acceptance workspace: `a63a6dae-3ff9-41d1-ae85-d6350da4dfe9`, retained, `changed_file_count=0`;
+- acceptance runner job: `6a24b32e-cb65-4a0f-91b4-07c2d9cbe4e9`, `completed`, exit `0`, cleanup confirmed;
+- audit lifecycle: `queued -> lease_claimed -> authorized -> completed`;
+- post-rollout verified backup: `ai-orchestra-20260916T114807Z.tar.gz`, SHA-256 `4ae77d6a3b532135e87c44810e8a6880b3d8bc97db3472a02edb478d9aebc8b4`;
+- full production model/runtime smoke: green, Model Gateway `5/5`.
 
 ## Что остается в G3
 

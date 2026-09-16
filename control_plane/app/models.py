@@ -446,3 +446,122 @@ class ExecutionRun(Base):
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class RunnerJob(Base):
+    __tablename__ = "runner_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'running', 'completed', 'failed', "
+            "'timed_out', 'cleanup_uncertain', 'rejected')",
+            name="ck_runner_jobs_status",
+        ),
+        CheckConstraint(
+            "timeout_seconds BETWEEN 1 AND 3600",
+            name="ck_runner_jobs_timeout",
+        ),
+        CheckConstraint(
+            "length(base_commit) IN (40, 64)",
+            name="ck_runner_jobs_base_commit",
+        ),
+        CheckConstraint(
+            "length(preflight_digest) = 64",
+            name="ck_runner_jobs_preflight_digest",
+        ),
+        CheckConstraint(
+            "runner_image_id IS NULL OR length(runner_image_id) = 71",
+            name="ck_runner_jobs_image_id",
+        ),
+        CheckConstraint(
+            "length(idempotency_key) = 36",
+            name="ck_runner_jobs_idempotency_key",
+        ),
+        CheckConstraint("lease_generation >= 0", name="ck_runner_jobs_lease_generation"),
+        CheckConstraint("failure_count >= 0", name="ck_runner_jobs_failure_count"),
+        CheckConstraint(
+            "((lease_owner IS NULL AND lease_expires_at IS NULL) OR "
+            "(lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL))",
+            name="ck_runner_jobs_lease_pair",
+        ),
+        CheckConstraint(
+            "((status = 'running' AND lease_owner IS NOT NULL "
+            "AND lease_expires_at IS NOT NULL) OR "
+            "(status <> 'running' AND lease_owner IS NULL "
+            "AND lease_expires_at IS NULL))",
+            name="ck_runner_jobs_active_lease",
+        ),
+        CheckConstraint(
+            "((status = 'queued' AND next_attempt_at IS NOT NULL) OR "
+            "(status <> 'queued' AND next_attempt_at IS NULL))",
+            name="ck_runner_jobs_queue_state",
+        ),
+        CheckConstraint(
+            "((status IN ('queued', 'running') AND finished_at IS NULL) OR "
+            "(status NOT IN ('queued', 'running') AND finished_at IS NOT NULL))",
+            name="ck_runner_jobs_terminal_time",
+        ),
+        CheckConstraint(
+            "((status IN ('completed', 'failed', 'timed_out') "
+            "AND cleanup_confirmed = TRUE AND runner_image_id IS NOT NULL) OR "
+            "(status = 'cleanup_uncertain' AND cleanup_confirmed = FALSE) OR "
+            "(status = 'rejected' AND cleanup_confirmed = TRUE) OR "
+            "(status IN ('queued', 'running') AND cleanup_confirmed IS NULL))",
+            name="ck_runner_jobs_cleanup_state",
+        ),
+        CheckConstraint(
+            "((status IN ('completed', 'failed') AND exit_code IS NOT NULL) OR "
+            "(status IN ('queued', 'running', 'timed_out', 'rejected') "
+            "AND exit_code IS NULL) OR status = 'cleanup_uncertain')",
+            name="ck_runner_jobs_exit_code",
+        ),
+        Index(
+            "ux_runner_jobs_execution_idempotency",
+            "execution_id",
+            "idempotency_key",
+            unique=True,
+        ),
+        Index("ix_runner_jobs_queue", "status", "next_attempt_at"),
+        Index("ix_runner_jobs_lease", "lease_expires_at"),
+        Index("ix_runner_jobs_execution", "execution_id", "status"),
+        Index("ix_runner_jobs_repository", "repository_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("execution_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    repository_id: Mapped[str] = mapped_column(
+        ForeignKey("repositories.id", ondelete="RESTRICT"), nullable=False
+    )
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("task_workspaces.id", ondelete="RESTRICT"), nullable=False
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(36), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="queued")
+    argv: Mapped[list] = mapped_column(JSON, nullable=False)
+    timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    base_commit: Mapped[str] = mapped_column(String(64), nullable=False)
+    preflight_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    runner_image_id: Mapped[str | None] = mapped_column(String(71), nullable=True)
+    exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    stdout: Mapped[str] = mapped_column(Text, default="")
+    stderr: Mapped[str] = mapped_column(Text, default="")
+    output_truncated: Mapped[bool] = mapped_column(Boolean, default=False)
+    cleanup_confirmed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    lease_owner: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    lease_generation: Mapped[int] = mapped_column(Integer, default=0)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )

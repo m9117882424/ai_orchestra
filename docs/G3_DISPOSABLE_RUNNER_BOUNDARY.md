@@ -40,7 +40,7 @@ Runner image проверяет `.git/ai-orchestra-workspace.json` против 
 
 ## Host broker
 
-`runnerd` запускается отдельным hardened systemd service. Socket имеет mode `0660` и отдельную группу `ai-orchestra-runner`. Будущий Runner Manager получает только этот Unix socket; `/var/run/docker.sock` в контейнеры не bind-mountится.
+`runnerd` запускается отдельным hardened systemd service. Socket имеет mode `0660` и отдельную группу `ai-orchestra-runner`. G3.2 Runner Manager получает только этот Unix socket; `/var/run/docker.sock` в контейнеры не bind-mountится.
 
 Service использует `PrivateNetwork`, `PrivateDevices`, `ProtectSystem=strict`, пустой capability bounding set и другие systemd sandbox controls. Root нужен только как узкий broker к host Docker daemon; untrusted code root не получает.
 
@@ -60,7 +60,7 @@ Service использует `PrivateNetwork`, `PrivateDevices`, `ProtectSystem=
 
 ## Ограничения этого slice
 
-- Durable `runner_jobs`, lease/fencing/retry и связь с execution появятся в G3.2.
+- Durable `runner_jobs`, lease/fencing/retry и связь с execution реализованы в G3.2; см. `G3_DURABLE_RUNNER_JOBS.md`.
 - Artifact export из disposable snapshot относится к G4 evidence/result package.
 - Runner toolchain image использует pinned base digest и runtime admission по exact image ID, но apt tool packages пока не зафиксированы как полностью reproducible supply-chain baseline; это обязательный follow-up перед controlled/high-assurance use.
 - Same-host Docker container — development-stage security boundary. Для high-value/private проектов целевой профиль использует отдельный runner host/VM pool.

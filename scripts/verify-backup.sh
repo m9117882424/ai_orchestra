@@ -91,11 +91,11 @@ root="$staging_dir/extracted"
 
 backup_format=1
 if [[ -f "$root/BACKUP_FORMAT" ]]; then
-  if [[ "$(tr -d '\r\n' < "$root/BACKUP_FORMAT")" != "2" ]]; then
+  backup_format="$(tr -d '\r\n' < "$root/BACKUP_FORMAT")"
+  if [[ "$backup_format" != "2" && "$backup_format" != "3" ]]; then
     echo "[FAIL] Unsupported BACKUP_FORMAT" >&2
     exit 1
   fi
-  backup_format=2
 fi
 
 for required in \
@@ -111,9 +111,22 @@ for required in \
   fi
 done
 
-if [[ "$backup_format" == "2" && ! -s "$root/task-workspaces.tar.gz" ]]; then
+if [[ "$backup_format" != "1" && ! -s "$root/task-workspaces.tar.gz" ]]; then
   echo "[FAIL] Required backup payload missing: task-workspaces.tar.gz" >&2
   exit 1
+fi
+
+if [[ "$backup_format" == "3" ]]; then
+  for required in \
+    configuration/runner/Dockerfile \
+    configuration/runner/runnerd.py \
+    configuration/runner/entrypoint.py \
+    configuration/runner/systemd/ai-orchestra-runnerd.service; do
+    if [[ ! -f "$root/$required" ]]; then
+      echo "[FAIL] G3 backup payload missing: $required" >&2
+      exit 1
+    fi
+  done
 fi
 
 python3 - "$root" <<'PY'
@@ -183,7 +196,7 @@ if [[ ! -s "$root/control-plane.pgdump" ]]; then
   exit 1
 fi
 
-if [[ "$backup_format" == "2" ]]; then
+if [[ "$backup_format" != "1" ]]; then
   python3 - "$root/task-workspaces.tar.gz" <<'PY'
 from pathlib import PurePosixPath
 import posixpath

@@ -95,6 +95,9 @@ jobs:
       - name: Проверить disposable runner isolation boundary
         run: bash ./scripts/runner-isolation-smoke.sh
 
+      - name: Проверить durable Runner Manager boundary
+        run: bash ./scripts/runner-manager-durable-smoke.sh
+
       - name: Проверить Temporal durable-workflow PoC
         run: bash ./scripts/temporal-durable-smoke.sh
 

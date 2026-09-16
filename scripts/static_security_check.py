@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -40,6 +41,35 @@ def resolved_compose() -> dict:
     result = subprocess.run(
         ["docker", "compose", "config", "--format", "json"],
         cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def resolved_runner_overlay() -> dict:
+    env = os.environ.copy()
+    env.update(
+        {
+            "RUNNERD_SOCKET_GID": "9999",
+            "RUNNERD_SOCKET_HOST_PATH": "/run/ai-orchestra/runnerd.sock",
+        }
+    )
+    result = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "-f",
+            "docker-compose.yml",
+            "-f",
+            "deploy/docker-compose.runner-manager.yml",
+            "config",
+            "--format",
+            "json",
+        ],
+        cwd=ROOT,
+        env=env,
         check=True,
         capture_output=True,
         text=True,
@@ -435,7 +465,7 @@ def main() -> int:
     assert "export-backup-offsite.sh" not in backup_script, "Local backup must not gain implicit external effects"
     assert 'flock -n 9' in backup_script
     assert 'bash ./scripts/verify-backup.sh "$archive"' in backup_script
-    assert "printf '2\\n' > \"$staging_dir/BACKUP_FORMAT\"" in backup_script
+    assert "printf '3\\n' > \"$staging_dir/BACKUP_FORMAT\"" in backup_script
     assert "control-plane execution-worker workspace-manager opencode" in backup_script
     assert "docker compose pause" in backup_script
     assert "docker compose unpause" in backup_script
@@ -452,6 +482,26 @@ def main() -> int:
     assert "escaping workspace symlink" in verify_backup_script
     assert 'or ".git" in path.parts' in verify_backup_script
     assert "BACKUP_FORMAT" in verify_backup_script
+    assert "configuration/runner/runnerd.py" in verify_backup_script
+    assert "configuration/runner/systemd/ai-orchestra-runnerd.service" in verify_backup_script
+    assert 'backup_root="${BACKUP_ROOT:-$project_root/backups}"' in backup_script
+    assert 'evidence_dir="${BACKUP_ROOT:-$project_root/backups}/drills"' in restore_drill_script
+    backup_restore_smoke = (ROOT / "scripts/backup-restore-smoke.sh").read_text(encoding="utf-8")
+    postgres_schema_smoke = (ROOT / "scripts/postgres-schema-smoke.sh").read_text(encoding="utf-8")
+    assert 'COMPOSE_PROJECT_NAME="ai-orchestra-backup-restore-smoke-' in backup_restore_smoke
+    assert 'COMPOSE_PROJECT_NAME="ai-orchestra-postgres-schema-smoke-' in postgres_schema_smoke
+    assert 'rm -rf "$project_root/backups"' not in backup_restore_smoke
+    assert 'BACKUP_ROOT="$(mktemp -d /tmp/ai-orchestra-backup-smoke.' in backup_restore_smoke
+    for destructive_smoke in (backup_restore_smoke, postgres_schema_smoke):
+        assert 'docker compose down -v --remove-orphans' in destructive_smoke
+        assert 'ai-development-department' in destructive_smoke
+        assert 'Refusing destructive' in destructive_smoke
+        assert 'COMPOSE_FILE=' in destructive_smoke
+        assert 'ai-orchestra/' in destructive_smoke
+        assert 'docker image rm -f' in destructive_smoke
+    assert 'control-plane-schema-smoke:' in postgres_schema_smoke
+    assert 'control-plane-backup-smoke:' in backup_restore_smoke
+    assert 'workspace-manager-backup-smoke:' in backup_restore_smoke
     assert "ai-orchestra-restore-net-" in restore_drill_script
     assert "ai-orchestra-restore-vol-" in restore_drill_script
     assert "--network-alias restore-postgres" in restore_drill_script
@@ -461,6 +511,8 @@ def main() -> int:
     assert "task-workspaces.tar.gz" in restore_drill_script
     assert "Restored workspace directories missing database rows" in restore_drill_script
     assert "verify_restored_git_workspace" in restore_drill_script
+    assert "Runner job restore reconciled" in restore_drill_script
+    assert "runner_job_restore" in restore_drill_script
     assert "docker compose exec" not in restore_drill_script, "Restore drill must never execute against production Compose services"
     assert "BACKUP_OFFSITE_ENCRYPTION_AT_REST_CONFIRMED" in offsite_script
     assert "BACKUP_OFFSITE_AUTHENTICATED_TRANSPORT_CONFIRMED" in offsite_script
@@ -618,6 +670,10 @@ def main() -> int:
     runner_dockerfile = (ROOT / "runner/Dockerfile").read_text(encoding="utf-8")
     runner_service = (ROOT / "runner/systemd/ai-orchestra-runnerd.service").read_text(encoding="utf-8")
     runner_smoke = (ROOT / "scripts/runner-isolation-smoke.sh").read_text(encoding="utf-8")
+    runner_manager_smoke = (ROOT / "scripts/runner-manager-durable-smoke.sh").read_text(encoding="utf-8")
+    assert 'control-plane-runner-smoke:' in runner_manager_smoke
+    assert 'runner-manager-control-smoke:' in runner_manager_smoke
+    assert 'docker image rm -f "$TAG" "$CONTROL_TAG" "$MANAGER_TAG"' in runner_manager_smoke
     for marker in (
         '"--network", "none"', '"--read-only"', '"--cap-drop", "ALL"',
         'no-new-privileges:true', 'volume-subpath=', 'dst=/source', 'readonly',
@@ -643,6 +699,67 @@ def main() -> int:
     assert "/var/lib/docker/volumes" not in runner_smoke
     assert '-v "$VOLUME:/v:ro"' in runner_smoke
     assert "docker ps -aq --filter 'name=^ai-orchestra-runner-'" not in runner_smoke
+
+
+    runner_manager_text = (
+        ROOT / "control_plane/app/runner_manager.py"
+    ).read_text(encoding="utf-8")
+    runner_overlay = resolved_runner_overlay()
+    runner_manager_service = runner_overlay["services"]["runner-manager"]
+    assert network_set(runner_manager_service) == {"control-db"}
+    assert str(runner_manager_service.get("user")) == "10001:10001"
+    assert runner_manager_service.get("read_only") is True
+    assert set(runner_manager_service.get("cap_drop") or []) == {"ALL"}
+    runner_mounts = runner_manager_service.get("volumes") or []
+    assert len(runner_mounts) == 1
+    assert runner_mounts[0].get("target") == "/run/ai-orchestra/runnerd.sock"
+    assert str(runner_mounts[0].get("source")) == "/run/ai-orchestra/runnerd.sock"
+    assert runner_mounts[0].get("read_only") is True
+    runner_env = runner_manager_service.get("environment") or {}
+    assert runner_env.get("CONTROL_PLANE_SERVER_PASSWORD") == (
+        "runner-manager-does-not-use-manager-auth"
+    )
+    assert runner_env.get("CONTROL_PLANE_OPENCODE_PASSWORD") == (
+        "runner-manager-does-not-use-opencode-auth"
+    )
+    for forbidden in (
+        "AITUNNEL_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GOOGLE_GENERATIVE_AI_API_KEY",
+        "MODEL_ROUTER_MASTER_KEY",
+        "MODEL_ROUTER_CLIENT_KEY",
+        "REPO_MANAGER_AUTH_PROFILES_JSON",
+    ):
+        assert forbidden not in runner_env
+    for marker in (
+        "with_for_update(skip_locked=True)",
+        "lease_generation",
+        "RunnerOutcomeUnknown",
+        "repository_trust_revoked",
+        "runner_job.authorized",
+        "runner_identity_mismatch",
+        "AF_UNIX",
+    ):
+        assert marker in runner_manager_text, (
+            f"Runner Manager safety marker missing: {marker}"
+        )
+    assert "subprocess" not in runner_manager_text
+    assert "/var/run/docker.sock" not in runner_manager_text
+    assert "shell=True" not in runner_manager_text
+    base_compose_text = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "runner-manager:" not in base_compose_text
+    runner_overlay_text = (
+        ROOT / "deploy/docker-compose.runner-manager.yml"
+    ).read_text(encoding="utf-8")
+    assert "RUNNERD_SOCKET_GID:?" in runner_overlay_text
+    assert "RUNNERD_SOCKET_HOST_PATH:?" in runner_overlay_text
+
+
+    smoke_script = (ROOT / "scripts/smoke.sh").read_text(encoding="utf-8")
+    assert "gateway_ip=" in smoke_script
+    assert "docker compose ps --status running -q model-gateway" in smoke_script
+    assert "docker compose exec -T opencode" in smoke_script
 
     shared = (ROOT / "config/model-router.shared.yaml").read_text(encoding="utf-8")
     direct = (ROOT / "config/model-router.separate.yaml").read_text(encoding="utf-8")

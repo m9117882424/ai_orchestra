@@ -1,0 +1,67 @@
+services:
+  runner-manager:
+    build:
+      context: ./control_plane
+      target: runner-manager
+    image: ai-development-department/runner-manager:0.10.0
+    restart: unless-stopped
+    init: true
+    user: "10001:10001"
+    group_add:
+      - "${RUNNERD_SOCKET_GID:?RUNNERD_SOCKET_GID must match ai-orchestra-runner host group}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    command: ["python", "-m", "app.runner_manager"]
+    environment:
+      CONTROL_PLANE_ENVIRONMENT: production
+      CONTROL_PLANE_DB_HOST: postgres
+      CONTROL_PLANE_DB_PORT: 5432
+      CONTROL_PLANE_DB_NAME: ai_orchestra
+      CONTROL_PLANE_DB_USER: ai_orchestra
+      CONTROL_PLANE_DB_PASSWORD: ${CONTROL_PLANE_DB_PASSWORD}
+      CONTROL_PLANE_SERVER_USERNAME: runner-manager
+      CONTROL_PLANE_SERVER_PASSWORD: runner-manager-does-not-use-manager-auth
+      CONTROL_PLANE_OPENCODE_PASSWORD: runner-manager-does-not-use-opencode-auth
+      RUNNER_MANAGER_SOCKET_PATH: /run/ai-orchestra/runnerd.sock
+      RUNNER_MANAGER_HEALTH_PATH: /tmp/ai-orchestra-runner-manager.heartbeat
+      RUNNER_MANAGER_LEASE_PADDING_SECONDS: ${RUNNER_MANAGER_LEASE_PADDING_SECONDS:-180}
+      RUNNER_MANAGER_RESPONSE_PADDING_SECONDS: ${RUNNER_MANAGER_RESPONSE_PADDING_SECONDS:-150}
+      RUNNER_MANAGER_RETRY_BASE_SECONDS: ${RUNNER_MANAGER_RETRY_BASE_SECONDS:-5}
+      RUNNER_MANAGER_RETRY_MAX_SECONDS: ${RUNNER_MANAGER_RETRY_MAX_SECONDS:-300}
+      RUNNER_MANAGER_MAX_ACTIVE: ${RUNNER_MANAGER_MAX_ACTIVE:-2}
+      RUNNER_MANAGER_POLL_SECONDS: ${RUNNER_MANAGER_POLL_SECONDS:-2}
+    volumes:
+      - type: bind
+        source: "${RUNNERD_SOCKET_HOST_PATH:?RUNNERD_SOCKET_HOST_PATH is required}"
+        target: /run/ai-orchestra/runnerd.sock
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      - control-db
+    depends_on:
+      postgres:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 0.35
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,time; p='/tmp/ai-orchestra-runner-manager.heartbeat'; assert os.path.isfile(p) and time.time()-os.path.getmtime(p) < 180"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"

@@ -7,7 +7,7 @@ import pytest
 
 from control_plane.app.db import SessionLocal, engine
 from control_plane.app.main import app
-from control_plane.app.models import ExecutionRun, Repository, Task, TaskWorkspace
+from control_plane.app.models import ExecutionRun, Repository, RunnerJob, Task, TaskWorkspace
 from control_plane.app.opencode_client import OpenCodeError
 from control_plane.app.settings import Settings
 
@@ -557,6 +557,179 @@ def _seed_retained_workspace(*, has_changes: bool) -> tuple[str, int]:
         db.commit()
     return workspace_id, 1
 
+
+
+def _seed_verified_runner_execution() -> tuple[str, str, str]:
+    now = datetime.now(timezone.utc)
+    repository_id = _seed_ready_repository()
+    task_id = str(uuid4())
+    workspace_id = str(uuid4())
+    run_id = str(uuid4())
+    base_commit = "a" * 40
+    tree = "b" * 40
+    digest = "c" * 64
+    with SessionLocal() as db:
+        db.add(
+            Task(
+                id=task_id,
+                title="Runner verified execution",
+                repository_id=repository_id,
+                status="in_progress",
+            )
+        )
+        db.add(
+            TaskWorkspace(
+                id=workspace_id,
+                task_id=task_id,
+                repository_id=repository_id,
+                status="ready",
+                base_commit=base_commit,
+                base_branch="main",
+                branch_name=(
+                    f"ai-orchestra/task-{task_id.replace('-', '')[:12]}"
+                    f"/run-{run_id.replace('-', '')}"
+                ),
+                opencode_path=f"/workspace/worktrees/managed/{workspace_id}",
+                initial_tree=tree,
+                preflight_digest=digest,
+                tracked_entries=2,
+                prepared_at=now,
+                version=1,
+            )
+        )
+        db.add(
+            ExecutionRun(
+                id=run_id,
+                task_id=task_id,
+                contract_version=2,
+                repository_id=repository_id,
+                workspace_id=workspace_id,
+                base_commit=base_commit,
+                workspace_path=f"/workspace/worktrees/managed/{workspace_id}",
+                workspace_tree=tree,
+                workspace_preflight_digest=digest,
+                workspace_preflight_completed_at=now,
+                workspace_runtime_preflight_digest=digest,
+                workspace_runtime_verified_at=now,
+                status="running",
+                stage="department_lead",
+                opencode_session_id=f"session-{run_id}",
+            )
+        )
+        db.commit()
+    return run_id, workspace_id, repository_id
+
+
+def test_runner_job_enqueue_copies_verified_binding_and_is_idempotent(
+    auth, mutation_headers
+):
+    run_id, workspace_id, repository_id = _seed_verified_runner_execution()
+    key = str(uuid4())
+    payload = {
+        "idempotency_key": key,
+        "argv": ["python3", "-c", "print('ok')"],
+        "timeout_seconds": 90,
+    }
+    with TestClient(app) as client:
+        first = client.post(
+            f"/api/executions/{run_id}/runner-jobs",
+            auth=auth,
+            headers=mutation_headers,
+            json=payload,
+        )
+        repeated = client.post(
+            f"/api/executions/{run_id}/runner-jobs",
+            auth=auth,
+            headers=mutation_headers,
+            json=payload,
+        )
+        listed = client.get(f"/api/executions/{run_id}/runner-jobs", auth=auth)
+        audit = client.get("/api/audit", auth=auth).json()
+
+    assert first.status_code == 201
+    assert repeated.status_code == 201
+    assert first.json()["id"] == repeated.json()["id"]
+    assert first.json()["repository_id"] == repository_id
+    assert first.json()["workspace_id"] == workspace_id
+    assert first.json()["base_commit"] == "a" * 40
+    assert first.json()["preflight_digest"] == "c" * 64
+    assert first.json()["status"] == "queued"
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()] == [first.json()["id"]]
+    assert sum(event["action"] == "runner_job.queued" for event in audit) == 1
+
+
+def test_runner_job_idempotency_key_rejects_payload_change(auth, mutation_headers):
+    run_id, _, _ = _seed_verified_runner_execution()
+    key = str(uuid4())
+    with TestClient(app) as client:
+        first = client.post(
+            f"/api/executions/{run_id}/runner-jobs",
+            auth=auth,
+            headers=mutation_headers,
+            json={"idempotency_key": key, "argv": ["make", "test"], "timeout_seconds": 60},
+        )
+        changed = client.post(
+            f"/api/executions/{run_id}/runner-jobs",
+            auth=auth,
+            headers=mutation_headers,
+            json={"idempotency_key": key, "argv": ["make", "lint"], "timeout_seconds": 60},
+        )
+
+    assert first.status_code == 201
+    assert changed.status_code == 409
+    with SessionLocal() as db:
+        assert db.query(RunnerJob).count() == 1
+
+
+def test_runner_job_rejects_client_supplied_binding_fields(auth, mutation_headers):
+    run_id, workspace_id, _ = _seed_verified_runner_execution()
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/executions/{run_id}/runner-jobs",
+            auth=auth,
+            headers=mutation_headers,
+            json={
+                "idempotency_key": str(uuid4()),
+                "argv": ["true"],
+                "timeout_seconds": 30,
+                "workspace_id": workspace_id,
+                "base_commit": "f" * 40,
+                "preflight_digest": "f" * 64,
+            },
+        )
+
+    assert response.status_code == 422
+    with SessionLocal() as db:
+        assert db.query(RunnerJob).count() == 0
+
+
+def test_runner_job_requires_current_repository_trust(auth, mutation_headers):
+    run_id, _, repository_id = _seed_verified_runner_execution()
+    with SessionLocal() as db:
+        repository = db.get(Repository, repository_id)
+        assert repository is not None
+        repository.enabled = False
+        repository.status = "unavailable"
+        repository.last_known_commit = None
+        repository.last_fetched_at = None
+        repository.sync_finished_at = None
+        db.commit()
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/executions/{run_id}/runner-jobs",
+            auth=auth,
+            headers=mutation_headers,
+            json={
+                "idempotency_key": str(uuid4()),
+                "argv": ["true"],
+                "timeout_seconds": 30,
+            },
+        )
+
+    assert response.status_code == 409
+    with SessionLocal() as db:
+        assert db.query(RunnerJob).count() == 0
 
 def test_cleanup_request_requires_clean_inspection_and_exact_version(
     auth,

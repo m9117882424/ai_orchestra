@@ -39,7 +39,7 @@ _REVISION_EXCLUDED_COLUMNS = {
     )
 }
 _REVISION_ABSENT_TABLES = {
-    LEGACY_BASELINE_REVISION: frozenset({"repositories", "task_workspaces"}),
+    LEGACY_BASELINE_REVISION: frozenset({"repositories", "task_workspaces", "runner_jobs"}),
 }
 _REVISION_EXCLUDED_INDEXES = {
     LEGACY_BASELINE_REVISION: frozenset(

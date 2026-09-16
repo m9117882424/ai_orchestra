@@ -55,11 +55,13 @@ def _backup_archive(
     duplicate_path: bool = False,
     escaping_workspace_symlink: bool = False,
     git_directory_symlink: bool = False,
+    backup_format: int = 2,
+    include_runner: bool = True,
 ) -> Path:
     payload = tmp_path / "payload"
     app_dir = payload / "configuration" / "control_plane" / "app"
     app_dir.mkdir(parents=True)
-    (payload / "BACKUP_FORMAT").write_text("2\n", encoding="utf-8")
+    (payload / "BACKUP_FORMAT").write_text(f"{backup_format}\n", encoding="utf-8")
     (payload / "control-plane.pgdump").write_bytes(b"test-postgresql-dump")
     (payload / "configuration" / "docker-compose.yml").write_text(
         "services: {}\n",
@@ -74,6 +76,15 @@ def _backup_archive(
         encoding="utf-8",
     )
     (app_dir / "__init__.py").write_text("", encoding="utf-8")
+    if backup_format == 3 and include_runner:
+        runner_dir = payload / "configuration" / "runner"
+        (runner_dir / "systemd").mkdir(parents=True)
+        (runner_dir / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+        (runner_dir / "runnerd.py").write_text("", encoding="utf-8")
+        (runner_dir / "entrypoint.py").write_text("", encoding="utf-8")
+        (runner_dir / "systemd" / "ai-orchestra-runnerd.service").write_text(
+            "[Service]\n", encoding="utf-8"
+        )
     _task_archive(
         payload / "task-workspaces.tar.gz",
         escaping_symlink=escaping_workspace_symlink,
@@ -118,6 +129,18 @@ def test_format_two_backup_verifier_accepts_safe_complete_archive(tmp_path):
     assert "checksum inventory safe" in result.stdout
     assert "task workspace archive safe" in result.stdout
     assert "Backup verified: format=2" in result.stdout
+
+
+def test_format_three_backup_verifier_requires_and_accepts_runner_payload(tmp_path):
+    accepted = _verify(_backup_archive(tmp_path / "accepted", backup_format=3))
+    rejected = _verify(
+        _backup_archive(tmp_path / "missing", backup_format=3, include_runner=False)
+    )
+
+    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+    assert "Backup verified: format=3" in accepted.stdout
+    assert rejected.returncode != 0
+    assert "G3 backup payload missing" in rejected.stdout + rejected.stderr
 
 
 def test_backup_verifier_rejects_checksum_path_traversal(tmp_path):

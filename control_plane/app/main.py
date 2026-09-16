@@ -20,6 +20,7 @@ from .models import (
     CapabilityGuard,
     ExecutionRun,
     Repository,
+    RunnerJob,
     Task,
     TaskWorkspace,
     UsageEvent,
@@ -46,6 +47,8 @@ from .schemas import (
     RepositoryStatus,
     RepositoryUpdate,
     RepositoryValidationRequest,
+    RunnerJobCreate,
+    RunnerJobRead,
     TaskCreate,
     TaskRead,
     TaskRepositoryUpdate,
@@ -874,6 +877,153 @@ def start_execution(
     db.commit()
     db.refresh(run)
     return run
+
+
+@app.post(
+    "/api/executions/{execution_id}/runner-jobs",
+    response_model=RunnerJobRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_runner_job(
+    execution_id: str,
+    payload: RunnerJobCreate,
+    db: DbSession,
+    manager: Manager,
+    _: Mutation,
+) -> RunnerJob:
+    run = db.scalar(
+        select(ExecutionRun)
+        .where(ExecutionRun.id == execution_id)
+        .with_for_update()
+    )
+    if run is None:
+        raise HTTPException(status_code=404, detail="Запуск не найден")
+
+    idempotency_key = str(payload.idempotency_key)
+    existing = db.scalar(
+        select(RunnerJob).where(
+            RunnerJob.execution_id == run.id,
+            RunnerJob.idempotency_key == idempotency_key,
+        )
+    )
+    if existing is not None:
+        if existing.argv != payload.argv or existing.timeout_seconds != payload.timeout_seconds:
+            raise HTTPException(
+                status_code=409,
+                detail="Idempotency key уже использован с другим runner payload",
+            )
+        return existing
+
+    if run.contract_version != 2 or run.status not in {"running", "completed"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Runner job разрешен только для verified execution contract v2",
+        )
+    if run.cancel_requested_at is not None:
+        raise HTTPException(status_code=409, detail="Execution уже отменяется")
+    if (
+        not run.repository_id
+        or not run.workspace_id
+        or not run.base_commit
+        or not run.workspace_preflight_digest
+        or run.workspace_runtime_verified_at is None
+        or run.workspace_runtime_preflight_digest != run.workspace_preflight_digest
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Execution не имеет подтвержденной immutable workspace binding",
+        )
+
+    repository = db.scalar(
+        select(Repository)
+        .where(Repository.id == run.repository_id)
+        .with_for_update()
+    )
+    if repository is None or not repository.enabled or repository.status != "ready":
+        raise HTTPException(status_code=409, detail="Доверие к репозиторию не подтверждено")
+    workspace = db.scalar(
+        select(TaskWorkspace)
+        .where(TaskWorkspace.id == run.workspace_id)
+        .with_for_update()
+    )
+    if (
+        workspace is None
+        or workspace.repository_id != run.repository_id
+        or workspace.base_commit != run.base_commit
+        or workspace.preflight_digest != run.workspace_preflight_digest
+        or workspace.status not in {"ready", "inspection_pending", "inspecting", "retained"}
+    ):
+        raise HTTPException(status_code=409, detail="Workspace binding больше не пригодна для runner")
+
+    now = datetime.now(timezone.utc)
+    job = RunnerJob(
+        execution_id=run.id,
+        repository_id=run.repository_id,
+        workspace_id=run.workspace_id,
+        idempotency_key=idempotency_key,
+        status="queued",
+        argv=list(payload.argv),
+        timeout_seconds=payload.timeout_seconds,
+        base_commit=run.base_commit,
+        preflight_digest=run.workspace_preflight_digest,
+        stdout="",
+        stderr="",
+        output_truncated=False,
+        cleanup_confirmed=None,
+        next_attempt_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(job)
+    db.flush()
+    write_audit(
+        db,
+        actor=manager,
+        action="runner_job.queued",
+        entity_type="runner_job",
+        entity_id=job.id,
+        details={
+            "execution_id": run.id,
+            "repository_id": run.repository_id,
+            "workspace_id": run.workspace_id,
+            "idempotency_key": idempotency_key,
+            "timeout_seconds": payload.timeout_seconds,
+            "argv_count": len(payload.argv),
+            "base_commit": run.base_commit,
+            "preflight_digest": run.workspace_preflight_digest,
+        },
+    )
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+@app.get(
+    "/api/executions/{execution_id}/runner-jobs",
+    response_model=list[RunnerJobRead],
+)
+def list_runner_jobs(
+    execution_id: str,
+    db: DbSession,
+    _: Manager,
+) -> list[RunnerJob]:
+    if db.get(ExecutionRun, execution_id) is None:
+        raise HTTPException(status_code=404, detail="Запуск не найден")
+    return list(
+        db.scalars(
+            select(RunnerJob)
+            .where(RunnerJob.execution_id == execution_id)
+            .order_by(RunnerJob.created_at.asc())
+        )
+    )
+
+
+@app.get("/api/runner-jobs/{job_id}", response_model=RunnerJobRead)
+def get_runner_job(job_id: str, db: DbSession, _: Manager) -> RunnerJob:
+    job = db.get(RunnerJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Runner job не найден")
+    return job
 
 
 @app.post("/api/executions/{execution_id}/abort", response_model=ExecutionRead)

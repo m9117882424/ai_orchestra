@@ -9,16 +9,32 @@ set -a
 source .env
 set +a
 
-gateway_health="http://127.0.0.1:${MODEL_GATEWAY_PORT:-18089}/health"
-curl -fsS "$gateway_health" >/dev/null
+gateway_base="http://127.0.0.1:${MODEL_GATEWAY_PORT:-18089}"
+if ! curl -fsS --max-time 3 "$gateway_base/health" >/dev/null 2>&1; then
+  gateway_id="$(docker compose ps --status running -q model-gateway)"
+  if [[ -z "$gateway_id" ]]; then
+    echo "[FAIL] Model Gateway не запущен" >&2
+    exit 1
+  fi
+  gateway_ip="$(docker inspect "$gateway_id" --format '{{range .NetworkSettings.Networks}}{{if .IPAddress}}{{.IPAddress}}{{println}}{{end}}{{end}}' | head -n1)"
+  if [[ -z "$gateway_ip" ]]; then
+    echo "[FAIL] Model Gateway не имеет runtime IP" >&2
+    exit 1
+  fi
+  gateway_base="http://${gateway_ip}:8080"
+  curl -fsS --max-time 3 "$gateway_base/health" >/dev/null
+fi
 echo "[OK] Inference Model Gateway отвечает"
 
 python3 scripts/model_router_smoke.py \
-  --base-url "http://127.0.0.1:${MODEL_GATEWAY_PORT:-18089}/v1" \
+  --base-url "$gateway_base/v1" \
   --mode "${KEY_MODE:-shared}"
 
 health_url="http://127.0.0.1:${OPENCODE_PORT:-4096}/global/health"
-curl -fsS -u "${OPENCODE_SERVER_USERNAME}:${OPENCODE_SERVER_PASSWORD}" "$health_url" >/dev/null
+if ! curl -fsS --max-time 3 -u "${OPENCODE_SERVER_USERNAME}:${OPENCODE_SERVER_PASSWORD}" "$health_url" >/dev/null 2>&1; then
+  docker compose exec -T opencode sh -lc \
+    'curl -fsS -u "$OPENCODE_SERVER_USERNAME:$OPENCODE_SERVER_PASSWORD" http://127.0.0.1:4096/global/health >/dev/null'
+fi
 echo "[OK] OpenCode Web отвечает"
 
 control_plane_url="http://127.0.0.1:${CONTROL_PLANE_PORT:-8088}"

@@ -72,7 +72,7 @@ if [[ -f "$staging_dir/payload/BACKUP_FORMAT" ]]; then
 fi
 workspace_restore_root="$staging_dir/task-workspaces"
 mkdir -p "$workspace_restore_root"
-if [[ "$backup_format" == "2" ]]; then
+if [[ "$backup_format" == "2" || "$backup_format" == "3" ]]; then
   tar -xzf "$staging_dir/payload/task-workspaces.tar.gz" \
     -C "$workspace_restore_root" \
     --no-same-owner --no-same-permissions --delay-directory-restore
@@ -236,7 +236,7 @@ if backup_format == "1" and rows:
     raise SystemExit(
         "[FAIL] Legacy backup has workspace database rows but no task-workspaces payload"
     )
-if backup_format not in {"1", "2"}:
+if backup_format not in {"1", "2", "3"}:
     raise SystemExit(f"[FAIL] Unsupported backup format during restore: {backup_format}")
 
 missing = []
@@ -443,6 +443,41 @@ print(
 )
 PY
 
+runner_job_rows="$(docker exec "$db_container" psql -U "$db_user" -d "$db_name" -Atc "SELECT count(*) FROM runner_jobs")"
+runner_job_invalid_bindings="$(docker exec "$db_container" psql -U "$db_user" -d "$db_name" -Atc "
+SELECT count(*)
+FROM runner_jobs AS j
+LEFT JOIN execution_runs AS e ON e.id = j.execution_id
+LEFT JOIN task_workspaces AS w ON w.id = j.workspace_id
+LEFT JOIN repositories AS r ON r.id = j.repository_id
+WHERE e.id IS NULL OR w.id IS NULL OR r.id IS NULL
+   OR e.contract_version <> 2
+   OR e.repository_id IS DISTINCT FROM j.repository_id
+   OR e.workspace_id IS DISTINCT FROM j.workspace_id
+   OR e.base_commit IS DISTINCT FROM j.base_commit
+   OR e.workspace_preflight_digest IS DISTINCT FROM j.preflight_digest
+   OR e.workspace_runtime_preflight_digest IS DISTINCT FROM j.preflight_digest
+   OR e.workspace_runtime_verified_at IS NULL
+   OR w.repository_id IS DISTINCT FROM j.repository_id
+   OR w.base_commit IS DISTINCT FROM j.base_commit
+   OR w.preflight_digest IS DISTINCT FROM j.preflight_digest
+")"
+if [[ "$runner_job_invalid_bindings" != "0" ]]; then
+  echo "[FAIL] Restored runner_jobs contain invalid immutable bindings: $runner_job_invalid_bindings" >&2
+  exit 1
+fi
+
+runner_job_restore_file="$staging_dir/runner-job-restore.json"
+python3 - "$runner_job_rows" "$runner_job_restore_file" <<'PYRUNNER'
+import json, pathlib, sys
+rows = int(sys.argv[1])
+payload = {"database_rows": rows, "bindings_verified": rows}
+pathlib.Path(sys.argv[2]).write_text(
+    json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8"
+)
+print(f"[OK] Runner job restore reconciled: database_rows={rows}")
+PYRUNNER
+
 table_counts_file="$staging_dir/table-counts.tsv"
 : > "$table_counts_file"
 while IFS= read -r table_name; do
@@ -459,7 +494,7 @@ end_epoch="$(date +%s)"
 end_utc="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 restore_seconds=$((end_epoch - start_epoch))
 
-evidence_dir="$project_root/backups/drills"
+evidence_dir="${BACKUP_ROOT:-$project_root/backups}/drills"
 mkdir -p "$evidence_dir"
 evidence="$evidence_dir/restore-drill-$run_id.json"
 
@@ -468,14 +503,14 @@ python3 - \
   "$evidence" "$archive" "$archive_sha" "$start_utc" "$end_utc" \
   "$backup_age_seconds" "$restore_seconds" "$pre_revision" "$post_revision" \
   "$git_sha" "$postgres_image" "$postgres_image_id" "$control_image" "$control_image_id" \
-  "$table_counts_file" "$workspace_restore_file" <<'PY'
+  "$table_counts_file" "$workspace_restore_file" "$runner_job_restore_file" <<'PY'
 import json
 import sys
 (
     evidence, archive, archive_sha, started, finished,
     backup_age, restore_seconds, pre_revision, post_revision,
     git_sha, postgres_image, postgres_image_id, control_image, control_image_id,
-    counts_path, workspace_restore_path,
+    counts_path, workspace_restore_path, runner_job_restore_path,
 ) = sys.argv[1:]
 counts = {}
 with open(counts_path, encoding="utf-8") as fh:
@@ -499,6 +534,7 @@ payload = {
     "control_plane_image_id": control_image_id,
     "restored_table_counts": counts,
     "task_workspace_restore": json.load(open(workspace_restore_path, encoding="utf-8")),
+    "runner_job_restore": json.load(open(runner_job_restore_path, encoding="utf-8")),
     "scope_note": "Observed values are drill evidence, not contractual RPO/RTO targets.",
 }
 with open(evidence, "w", encoding="utf-8") as fh:

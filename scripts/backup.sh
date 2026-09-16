@@ -20,7 +20,7 @@ if [[ ! "$retention_days" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-backup_root="$project_root/backups"
+backup_root="${BACKUP_ROOT:-$project_root/backups}"
 mkdir -p "$backup_root"
 exec 9>"$backup_root/.backup.lock"
 if ! flock -n 9; then
@@ -57,7 +57,7 @@ if ! docker compose ps --status running --services | grep -qx postgres; then
 fi
 
 mkdir -p "$staging_dir/configuration" "$staging_dir/git-bundles"
-printf '2\n' > "$staging_dir/BACKUP_FORMAT"
+printf '3\n' > "$staging_dir/BACKUP_FORMAT"
 
 for writer in control-plane execution-worker workspace-manager opencode; do
   if docker compose ps --status running --services | grep -qx "$writer"; then
@@ -80,6 +80,7 @@ cp -R \
   model_router \
   prompts \
   policy \
+  runner \
   scripts \
   .env.example \
   .env.providers.example \

@@ -100,10 +100,9 @@ post-deploy smoke. Фактические identifiers и ограничения 
 
 # G2 — Repository & Workspace Platform
 
-Статус: **engineering candidate 0.9.0, ещё не принят в production**. G2.1
-fail-closed Registry, G2.2 trusted Repo Manager и G2.3 durable task workspaces
-реализованы в feature-ветке. Gate закрывается только после зелёного Docker CI,
-review и migration-first production rollout. Контракты описаны в
+Статус: **production accepted 2026-09-15**. G2.1 fail-closed Registry,
+G2.2 trusted Repo Manager и G2.3 durable task workspaces прошли CI,
+migration-first rollout и production E2E acceptance. Контракты описаны в
 [`G2_REPOSITORY_REGISTRY.md`](G2_REPOSITORY_REGISTRY.md) и
 [`G2_TRUSTED_REPO_MANAGER.md`](G2_TRUSTED_REPO_MANAGER.md), а workspace lifecycle
 — в [`G2_TASK_WORKSPACES.md`](G2_TASK_WORKSPACES.md).
@@ -150,6 +149,11 @@ AI/OpenCode не получает Git credentials.
 ---
 
 # G3 — Isolated Execution & Multi-Agent Department
+
+Статус: **G3.1/G3.2 production accepted 2026-09-16** на main
+`1496caf717bbf06cbacb2437ba931e227711a508`, schema `20260916_0008`.
+Disposable sandbox и durable Runner Jobs приняты; автоматический multi-agent
+workflow ещё не реализован.
 
 ### Execution sandbox
 - [x] disposable runner boundary (G3.1);

@@ -20,6 +20,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from .db import SessionLocal
+from .evidence import materialize_result_package, materialize_terminal_result_package
 from .models import ExecutionRun, Repository, Task, TaskWorkspace
 from .schema import assert_database_shape
 from .services import write_audit
@@ -253,8 +254,10 @@ class WorkspaceLeaseManager:
         workspace.version += 1
         workspace.updated_at = now
         execution_id = run.id if run is not None else None
+        execution_became_terminal = False
         if run is not None and run.status in {"preparing", "queued", "running"}:
             run.status = "failed"
+            execution_became_terminal = True
             run.stage = "workspace_binding_rejected"
             run.error = f"Workspace binding rejected: {code}"
             run.finished_at = now
@@ -267,6 +270,8 @@ class WorkspaceLeaseManager:
             if task and task.status in {"in_progress", "waiting_approval"}:
                 task.status = "failed"
                 task.updated_at = now
+        if execution_became_terminal and run is not None:
+            materialize_terminal_result_package(db, run, now=now)
         write_audit(
             db,
             actor=self.audit_actor,
@@ -366,6 +371,7 @@ class WorkspaceLeaseManager:
         workspace.last_error_code = "execution_deadline_elapsed"
         workspace.version += 1
         workspace.updated_at = now
+        materialize_terminal_result_package(db, run, now=now)
         write_audit(
             db,
             actor=self.audit_actor,
@@ -692,6 +698,8 @@ class WorkspaceLeaseManager:
         workspace.last_error_code = None
         workspace.version += 1
         workspace.updated_at = now
+        if run.status in TERMINAL_EXECUTION_STATUSES:
+            materialize_result_package(db, run.id, final=True, now=now)
         write_audit(
             db,
             actor=self.audit_actor,
@@ -882,6 +890,7 @@ class WorkspaceLeaseManager:
                     if task and task.status in {"in_progress", "waiting_approval"}:
                         task.status = "failed"
                         task.updated_at = now
+                    materialize_terminal_result_package(db, run, now=now)
             else:
                 workspace.status = "unavailable"
                 workspace.next_attempt_at = self._retry_at(workspace.failure_count, now)
@@ -892,6 +901,8 @@ class WorkspaceLeaseManager:
         elif terminal:
             workspace.status = "invalid"
             workspace.next_attempt_at = None
+            if lease.operation == "inspect" and run.status in TERMINAL_EXECUTION_STATUSES:
+                materialize_terminal_result_package(db, run, now=now)
         else:
             workspace.status = {
                 "inspect": "inspection_pending",

@@ -831,6 +831,7 @@ def test_execution_progress_exposes_live_messages_after_dispatch(auth, mutation_
 
 
 def test_execution_progress_is_read_only_when_opencode_is_unavailable(auth, mutation_headers):
+    from control_plane.app.evidence import record_evidence
     from control_plane.app.main import get_opencode_client
 
     fake = FailingOpenCode()
@@ -839,6 +840,19 @@ def test_execution_progress_is_read_only_when_opencode_is_unavailable(auth, muta
         with TestClient(app) as client:
             task_id = _create_development_task(client, auth, mutation_headers)
             run_id = _seed_running_execution(task_id)
+            with SessionLocal() as db:
+                record_evidence(
+                    db,
+                    execution_id=run_id,
+                    source="opencode",
+                    source_key="message:durable-progress",
+                    kind="message",
+                    role="qa",
+                    model="orchestra-qa",
+                    status="observed",
+                    details={"text": "Durable QA evidence survives OpenCode outage."},
+                )
+                db.commit()
             progress = client.get(
                 f"/api/executions/{run_id}/progress",
                 auth=auth,
@@ -848,7 +862,8 @@ def test_execution_progress_is_read_only_when_opencode_is_unavailable(auth, muta
         assert progress.status_code == 200
         assert progress.json()["session_state"] == "unavailable"
         assert progress.json()["error"] == "simulated OpenCode outage"
-        assert progress.json()["items"] == []
+        assert progress.json()["current_role"] == "qa"
+        assert progress.json()["items"][-1]["text"] == "Durable QA evidence survives OpenCode outage."
         assert next(r for r in executions if r["id"] == run_id)["status"] == "running"
         assert fake.status_calls == 1
         assert fake.message_calls == 0
@@ -891,3 +906,31 @@ def test_terminal_progress_without_session_does_not_call_opencode(auth, mutation
         assert fake.message_calls == 0
     finally:
         app.dependency_overrides.pop(get_opencode_client, None)
+
+
+def test_runner_job_api_uses_same_argv_limit_as_checkpoint_and_runnerd(auth, mutation_headers):
+    run_id, _, _ = _seed_verified_runner_execution()
+    with TestClient(app) as client:
+        accepted = client.post(
+            f"/api/executions/{run_id}/runner-jobs",
+            auth=auth,
+            headers=mutation_headers,
+            json={
+                "idempotency_key": str(uuid4()),
+                "argv": ["x"] * 64,
+                "timeout_seconds": 30,
+            },
+        )
+        rejected = client.post(
+            f"/api/executions/{run_id}/runner-jobs",
+            auth=auth,
+            headers=mutation_headers,
+            json={
+                "idempotency_key": str(uuid4()),
+                "argv": ["x"] * 65,
+                "timeout_seconds": 30,
+            },
+        )
+
+    assert accepted.status_code == 201
+    assert rejected.status_code == 422

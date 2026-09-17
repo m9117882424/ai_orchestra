@@ -35,11 +35,20 @@ _REVISION_EXCLUDED_COLUMNS = {
             ("execution_runs", "workspace_runtime_preflight_digest"),
             ("execution_runs", "workspace_runtime_verified_at"),
             ("tasks", "repository_id"),
+            ("usage_events", "execution_id"),
         }
     )
 }
 _REVISION_ABSENT_TABLES = {
-    LEGACY_BASELINE_REVISION: frozenset({"repositories", "task_workspaces", "runner_jobs"}),
+    LEGACY_BASELINE_REVISION: frozenset(
+        {
+            "repositories",
+            "task_workspaces",
+            "runner_jobs",
+            "execution_evidence",
+            "execution_result_packages",
+        }
+    ),
 }
 _REVISION_EXCLUDED_INDEXES = {
     LEGACY_BASELINE_REVISION: frozenset(
@@ -49,6 +58,7 @@ _REVISION_EXCLUDED_INDEXES = {
             ("execution_runs", ("repository_id",), False),
             ("execution_runs", ("workspace_id",), True),
             ("tasks", ("repository_id",), False),
+            ("usage_events", ("execution_id",), False),
         }
     )
 }

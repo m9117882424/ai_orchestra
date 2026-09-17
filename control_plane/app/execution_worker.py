@@ -17,6 +17,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from .db import SessionLocal
+from .evidence import capture_opencode_evidence, materialize_terminal_result_package
 from .execution_protocol import (
     EXECUTION_METADATA_KEY,
     execution_message_id,
@@ -248,6 +249,7 @@ class ExecutionLeaseManager:
         if task and task.status in {"in_progress", "waiting_approval"}:
             task.status = "failed"
             task.updated_at = now
+        materialize_terminal_result_package(db, run, now=now)
         write_audit(
             db,
             actor=self.audit_actor,
@@ -617,6 +619,7 @@ class ExecutionLeaseManager:
                 actor=self.audit_actor,
                 now=now,
             )
+            materialize_terminal_result_package(db, run, now=now)
             write_audit(
                 db,
                 actor=self.audit_actor,
@@ -715,6 +718,7 @@ class ExecutionLeaseManager:
             actor=self.audit_actor,
             now=now,
         )
+        materialize_terminal_result_package(db, run, now=now)
         write_audit(
             db,
             actor=self.audit_actor,
@@ -805,6 +809,7 @@ class ExecutionLeaseManager:
             task.status = "failed"
             task.updated_at = now
         request_workspace_inspection(db, run, actor=self.audit_actor, now=now)
+        materialize_terminal_result_package(db, run, now=now)
         write_audit(
             db,
             actor=self.audit_actor,
@@ -891,6 +896,7 @@ class ExecutionLeaseManager:
             actor=self.audit_actor,
             now=now,
         )
+        materialize_terminal_result_package(db, run, now=now)
         write_audit(
             db,
             actor=self.audit_actor,
@@ -1024,6 +1030,7 @@ def _fail_runner_gate(
             task.status = "failed"
             task.updated_at = now
         request_workspace_inspection(db, run, actor=manager.audit_actor, now=now)
+        materialize_terminal_result_package(db, run, now=now)
         write_audit(
             db, actor=manager.audit_actor, action="execution.runner_gate_failed",
             entity_type="execution", entity_id=run.id,
@@ -1872,6 +1879,18 @@ def poll_execution(
         messages = client.messages(lease.opencode_session_id)
         state = statuses.get(lease.opencode_session_id) or {}
         state_type = state.get("type") if isinstance(state, dict) else str(state)
+        with SessionLocal() as evidence_db:
+            captured = capture_opencode_evidence(
+                evidence_db,
+                execution_id=lease.execution_id,
+                generation=lease.generation,
+                session_state=state_type or "unknown",
+                messages=messages,
+            )
+            if captured:
+                evidence_db.commit()
+            else:
+                evidence_db.rollback()
         result = extract_last_assistant_text(messages)
         stalled_tool = detect_stalled_tool_call(
             messages,

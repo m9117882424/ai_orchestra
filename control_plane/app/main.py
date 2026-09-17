@@ -18,6 +18,8 @@ from .models import (
     AuditEvent,
     Budget,
     CapabilityGuard,
+    ExecutionEvidence,
+    ExecutionResultPackage,
     ExecutionRun,
     Repository,
     RunnerJob,
@@ -40,7 +42,9 @@ from .schemas import (
     BudgetUpdate,
     CapabilityGuardRead,
     ExecutionRead,
+    ExecutionEvidenceRead,
     ExecutionProgressRead,
+    ExecutionResultPackageRead,
     RepositoryCreate,
     RepositoryProvider,
     RepositoryRead,
@@ -58,6 +62,7 @@ from .schemas import (
     UsageRead,
     WorkspaceCleanupRequest,
 )
+from .evidence import execution_cost_summary
 from .services import current_month_cost, seed_defaults, write_audit
 from .opencode_client import OpenCodeClient, OpenCodeError
 from .settings import get_settings
@@ -603,9 +608,17 @@ def record_usage(
     manager: Manager,
     _: Mutation,
 ) -> UsageEvent:
+    values = payload.model_dump()
     if payload.task_id and db.get(Task, payload.task_id) is None:
         raise HTTPException(status_code=404, detail="Связанная задача не найдена")
-    event = UsageEvent(**payload.model_dump())
+    if payload.execution_id:
+        run = db.get(ExecutionRun, payload.execution_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Связанный запуск не найден")
+        if payload.task_id and payload.task_id != run.task_id:
+            raise HTTPException(status_code=409, detail="Запуск не принадлежит указанной задаче")
+        values["task_id"] = run.task_id
+    event = UsageEvent(**values)
     db.add(event)
     db.flush()
     write_audit(
@@ -649,6 +662,45 @@ def list_executions(
     return list(
         db.scalars(select(ExecutionRun).order_by(ExecutionRun.created_at.desc()).limit(limit))
     )
+
+
+@app.get(
+    "/api/executions/{execution_id}/evidence",
+    response_model=list[ExecutionEvidenceRead],
+)
+def execution_evidence(
+    execution_id: str,
+    db: DbSession,
+    _: Manager,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 500,
+) -> list[ExecutionEvidence]:
+    if db.get(ExecutionRun, execution_id) is None:
+        raise HTTPException(status_code=404, detail="Запуск не найден")
+    return list(
+        db.scalars(
+            select(ExecutionEvidence)
+            .where(ExecutionEvidence.execution_id == execution_id)
+            .order_by(ExecutionEvidence.occurred_at.asc(), ExecutionEvidence.id.asc())
+            .limit(limit)
+        )
+    )
+
+
+@app.get(
+    "/api/executions/{execution_id}/result-package",
+    response_model=ExecutionResultPackageRead,
+)
+def execution_result_package(
+    execution_id: str,
+    db: DbSession,
+    _: Manager,
+) -> ExecutionResultPackage:
+    if db.get(ExecutionRun, execution_id) is None:
+        raise HTTPException(status_code=404, detail="Запуск не найден")
+    package = db.get(ExecutionResultPackage, execution_id)
+    if package is None:
+        raise HTTPException(status_code=404, detail="Result package ещё не сформирован")
+    return package
 
 
 @app.get("/api/workspaces", response_model=list[TaskWorkspaceRead])
@@ -1148,6 +1200,88 @@ def _progress_items(messages: list[dict]) -> list[dict]:
     return items[-12:]
 
 
+def _durable_progress_fields(db: Session, run: ExecutionRun) -> dict:
+    message_events = list(
+        db.scalars(
+            select(ExecutionEvidence)
+            .where(
+                ExecutionEvidence.execution_id == run.id,
+                ExecutionEvidence.kind == "message",
+            )
+            .order_by(ExecutionEvidence.occurred_at.desc(), ExecutionEvidence.id.desc())
+            .limit(12)
+        )
+    )
+    message_events.reverse()
+    tool_events = list(
+        db.scalars(
+            select(ExecutionEvidence)
+            .where(
+                ExecutionEvidence.execution_id == run.id,
+                ExecutionEvidence.kind == "tool",
+            )
+            .order_by(ExecutionEvidence.occurred_at.desc(), ExecutionEvidence.id.desc())
+            .limit(20)
+        )
+    )
+    tool_events.reverse()
+    jobs = list(
+        db.scalars(
+            select(RunnerJob)
+            .where(RunnerJob.execution_id == run.id)
+            .order_by(RunnerJob.created_at.asc(), RunnerJob.id.asc())
+        )
+    )
+    role_event = db.scalar(
+        select(ExecutionEvidence)
+        .where(
+            ExecutionEvidence.execution_id == run.id,
+            ExecutionEvidence.role.is_not(None),
+        )
+        .order_by(ExecutionEvidence.occurred_at.desc(), ExecutionEvidence.id.desc())
+        .limit(1)
+    )
+    cost = execution_cost_summary(db, run.id)
+    return {
+        "current_role": role_event.role if role_event and role_event.role else run.lead_role,
+        "tool_calls": [
+            {
+                "tool_name": event.tool_name or "tool",
+                "status": event.status or "unknown",
+                "role": event.role,
+                "model": event.model,
+                "occurred_at": event.occurred_at,
+            }
+            for event in tool_events
+        ],
+        "runner_checks": [
+            {
+                "job_id": job.id,
+                "label": job.checkpoint_label,
+                "status": job.status,
+                "exit_code": job.exit_code,
+                "started_at": job.started_at,
+                "finished_at": job.finished_at,
+            }
+            for job in jobs
+        ],
+        "input_tokens": cost["input_tokens"],
+        "output_tokens": cost["output_tokens"],
+        "actual_cost": cost["actual_cost"],
+        "retry_count": sum(job.failure_count for job in jobs),
+        "items": [
+            {
+                "role": event.role or "assistant",
+                "model": event.model,
+                "text": str((event.details or {}).get("text") or "")[:4000],
+                "created_at": event.occurred_at,
+            }
+            for event in message_events
+            if (event.details or {}).get("text")
+        ],
+    }
+
+
 def _execution_elapsed_seconds(run: ExecutionRun) -> int:
     now = run.finished_at or datetime.now(timezone.utc)
     created = run.created_at
@@ -1168,6 +1302,7 @@ def execution_progress(
     run = db.get(ExecutionRun, execution_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Запуск не найден")
+    durable = _durable_progress_fields(db, run)
     if run.status not in {"queued", "running"}:
         return {
             "execution_id": run.id,
@@ -1179,8 +1314,9 @@ def execution_progress(
             "deadline_at": run.deadline_at,
             "cancel_requested_at": run.cancel_requested_at,
             "lease_generation": run.lease_generation,
+            **durable,
             "error": run.error,
-            "items": [],
+            "items": durable["items"],
         }
     if not run.opencode_session_id:
         return {
@@ -1193,8 +1329,9 @@ def execution_progress(
             "deadline_at": run.deadline_at,
             "cancel_requested_at": run.cancel_requested_at,
             "lease_generation": run.lease_generation,
+            **durable,
             "error": run.error,
-            "items": [],
+            "items": durable["items"],
         }
     scoped_opencode = opencode
     if run.contract_version == 2:
@@ -1218,8 +1355,9 @@ def execution_progress(
             "deadline_at": run.deadline_at,
             "cancel_requested_at": run.cancel_requested_at,
             "lease_generation": run.lease_generation,
+            **durable,
             "error": str(exc)[:500],
-            "items": [],
+            "items": durable["items"],
         }
     state = statuses.get(run.opencode_session_id) or {}
     state_type = state.get("type") if isinstance(state, dict) else str(state)
@@ -1233,6 +1371,7 @@ def execution_progress(
         "deadline_at": run.deadline_at,
         "cancel_requested_at": run.cancel_requested_at,
         "lease_generation": run.lease_generation,
+        **durable,
         "error": run.error,
-        "items": _progress_items(messages),
+        "items": _progress_items(messages) or durable["items"],
     }

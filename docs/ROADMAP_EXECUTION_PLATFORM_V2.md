@@ -185,6 +185,8 @@ Evidence/Observability и не заявляется как завершённа�
 
 # G4 — Evidence, Result Package & Observability
 
+Статус: **in progress 2026-09-17**. G4.1 durable evidence/result-package foundation ведётся в отдельной feature-ветке; production baseline остаётся G3 до review/merge и отдельного rollout. Контракт: [`G4_EVIDENCE_OBSERVABILITY.md`](G4_EVIDENCE_OBSERVABILITY.md).
+
 ### Live progress
 - stage/role;
 - elapsed time;

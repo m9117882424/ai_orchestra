@@ -31,7 +31,7 @@ class RunnerCheckpoint:
 
 
 def _validate_argv(value: object) -> tuple[str, ...]:
-    if not isinstance(value, list) or not 1 <= len(value) <= 128:
+    if not isinstance(value, list) or not 1 <= len(value) <= 64:
         raise RunnerCheckpointError("runner_checkpoint_argv_invalid")
     result: list[str] = []
     total = 0

@@ -94,8 +94,12 @@ Unit/API/schema tests проверяют idempotency, immutable binding, trust r
 - post-rollout verified backup: `ai-orchestra-20260916T114807Z.tar.gz`, SHA-256 `4ae77d6a3b532135e87c44810e8a6880b3d8bc97db3472a02edb478d9aebc8b4`;
 - full production model/runtime smoke: green, Model Gateway `5/5`.
 
-## Что остается в G3
+## Историческая граница G3.2 и текущее состояние
 
-G3.2 не включает автоматический multi-agent workflow. Следующий slice должен маршрутизировать install/build/test child-runs через durable Runner Jobs и связать результаты с Reviewer/QA/Lead workflow.
+Сам G3.2 не включал автоматический multi-agent workflow. G3.3 принят 2026-09-17:
+checkpoint-команды маршрутизируются через durable Runner Jobs, результаты
+возвращаются Lead для дальнейшей QA/review. См.
+[`финальную приёмку G3`](G3_PRODUCTION_ACCEPTANCE_2026-09-17.md).
+Подробная durable child-run telemetry и result package остаются в G4.
 
 Git push, PR, deploy, production credentials и financial actions остаются вне G3 Runner Manager и требуют последующих approval/capability gates.

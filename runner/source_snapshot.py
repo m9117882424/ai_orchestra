@@ -60,7 +60,12 @@ def source_snapshot_digest(root: Path, *, max_entries: int = 100_000) -> str:
 
     digest = hashlib.sha256()
     count = 0
-    for current_text, dir_names, file_names in os.walk(root, topdown=True, followlinks=False):
+    def scan_error(exc: OSError) -> None:
+        raise SourceSnapshotError("source_snapshot_unavailable") from exc
+
+    for current_text, dir_names, file_names in os.walk(
+        root, topdown=True, followlinks=False, onerror=scan_error
+    ):
         current = Path(current_text)
         if current == root:
             dir_names[:] = [name for name in dir_names if name != ".git"]

@@ -4,16 +4,13 @@ AI Orchestra — самостоятельный AI-отдел, который п
 
 **AI Orchestra не является частью Trading Platform.** Trading Platform, Arvento, Wialon, Fuel Monitor, BI и другие системы — отдельные продукты, которые отдел может разрабатывать.
 
-> Статус repository head: engineering candidate 0.9.0; G2.3 ещё не принят в
-> production. G1 Durable Core принят
-> для pilot после rollout `05bafd9` от 2026-09-07; проверяемая сводка находится в
-> [`docs/G1_PRODUCTION_ACCEPTANCE_2026-09-07.md`](docs/G1_PRODUCTION_ACCEPTANCE_2026-09-07.md).
-> G2.1 Registry и G2.2
-> [`Trusted Repo Manager`](docs/G2_TRUSTED_REPO_MANAGER.md): read-only fetch,
-> durable lease/fencing и отдельная Git credential boundary — дополнены G2.3
-> [`durable task workspaces`](docs/G2_TASK_WORKSPACES.md) с immutable execution
-> binding и pre-inference verification. Приёмка G1/G2 candidate не
-> означает автоматический rollout: `git push`, merge, production deploy, доступ к
+> G1 принят для pilot 2026-09-07, G2 — в production 2026-09-15,
+> G3.1–G3.3 — в production 2026-09-17 на `8cea451`, schema `20260916_0009`.
+> Свидетельства: [`G3 production acceptance`](docs/G3_PRODUCTION_ACCEPTANCE_2026-09-17.md).
+> Финальный post-merge CI #400 для документации закрытия (`775019c`) — green.
+> Следующий этап — G4: Evidence, Result Package & Observability.
+> Перед ним см. [`чекап и подготовленные исправления`](docs/PRE_G4_CHECKUP_2026-09-17.md).
+> Приёмка G3 не означает автоматический rollout новых изменений: `git push`, merge, production deploy, доступ к
 > product secrets, запись во внешние production-системы и финансовое исполнение
 > технически не входят в разрешенный контур отдела.
 
@@ -432,7 +429,7 @@ Backup включает:
 - dump control-plane PostgreSQL;
 - код и несекретную конфигурацию, включая Model Router и Model Gateway;
 - OpenCode state;
-- durable task workspace volume (`BACKUP_FORMAT=2`);
+- durable task workspace volume и runner broker code/systemd payload (`BACKUP_FORMAT=3`);
 - Git bundles проектов;
 - `SHA256SUMS`.
 
@@ -475,15 +472,20 @@ make init
 make preflight
 make build
 docker compose stop control-plane execution-worker repo-manager workspace-manager opencode
+# Для принятого G3, с настроенными RUNNERD_SOCKET_GID / RUNNERD_SOCKET_HOST_PATH:
+docker compose -f docker-compose.yml -f deploy/docker-compose.runner-manager.yml stop runner-manager
 docker compose up -d postgres
 make migrate
 make up
+docker compose -f docker-compose.yml -f deploy/docker-compose.runner-manager.yml up -d --no-deps runner-manager
 make schema-check
 make smoke
 ```
 
 `make migrate` и `make schema-check` отключают Compose TTY и поэтому одинаково
 работают из интерактивного терминала, SSH heredoc и автоматизированного runner.
+Runner Manager собирается отдельно с его overlay; полная последовательность,
+включая проверку активных jobs и обновление runnerd/image, описана в runbook.
 
 ## Безопасная эксплуатация
 

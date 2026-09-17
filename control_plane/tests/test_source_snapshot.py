@@ -2,6 +2,8 @@ import os
 from pathlib import Path
 
 import pytest
+import control_plane.app.source_snapshot as worker_snapshot
+import runner.source_snapshot as sandbox_snapshot
 
 from control_plane.app.source_snapshot import SourceSnapshotError, source_snapshot_digest
 
@@ -47,3 +49,20 @@ def test_snapshot_rejects_special_file_and_entry_limit(tmp_path: Path):
     (tmp_path / "b").write_text("b", encoding="utf-8")
     with pytest.raises(SourceSnapshotError, match="source_snapshot_entry_limit"):
         source_snapshot_digest(tmp_path, max_entries=1)
+
+
+@pytest.mark.parametrize("module", [worker_snapshot, sandbox_snapshot])
+def test_snapshot_rejects_incomplete_directory_scan(tmp_path, monkeypatch, module):
+    hidden = tmp_path / "unreadable"
+    hidden.mkdir()
+    (hidden / "changed.py").write_text("raise RuntimeError('untested')")
+    original_scandir = os.scandir
+
+    def failing_scandir(path):
+        if Path(path) == hidden:
+            raise PermissionError("cannot inspect source directory")
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", failing_scandir)
+    with pytest.raises(module.SourceSnapshotError, match="source_snapshot_unavailable"):
+        module.source_snapshot_digest(tmp_path)

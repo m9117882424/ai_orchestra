@@ -312,6 +312,18 @@ class Budget(Base):
 
 class UsageEvent(Base):
     __tablename__ = "usage_events"
+    __table_args__ = (
+        CheckConstraint(
+            "((source IS NULL AND source_key IS NULL) OR "
+            "(source IS NOT NULL AND source_key IS NOT NULL))",
+            name="ck_usage_events_source_pair",
+        ),
+        Index(
+            "ux_usage_events_source_key",
+            "execution_id", "source", "source_key",
+            unique=True,
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     task_id: Mapped[str | None] = mapped_column(
@@ -319,6 +331,11 @@ class UsageEvent(Base):
     )
     execution_id: Mapped[str | None] = mapped_column(
         ForeignKey("execution_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    source: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    source_key: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    child_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("execution_child_runs.id", ondelete="SET NULL"), nullable=True, index=True
     )
     role: Mapped[str] = mapped_column(String(80))
     provider: Mapped[str] = mapped_column(String(80))
@@ -451,6 +468,53 @@ class ExecutionRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class ExecutionChildRun(Base):
+    __tablename__ = "execution_child_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'running', 'completed', 'failed', 'unknown')",
+            name="ck_execution_child_runs_status",
+        ),
+        CheckConstraint("attempt >= 1", name="ck_execution_child_runs_attempt"),
+        CheckConstraint(
+            "task_fingerprint IS NULL OR length(task_fingerprint) = 64",
+            name="ck_execution_child_runs_fingerprint",
+        ),
+        Index(
+            "ux_execution_child_runs_source",
+            "execution_id", "source", "source_run_id",
+            unique=True,
+        ),
+        Index("ix_execution_child_runs_timeline", "execution_id", "started_at"),
+        Index("ix_execution_child_runs_role", "execution_id", "role", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("execution_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    source: Mapped[str] = mapped_column(String(40), nullable=False, default="opencode")
+    source_run_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    parent_source_run_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    parent_call_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    role: Mapped[str] = mapped_column(String(80), nullable=False)
+    provider: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="unknown")
+    task_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    retry_of_id: Mapped[str | None] = mapped_column(
+        ForeignKey("execution_child_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
 class ExecutionEvidence(Base):
     __tablename__ = "execution_evidence"
     __table_args__ = (
@@ -493,7 +557,9 @@ class ExecutionEvidence(Base):
 class ExecutionResultPackage(Base):
     __tablename__ = "execution_result_packages"
     __table_args__ = (
-        CheckConstraint("package_version = 1", name="ck_execution_result_packages_version"),
+        CheckConstraint(
+            "package_version IN (1, 2)", name="ck_execution_result_packages_version"
+        ),
         CheckConstraint(
             "state IN ('provisional', 'final')",
             name="ck_execution_result_packages_state",
@@ -509,7 +575,7 @@ class ExecutionResultPackage(Base):
     execution_id: Mapped[str] = mapped_column(
         ForeignKey("execution_runs.id", ondelete="CASCADE"), primary_key=True
     )
-    package_version: Mapped[int] = mapped_column(Integer, default=1)
+    package_version: Mapped[int] = mapped_column(Integer, default=2)
     state: Mapped[str] = mapped_column(String(16), default="provisional")
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
     package_digest: Mapped[str] = mapped_column(String(64), nullable=False)

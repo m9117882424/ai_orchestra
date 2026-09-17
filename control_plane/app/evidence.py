@@ -6,9 +6,11 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .models import (
+    ExecutionChildRun,
     ExecutionEvidence,
     ExecutionResultPackage,
     ExecutionRun,
@@ -88,8 +90,21 @@ def record_evidence(
         details=details or {},
         occurred_at=_as_utc(occurred_at) or utc_now(),
     )
-    db.add(event)
-    db.flush()
+    try:
+        with db.begin_nested():
+            db.add(event)
+            db.flush()
+    except IntegrityError:
+        existing = db.scalar(
+            select(ExecutionEvidence).where(
+                ExecutionEvidence.execution_id == execution_id,
+                ExecutionEvidence.source == source,
+                ExecutionEvidence.source_key == source_key,
+            )
+        )
+        if existing is None:
+            raise
+        return existing
     return event
 
 
@@ -243,19 +258,33 @@ def build_result_package_payload(db: Session, execution_id: str) -> dict:
             .order_by(ExecutionEvidence.occurred_at.asc(), ExecutionEvidence.id.asc())
         )
     )
+    child_runs = list(
+        db.scalars(
+            select(ExecutionChildRun)
+            .where(ExecutionChildRun.execution_id == execution_id)
+            .order_by(ExecutionChildRun.started_at.asc(), ExecutionChildRun.id.asc())
+        )
+    )
+    automatic_usage_count = db.scalar(
+        select(func.count(UsageEvent.id)).where(
+            UsageEvent.execution_id == execution_id,
+            UsageEvent.source == "opencode-session",
+        )
+    ) or 0
     limitations: list[str] = []
     if workspace is not None and workspace.status != "retained":
         limitations.append("workspace inspection is not final")
     if workspace is not None and workspace.changed_file_count:
-        limitations.append("changed-file names and full diff are not persisted in G4.1")
+        limitations.append("changed-file names and full diff are not persisted yet")
     if not any(event.kind == "review" for event in evidence):
         limitations.append("structured QA/reviewer verdicts are not persisted yet")
     if not any(event.kind == "artifact" for event in evidence):
         limitations.append("generated artifact provenance is not persisted yet")
-    limitations.append("automatic provider token/cost capture is deferred to G4.2")
+    if automatic_usage_count == 0:
+        limitations.append("automatic provider token/cost telemetry was unavailable")
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "execution_id": run.id,
         "original_task": {
             "id": task.id if task else run.task_id,
@@ -304,6 +333,25 @@ def build_result_package_payload(db: Session, execution_id: str) -> dict:
             }
             for job in jobs
         ],
+        "child_runs": [
+            {
+                "id": child.id,
+                "source": child.source,
+                "source_run_id": child.source_run_id,
+                "parent_source_run_id": child.parent_source_run_id,
+                "parent_call_id": child.parent_call_id,
+                "role": child.role,
+                "provider": child.provider,
+                "model": child.model,
+                "status": child.status,
+                "attempt": child.attempt,
+                "retry_of_id": child.retry_of_id,
+                "started_at": _iso(child.started_at),
+                "finished_at": _iso(child.finished_at),
+                "last_observed_at": _iso(child.last_observed_at),
+            }
+            for child in child_runs
+        ],
         "reviewer_qa_verdicts": [
             {
                 "role": event.role,
@@ -326,6 +374,10 @@ def build_result_package_payload(db: Session, execution_id: str) -> dict:
             "finished_at": _iso(run.finished_at),
         },
         "cost": execution_cost_summary(db, execution_id),
+        "usage_capture": {
+            "automatic_session_rows": int(automatic_usage_count),
+            "automatic_provider_capture": bool(automatic_usage_count),
+        },
         "known_risks_limitations": limitations,
     }
 
@@ -349,7 +401,7 @@ def materialize_result_package(
     if package is None:
         package = ExecutionResultPackage(
             execution_id=execution_id,
-            package_version=1,
+            package_version=2,
             state="final" if final else "provisional",
             payload=payload,
             package_digest=digest,
@@ -360,6 +412,7 @@ def materialize_result_package(
         )
         db.add(package)
     else:
+        package.package_version = 2
         package.state = "final" if final else "provisional"
         package.payload = payload
         package.package_digest = digest

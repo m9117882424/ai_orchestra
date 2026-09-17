@@ -222,6 +222,8 @@ class BudgetRead(BudgetUpdate):
 
 
 class UsageCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     task_id: str | None = None
     execution_id: str | None = None
     role: str = Field(min_length=1, max_length=80)
@@ -413,6 +415,32 @@ class RunnerJobRead(BaseModel):
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+    updated_at: datetime
+
+
+ChildRunStatus = Literal["pending", "running", "completed", "failed", "unknown"]
+
+
+class ExecutionChildRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    execution_id: str
+    source: str
+    source_run_id: str
+    parent_source_run_id: str | None
+    parent_call_id: str | None
+    role: str
+    provider: str | None
+    model: str | None
+    status: ChildRunStatus
+    task_fingerprint: str | None
+    attempt: int
+    retry_of_id: str | None
+    started_at: datetime
+    finished_at: datetime | None
+    last_observed_at: datetime
+    created_at: datetime
     updated_at: datetime
 
 

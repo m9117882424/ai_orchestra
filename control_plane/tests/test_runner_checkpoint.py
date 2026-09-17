@@ -56,7 +56,7 @@ def test_checkpoint_allows_human_readable_ascii_space_in_label():
     ]
     with pytest.raises(RunnerCheckpointError, match="runner_checkpoint_label_invalid"):
         parse_runner_checkpoint(
-            _text('{"version":1,"commands":[{"label":"tests\tunsafe","argv":["true"],"timeout_seconds":1}]}')
+            _text('{"version":1,"commands":[{"label":"tests\\tunsafe","argv":["true"],"timeout_seconds":1}]}')
         )
 
 

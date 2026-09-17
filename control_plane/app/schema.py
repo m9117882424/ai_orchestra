@@ -36,6 +36,9 @@ _REVISION_EXCLUDED_COLUMNS = {
             ("execution_runs", "workspace_runtime_verified_at"),
             ("tasks", "repository_id"),
             ("usage_events", "execution_id"),
+            ("usage_events", "source"),
+            ("usage_events", "source_key"),
+            ("usage_events", "child_run_id"),
         }
     )
 }
@@ -47,6 +50,7 @@ _REVISION_ABSENT_TABLES = {
             "runner_jobs",
             "execution_evidence",
             "execution_result_packages",
+            "execution_child_runs",
         }
     ),
 }
@@ -59,6 +63,8 @@ _REVISION_EXCLUDED_INDEXES = {
             ("execution_runs", ("workspace_id",), True),
             ("tasks", ("repository_id",), False),
             ("usage_events", ("execution_id",), False),
+            ("usage_events", ("child_run_id",), False),
+            ("usage_events", ("execution_id", "source", "source_key"), True),
         }
     )
 }
@@ -69,6 +75,7 @@ _REVISION_EXCLUDED_CHECKS = {
             ("execution_runs", "ck_execution_runs_workspace_binding"),
             ("execution_runs", "ck_execution_runs_workspace_preflight"),
             ("execution_runs", "ck_execution_runs_workspace_runtime_preflight"),
+            ("usage_events", "ck_usage_events_source_pair"),
         }
     )
 }

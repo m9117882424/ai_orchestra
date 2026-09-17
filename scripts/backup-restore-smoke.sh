@@ -153,7 +153,7 @@ sha = hashlib.sha256(archive.read_bytes()).hexdigest()
 assert payload["result"] == "success"
 assert payload["source_backup_sha256"] == sha
 assert payload["pre_migration_revision"] == "unversioned"
-assert payload["post_migration_revision"] == "20260917_0010"
+assert payload["post_migration_revision"] == "20260917_0011"
 assert payload["restored_table_counts"].get("audit_events", 0) >= 1
 assert payload["restored_table_counts"].get("alembic_version", 0) == 1
 assert payload["restored_table_counts"].get("repositories") == 0
@@ -169,7 +169,7 @@ assert payload["task_workspace_restore"] == {
 assert payload["runner_job_restore"] == {"bindings_verified": 0, "checkpoint_bindings_verified": 0, "database_rows": 0}
 assert payload["observed_restore_rto_seconds"] >= 0
 assert payload["observed_backup_age_seconds"] >= 0
-print("[OK] Historical 0001 backup was restored, adopted to 0010 and retained the seeded audit marker")
+print("[OK] Historical 0001 backup was restored, adopted to 0011 and retained the seeded audit marker")
 PY
 
 echo "[INFO] Creating current-head backup with durable runner-job evidence"
@@ -189,10 +189,10 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from app.db import SessionLocal
 from app.evidence import materialize_result_package, record_evidence
-from app.models import ExecutionRun, Repository, RunnerJob, Task, TaskWorkspace, UsageEvent
+from app.models import ExecutionChildRun, ExecutionRun, Repository, RunnerJob, Task, TaskWorkspace, UsageEvent
 
 now = datetime.now(timezone.utc)
-repo_id, task_id, workspace_id, run_id, job_id = [str(uuid4()) for _ in range(5)]
+repo_id, task_id, workspace_id, run_id, job_id, child_id = [str(uuid4()) for _ in range(6)]
 idempotency_key = str(uuid4())
 commit = "a" * 40
 tree = "b" * 40
@@ -226,6 +226,14 @@ with SessionLocal() as db:
         status="completed", stage="manager_review", finished_at=now,
     ))
     db.flush()
+    db.add(ExecutionChildRun(
+        id=child_id, execution_id=run_id, source="opencode", source_run_id="ses-dr-qa",
+        parent_source_run_id="ses-dr-root", parent_call_id="call-dr-qa",
+        role="qa-engineer", provider="ci", model="orchestra-qa", status="completed",
+        task_fingerprint="9" * 64, attempt=1, started_at=now, finished_at=now,
+        last_observed_at=now, created_at=now, updated_at=now,
+    ))
+    db.flush()
     db.add(RunnerJob(
         id=job_id, execution_id=run_id, repository_id=repo_id, workspace_id=workspace_id,
         idempotency_key=idempotency_key, status="completed",
@@ -237,8 +245,9 @@ with SessionLocal() as db:
         started_at=now, finished_at=now,
     ))
     db.add(UsageEvent(
-        task_id=task_id, execution_id=run_id, role="department-lead", provider="ci",
-        model="orchestra-lead", input_tokens=10, output_tokens=5, cost=0,
+        task_id=task_id, execution_id=run_id, source="opencode-session",
+        source_key="ses-dr-qa", child_run_id=child_id, role="qa-engineer", provider="ci",
+        model="orchestra-qa", input_tokens=10, output_tokens=5, cost=0,
     ))
     record_evidence(
         db, execution_id=run_id, source="ci", source_key="dr-tool", kind="tool",
@@ -260,12 +269,13 @@ evidence="$(find "$BACKUP_ROOT/drills" -maxdepth 1 -type f -name 'restore-drill-
 python3 - "$evidence" <<'PYCHECK'
 import json, pathlib, sys
 payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-assert payload["pre_migration_revision"] == "20260917_0010"
-assert payload["post_migration_revision"] == "20260917_0010"
+assert payload["pre_migration_revision"] == "20260917_0011"
+assert payload["post_migration_revision"] == "20260917_0011"
 assert payload["restored_table_counts"].get("runner_jobs") == 1
 assert payload["runner_job_restore"] == {"bindings_verified": 1, "checkpoint_bindings_verified": 1, "database_rows": 1}
 assert payload["restored_table_counts"].get("task_workspaces") == 1
 assert payload["restored_table_counts"].get("execution_evidence") == 1
+assert payload["restored_table_counts"].get("execution_child_runs") == 1
 assert payload["restored_table_counts"].get("execution_result_packages") == 1
 assert payload["restored_table_counts"].get("usage_events") == 1
 print("[OK] Current-head runner/evidence/result-package data survived backup/restore")

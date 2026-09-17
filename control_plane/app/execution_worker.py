@@ -17,7 +17,8 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from .db import SessionLocal
-from .evidence import capture_opencode_evidence, materialize_terminal_result_package
+from .evidence import materialize_terminal_result_package
+from .opencode_observability import capture_opencode_observability
 from .execution_protocol import (
     EXECUTION_METADATA_KEY,
     execution_message_id,
@@ -1879,13 +1880,27 @@ def poll_execution(
         messages = client.messages(lease.opencode_session_id)
         state = statuses.get(lease.opencode_session_id) or {}
         state_type = state.get("type") if isinstance(state, dict) else str(state)
+        session_reader = getattr(client, "execution_sessions", None)
+        if callable(session_reader):
+            try:
+                observed_sessions = session_reader(lease.opencode_session_id)
+            except OpenCodeError as exc:
+                LOGGER.warning(
+                    "OpenCode session telemetry unavailable execution=%s generation=%s: %s",
+                    lease.execution_id, lease.generation, exc,
+                )
+                observed_sessions = []
+        else:
+            observed_sessions = []
         with SessionLocal() as evidence_db:
-            captured = capture_opencode_evidence(
+            captured = capture_opencode_observability(
                 evidence_db,
                 execution_id=lease.execution_id,
                 generation=lease.generation,
+                root_session_id=lease.opencode_session_id,
                 session_state=state_type or "unknown",
                 messages=messages,
+                sessions=observed_sessions,
             )
             if captured:
                 evidence_db.commit()

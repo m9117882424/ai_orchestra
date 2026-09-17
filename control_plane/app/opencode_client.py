@@ -187,6 +187,16 @@ class OpenCodeClient:
                 matches.append(session)
         return matches
 
+    def execution_sessions(self, root_session_id: str, *, limit: int = 200) -> list[dict]:
+        """Return the root OpenCode session and its direct subagent sessions."""
+        result = []
+        for session in self.list_sessions(limit=limit):
+            session_id = str(session.get("id") or "")
+            parent_id = str(session.get("parentID") or "")
+            if session_id == root_session_id or parent_id == root_session_id:
+                result.append(session)
+        return result
+
     def message(self, session_id: str, message_id: str) -> dict | None:
         try:
             result = self._request("GET", f"/session/{session_id}/message/{message_id}")

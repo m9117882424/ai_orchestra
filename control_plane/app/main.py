@@ -18,6 +18,7 @@ from .models import (
     AuditEvent,
     Budget,
     CapabilityGuard,
+    ExecutionChildRun,
     ExecutionEvidence,
     ExecutionResultPackage,
     ExecutionRun,
@@ -42,6 +43,7 @@ from .schemas import (
     BudgetUpdate,
     CapabilityGuardRead,
     ExecutionRead,
+    ExecutionChildRunRead,
     ExecutionEvidenceRead,
     ExecutionProgressRead,
     ExecutionResultPackageRead,
@@ -681,6 +683,30 @@ def execution_evidence(
             select(ExecutionEvidence)
             .where(ExecutionEvidence.execution_id == execution_id)
             .order_by(ExecutionEvidence.occurred_at.asc(), ExecutionEvidence.id.asc())
+            .limit(limit)
+        )
+    )
+
+
+
+
+@app.get(
+    "/api/executions/{execution_id}/child-runs",
+    response_model=list[ExecutionChildRunRead],
+)
+def execution_child_runs(
+    execution_id: str,
+    db: DbSession,
+    _: Manager,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 500,
+) -> list[ExecutionChildRun]:
+    if db.get(ExecutionRun, execution_id) is None:
+        raise HTTPException(status_code=404, detail="Запуск не найден")
+    return list(
+        db.scalars(
+            select(ExecutionChildRun)
+            .where(ExecutionChildRun.execution_id == execution_id)
+            .order_by(ExecutionChildRun.started_at.asc(), ExecutionChildRun.id.asc())
             .limit(limit)
         )
     )

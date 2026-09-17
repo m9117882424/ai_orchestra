@@ -6,6 +6,7 @@ from control_plane.app.opencode_client import (
     OpenCodeClient,
     OpenCodeError,
     detect_stalled_tool_call,
+    extract_last_assistant_error,
     extract_last_assistant_text,
     infer_session_state,
 )
@@ -113,6 +114,23 @@ def test_failed_assistant_is_never_promoted_to_success():
 
     assert infer_session_state(messages) == "error"
     assert extract_last_assistant_text(messages) == ""
+    assert extract_last_assistant_error(messages) == "ProviderError: upstream failed"
+
+
+def test_assistant_error_extraction_ignores_raw_headers_and_body():
+    messages = assistant_failed_with_partial_text()
+    error = messages[0]["info"]["error"]
+    error["data"] = {
+        "statusCode": 402,
+        "message": "insufficient provider balance",
+        "responseHeaders": {"authorization": "SECRET_HEADER"},
+        "responseBody": "SECRET_BODY",
+    }
+
+    observed = extract_last_assistant_error(messages)
+    assert observed == "ProviderError HTTP 402: insufficient provider balance"
+    assert "SECRET_HEADER" not in observed
+    assert "SECRET_BODY" not in observed
 
 
 def test_messages_backfill_missing_status_and_expose_tool_progress():

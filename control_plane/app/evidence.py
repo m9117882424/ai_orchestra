@@ -227,10 +227,28 @@ def execution_cost_summary(db: Session, execution_id: str) -> dict:
             func.coalesce(func.sum(UsageEvent.cost), Decimal("0")),
         ).where(UsageEvent.execution_id == execution_id)
     ).one()
+    known_cost = Decimal(row[2] or Decimal("0")).quantize(Decimal("0.000001"))
+    unknown_automatic_cost_rows = db.scalar(
+        select(func.count(UsageEvent.id)).where(
+            UsageEvent.execution_id == execution_id,
+            UsageEvent.source == "opencode-session",
+            UsageEvent.cost == 0,
+            (UsageEvent.input_tokens > 0) | (UsageEvent.output_tokens > 0),
+        )
+    ) or 0
+    if unknown_automatic_cost_rows:
+        cost_status = "partial" if known_cost > 0 else "unknown"
+        actual_cost = None
+    else:
+        cost_status = "known"
+        actual_cost = str(known_cost)
     return {
         "input_tokens": int(row[0] or 0),
         "output_tokens": int(row[1] or 0),
-        "actual_cost": str(row[2] or Decimal("0")),
+        "actual_cost": actual_cost,
+        "known_cost": str(known_cost),
+        "cost_status": cost_status,
+        "unknown_automatic_cost_rows": int(unknown_automatic_cost_rows),
     }
 
 
@@ -271,6 +289,7 @@ def build_result_package_payload(db: Session, execution_id: str) -> dict:
             UsageEvent.source == "opencode-session",
         )
     ) or 0
+    cost_summary = execution_cost_summary(db, execution_id)
     limitations: list[str] = []
     if workspace is not None and workspace.status != "retained":
         limitations.append("workspace inspection is not final")
@@ -282,6 +301,8 @@ def build_result_package_payload(db: Session, execution_id: str) -> dict:
         limitations.append("generated artifact provenance is not persisted yet")
     if automatic_usage_count == 0:
         limitations.append("automatic provider token/cost telemetry was unavailable")
+    elif cost_summary["unknown_automatic_cost_rows"]:
+        limitations.append("automatic provider monetary cost was unavailable; token telemetry is present")
 
     return {
         "schema_version": 2,
@@ -373,10 +394,12 @@ def build_result_package_payload(db: Session, execution_id: str) -> dict:
             "created_at": _iso(run.created_at),
             "finished_at": _iso(run.finished_at),
         },
-        "cost": execution_cost_summary(db, execution_id),
+        "cost": cost_summary,
         "usage_capture": {
             "automatic_session_rows": int(automatic_usage_count),
             "automatic_provider_capture": bool(automatic_usage_count),
+            "automatic_cost_capture": bool(automatic_usage_count)
+            and cost_summary["unknown_automatic_cost_rows"] == 0,
         },
         "known_risks_limitations": limitations,
     }

@@ -111,7 +111,14 @@ async function loadSummary() {
   const data = await api("/api/summary");
   document.getElementById("metric-progress").textContent = (data.tasks.in_progress || 0) + (data.tasks.qa || 0);
   document.getElementById("metric-approvals").textContent = data.pending_approvals;
-  document.getElementById("metric-cost").textContent = formatNumber(data.month_cost);
+  const costMetric = document.getElementById("metric-cost");
+  if (data.month_cost_status === "unknown") {
+    costMetric.textContent = "нет данных";
+  } else if (data.month_cost_status === "partial") {
+    costMetric.textContent = `≥ ${formatNumber(data.month_cost)}`;
+  } else {
+    costMetric.textContent = formatNumber(data.month_cost);
+  }
   document.getElementById("metric-done").textContent = data.tasks.done || 0;
 }
 

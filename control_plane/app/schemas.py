@@ -516,7 +516,9 @@ class ExecutionProgressRead(BaseModel):
     runner_checks: list[ExecutionRunnerCheckRead] = Field(default_factory=list)
     input_tokens: int = 0
     output_tokens: int = 0
-    actual_cost: Decimal = Decimal("0")
+    actual_cost: Decimal | None = None
+    known_cost: Decimal = Decimal("0")
+    cost_status: Literal["known", "partial", "unknown"] = "known"
     retry_count: int = 0
     error: str
     items: list[ExecutionProgressItem]

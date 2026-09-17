@@ -65,7 +65,7 @@ from .schemas import (
     WorkspaceCleanupRequest,
 )
 from .evidence import execution_cost_summary
-from .services import current_month_cost, seed_defaults, write_audit
+from .services import current_month_cost_summary, seed_defaults, write_audit
 from .opencode_client import OpenCodeClient, OpenCodeError
 from .settings import get_settings
 from .workspace_protocol import (
@@ -171,10 +171,13 @@ def summary(db: DbSession, _: Manager) -> dict:
     total_budget = db.scalar(
         select(func.coalesce(func.sum(Budget.monthly_limit), 0)).where(Budget.enabled.is_(True))
     )
+    month_cost = current_month_cost_summary(db)
     return {
         "tasks": counts,
         "pending_approvals": pending_approvals or 0,
-        "month_cost": str(current_month_cost(db)),
+        "month_cost": str(month_cost["known_cost"]),
+        "month_cost_status": month_cost["cost_status"],
+        "month_cost_unknown_rows": month_cost["unknown_automatic_cost_rows"],
         "configured_budget": str(total_budget or 0),
     }
 
@@ -1294,6 +1297,8 @@ def _durable_progress_fields(db: Session, run: ExecutionRun) -> dict:
         "input_tokens": cost["input_tokens"],
         "output_tokens": cost["output_tokens"],
         "actual_cost": cost["actual_cost"],
+        "known_cost": cost["known_cost"],
+        "cost_status": cost["cost_status"],
         "retry_count": sum(job.failure_count for job in jobs),
         "items": [
             {

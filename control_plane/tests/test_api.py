@@ -7,7 +7,7 @@ import pytest
 
 from control_plane.app.db import SessionLocal, engine
 from control_plane.app.main import app
-from control_plane.app.models import ExecutionRun, Repository, RunnerJob, Task, TaskWorkspace
+from control_plane.app.models import ExecutionRun, Repository, RunnerJob, Task, TaskWorkspace, UsageEvent
 from control_plane.app.opencode_client import OpenCodeError
 from control_plane.app.settings import Settings
 
@@ -148,6 +148,33 @@ def test_budget_update_and_usage_summary(auth, mutation_headers):
     assert updated.json()["monthly_limit"] == "4500.00"
     assert usage.status_code == 201
     assert summary.json()["month_cost"] == "17.125000"
+    assert summary.json()["month_cost_status"] == "known"
+    assert summary.json()["month_cost_unknown_rows"] == 0
+
+
+def test_month_cost_does_not_report_unknown_automatic_provider_cost_as_zero(auth):
+    with SessionLocal() as db:
+        db.add(
+            UsageEvent(
+                source="opencode-session",
+                source_key="ses-cost-unknown",
+                role="department-lead",
+                provider="orchestra",
+                model="orchestra-lead",
+                input_tokens=1000,
+                output_tokens=100,
+                cost=0,
+            )
+        )
+        db.commit()
+
+    with TestClient(app) as client:
+        summary = client.get("/api/summary", auth=auth)
+
+    assert summary.status_code == 200
+    assert summary.json()["month_cost"] == "0"
+    assert summary.json()["month_cost_status"] == "unknown"
+    assert summary.json()["month_cost_unknown_rows"] == 1
 
 
 class FakeOpenCode:

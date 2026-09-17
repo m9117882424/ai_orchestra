@@ -174,6 +174,41 @@ class FakePollingOpenCode(FakeDispatchOpenCode):
         return self._messages
 
 
+class MissingStatusErrorOpenCode(FakeDispatchOpenCode):
+    def __init__(self, session_id: str):
+        super().__init__()
+        self.session_id = session_id
+        self.statuses: dict[str, dict] = {}
+
+    def session_statuses(self):
+        return self.statuses
+
+    def messages(self, session_id: str):
+        assert session_id == self.session_id
+        # Reproduce OpenCodeClient.messages(): when /session/status omits the
+        # completed session, terminal state is inferred from the assistant error.
+        self.statuses[session_id] = {"type": "error", "inferred": True}
+        return [
+            {
+                "info": {
+                    "id": "msg-provider-error",
+                    "role": "assistant",
+                    "error": {
+                        "name": "APIError",
+                        "data": {
+                            "statusCode": 402,
+                            "message": "insufficient provider balance",
+                            "responseHeaders": {"authorization": "DO_NOT_STORE"},
+                            "responseBody": "DO_NOT_STORE_BODY",
+                        },
+                    },
+                    "time": {"created": 1789667394466, "completed": 1789667394983},
+                },
+                "parts": [],
+            }
+        ]
+
+
 class StealLeaseBeforeCreate(FakeDispatchOpenCode):
     def __init__(self, run_id: str):
         super().__init__()
@@ -660,6 +695,29 @@ def _stalled_tool_messages(*, seconds_old: int = 120) -> list[dict]:
             ],
         }
     ]
+
+
+def test_missing_status_terminal_provider_error_fails_execution_immediately():
+    task_id, run_id = _seed_running_execution("provider-error-session")
+    manager = ExecutionLeaseManager("provider-error-worker", lease_seconds=60)
+    with SessionLocal() as db:
+        [lease] = manager.claim_available(db, limit=1)
+
+    fake = MissingStatusErrorOpenCode("provider-error-session")
+    assert poll_execution(manager, lambda: fake, lease) == "failed"
+
+    with SessionLocal() as db:
+        run = db.get(ExecutionRun, run_id)
+        task = db.get(Task, task_id)
+        assert run is not None and task is not None
+        assert run.status == "failed"
+        assert run.stage == "opencode_error"
+        assert "HTTP 402" in run.error
+        assert "insufficient provider balance" in run.error
+        assert "DO_NOT_STORE" not in run.error
+        assert run.finished_at is not None
+        assert run.lease_owner is None
+        assert task.status == "failed"
 
 
 def test_stalled_tool_is_aborted_and_execution_fails_closed():

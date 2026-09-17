@@ -150,7 +150,11 @@ def test_child_run_usage_and_structured_verdict_are_durable_and_redacted(auth):
             "input_tokens": 150,
             "output_tokens": 30,
             "actual_cost": "1.750000",
+            "known_cost": "1.750000",
+            "cost_status": "known",
+            "unknown_automatic_cost_rows": 0,
         }
+        assert package.payload["usage_capture"]["automatic_cost_capture"] is True
 
     with TestClient(app) as client:
         response = client.get(f"/api/executions/{run_id}/child-runs", auth=auth)
@@ -198,3 +202,42 @@ def test_retry_lineage_only_links_after_observed_failed_matching_child():
     assert rows[1].status == "completed"
     assert rows[1].attempt == 2
     assert rows[1].retry_of_id == rows[0].id
+
+
+def test_nonzero_automatic_tokens_with_zero_cost_are_reported_unknown():
+    _, run_id = _seed_running()
+    sessions = [
+        _session("ses-root", "department-lead", "orchestra-lead", 424283, 12795, "0"),
+    ]
+    with SessionLocal() as db:
+        capture_opencode_observability(
+            db,
+            execution_id=run_id,
+            generation=7,
+            root_session_id="ses-root",
+            session_state="error",
+            messages=[],
+            sessions=sessions,
+        )
+        run = db.get(ExecutionRun, run_id)
+        assert run is not None
+        run.status = "failed"
+        run.stage = "opencode_error"
+        run.finished_at = datetime.now(timezone.utc)
+        package = materialize_result_package(db, run_id, final=True, now=run.finished_at)
+        db.commit()
+
+        assert package.payload["cost"] == {
+            "input_tokens": 424283,
+            "output_tokens": 12795,
+            "actual_cost": None,
+            "known_cost": "0.000000",
+            "cost_status": "unknown",
+            "unknown_automatic_cost_rows": 1,
+        }
+        assert package.payload["usage_capture"]["automatic_provider_capture"] is True
+        assert package.payload["usage_capture"]["automatic_cost_capture"] is False
+        assert (
+            "automatic provider monetary cost was unavailable; token telemetry is present"
+            in package.payload["known_risks_limitations"]
+        )

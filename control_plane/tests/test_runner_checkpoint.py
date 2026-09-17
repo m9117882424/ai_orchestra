@@ -45,6 +45,21 @@ def test_valid_checkpoint_is_canonical_and_deterministic():
     assert part_id.startswith("prt_orchestra_runner_")
 
 
+def test_checkpoint_allows_human_readable_ascii_space_in_label():
+    checkpoint = parse_runner_checkpoint(
+        _text('{"version":1,"commands":[{"label":"changed-file tests","argv":["true"],"timeout_seconds":1},{"label":"git diff check","argv":["true"],"timeout_seconds":1}]}')
+    )
+    assert checkpoint is not None
+    assert [command.label for command in checkpoint.commands] == [
+        "changed-file tests",
+        "git diff check",
+    ]
+    with pytest.raises(RunnerCheckpointError, match="runner_checkpoint_label_invalid"):
+        parse_runner_checkpoint(
+            _text('{"version":1,"commands":[{"label":"tests\tunsafe","argv":["true"],"timeout_seconds":1}]}')
+        )
+
+
 def test_checkpoint_must_be_standalone_and_unique():
     valid = _text('{"version":1,"commands":[{"label":"x","argv":["true"],"timeout_seconds":1}]}')
     with pytest.raises(RunnerCheckpointError, match="runner_checkpoint_must_be_standalone"):

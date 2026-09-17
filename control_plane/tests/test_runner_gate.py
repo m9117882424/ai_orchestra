@@ -229,6 +229,7 @@ def test_execution_prompt_declares_checkpoint_as_machine_only_message():
     assert "checkpoint является машинным сообщением" in prompt
     assert "не пиши перед ним" in prompt
     assert "весь text content checkpoint-сообщения" in prompt
+    assert "ASCII буквы/цифры, пробел" in prompt
 
 
 def _production_wrapped_checkpoint_text() -> str:

@@ -8,7 +8,7 @@ from uuid import UUID, uuid5
 
 CHECKPOINT_BEGIN = "<AI_ORCHESTRA_RUNNER_CHECKPOINT>"
 CHECKPOINT_END = "</AI_ORCHESTRA_RUNNER_CHECKPOINT>"
-_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$")
+_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._: -]{0,79}$")
 
 
 class RunnerCheckpointError(RuntimeError):

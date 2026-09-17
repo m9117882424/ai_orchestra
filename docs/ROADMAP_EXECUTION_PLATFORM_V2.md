@@ -150,10 +150,11 @@ AI/OpenCode не получает Git credentials.
 
 # G3 — Isolated Execution & Multi-Agent Department
 
-Статус: **G3.1/G3.2 production accepted 2026-09-16** на main
-`1496caf717bbf06cbacb2437ba931e227711a508`, schema `20260916_0008`.
-Disposable sandbox и durable Runner Jobs приняты; автоматический multi-agent
-workflow ещё не реализован.
+Статус: **production accepted 2026-09-17** на main
+`8cea45110438636e266edc97ee87fd1babb0aa08`, schema `20260916_0009`.
+G3.1 disposable sandbox, G3.2 durable Runner Jobs и G3.3 automatic runner-gated
+workflow прошли CI, production rollout и финальный E2E acceptance. Exact evidence
+зафиксирован в [`G3_PRODUCTION_ACCEPTANCE_2026-09-17.md`](G3_PRODUCTION_ACCEPTANCE_2026-09-17.md).
 
 ### Execution sandbox
 - [x] disposable runner boundary (G3.1);
@@ -164,7 +165,7 @@ workflow ещё не реализован.
 - [x] egress deny-by-default (`network=none`) for current sandbox profile;
 - [x] read-only authoritative source + disposable writable workspace;
 - [x] durable `runner_jobs`, lease/fencing/recovery and trust recheck (G3.2);
-- [ ] route all untrusted install/build/test child-runs through Runner Manager automatically.
+- [x] route untrusted install/build/test/lint/typecheck through Runner Manager automatically; direct project `bash` denied for all agents.
 
 ### Real orchestration
 Не prompt-only delegation.
@@ -175,14 +176,10 @@ workflow ещё не реализован.
 
 Policy сокращает workflow для простых задач и усиливает для high-risk.
 
-Каждый child-run имеет:
-- role/model;
-- status/start/end;
-- input/output identity;
-- tool calls;
-- tests/artifacts;
-- cost;
-- error/retry lineage.
+G3 production acceptance подтверждает role/task delegation, independent QA/reviewer и
+runner-gated executable checks. Детальная durable telemetry каждого child-run
+(role/model, status/timestamps, tool calls, cost и retry lineage) относится к G4
+Evidence/Observability и не заявляется как завершённая возможность G3.
 
 ---
 

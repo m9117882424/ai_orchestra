@@ -55,9 +55,29 @@ def seed_defaults(db: Session, default_monthly_budget: float) -> None:
 
 
 def current_month_cost(db: Session) -> Decimal:
+    return current_month_cost_summary(db)["known_cost"]
+
+
+def current_month_cost_summary(db: Session) -> dict:
     now = datetime.now(timezone.utc)
     start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
     value = db.scalar(
         select(func.coalesce(func.sum(UsageEvent.cost), 0)).where(UsageEvent.created_at >= start)
     )
-    return Decimal(str(value or 0))
+    known_cost = Decimal(str(value or 0))
+    unknown_rows = db.scalar(
+        select(func.count(UsageEvent.id)).where(
+            UsageEvent.created_at >= start,
+            UsageEvent.source == "opencode-session",
+            UsageEvent.cost == 0,
+            (UsageEvent.input_tokens > 0) | (UsageEvent.output_tokens > 0),
+        )
+    ) or 0
+    status = "known"
+    if unknown_rows:
+        status = "partial" if known_cost > 0 else "unknown"
+    return {
+        "known_cost": known_cost,
+        "cost_status": status,
+        "unknown_automatic_cost_rows": int(unknown_rows),
+    }

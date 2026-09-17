@@ -290,6 +290,25 @@ def detect_stalled_tool_call(
     return max(candidates, key=lambda item: item["age_seconds"])
 
 
+def extract_last_assistant_error(messages: list[dict]) -> str:
+    """Return a bounded terminal assistant error without raw headers/body payloads."""
+    for item in reversed(messages):
+        info = item.get("info") or {}
+        if info.get("role") != "assistant":
+            continue
+        error = info.get("error")
+        if not isinstance(error, dict):
+            continue
+        name = str(error.get("name") or "OpenCodeError").strip()[:80]
+        data = error.get("data") if isinstance(error.get("data"), dict) else {}
+        status = data.get("statusCode")
+        message = data.get("message")
+        clean_message = " ".join(str(message or "provider/session error").split())[:900]
+        status_text = f" HTTP {status}" if isinstance(status, int) else ""
+        return f"{name}{status_text}: {clean_message}"[:1000]
+    return ""
+
+
 def extract_last_assistant_message(messages: list[dict]) -> tuple[str, str] | None:
     """Return the latest successful assistant message id and visible text."""
     for item in reversed(messages):

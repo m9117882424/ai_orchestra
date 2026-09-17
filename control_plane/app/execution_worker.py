@@ -32,6 +32,7 @@ from .opencode_client import (
     OpenCodeError,
     OpenCodeNotFound,
     detect_stalled_tool_call,
+    extract_last_assistant_error,
     extract_last_assistant_message,
     extract_last_assistant_text,
 )
@@ -580,6 +581,7 @@ class ExecutionLeaseManager:
         *,
         state_type: str,
         result: str,
+        provider_error: str = "",
         now: datetime | None = None,
     ) -> str:
         now = now or utc_now()
@@ -599,6 +601,46 @@ class ExecutionLeaseManager:
             run.updated_at = now
             db.commit()
             return "deadline"
+
+        if state_type == "error":
+            run.status = "failed"
+            run.stage = "opencode_error"
+            detail = " ".join(provider_error.split())[:1000]
+            run.error = (
+                "OpenCode session failed: " + detail
+                if detail
+                else "OpenCode session failed with a terminal provider/session error"
+            )
+            run.finished_at = now
+            run.heartbeat_at = now
+            run.lease_owner = None
+            run.lease_expires_at = None
+            run.updated_at = now
+            task = db.get(Task, run.task_id)
+            if task and task.status in {"in_progress", "waiting_approval"}:
+                task.status = "failed"
+                task.updated_at = now
+            request_workspace_inspection(
+                db,
+                run,
+                actor=self.audit_actor,
+                now=now,
+            )
+            materialize_terminal_result_package(db, run, now=now)
+            write_audit(
+                db,
+                actor=self.audit_actor,
+                action="execution.opencode_error",
+                entity_type="execution",
+                entity_id=run.id,
+                details={
+                    "task_id": run.task_id,
+                    "generation": lease.generation,
+                    "error": run.error,
+                },
+            )
+            db.commit()
+            return "failed"
 
         if state_type == "idle" and result.strip():
             run.status = "completed"
@@ -1878,8 +1920,12 @@ def poll_execution(
             )
         statuses = client.session_statuses()
         messages = client.messages(lease.opencode_session_id)
+        # messages() fail-closed infers terminal/busy state when OpenCode omits a
+        # completed session from /session/status. Read the shared status mapping
+        # only after that inference has had a chance to run.
         state = statuses.get(lease.opencode_session_id) or {}
         state_type = state.get("type") if isinstance(state, dict) else str(state)
+        provider_error = extract_last_assistant_error(messages)
         session_reader = getattr(client, "execution_sessions", None)
         if callable(session_reader):
             try:
@@ -1983,6 +2029,7 @@ def poll_execution(
             lease,
             state_type=state_type or "unknown",
             result=result,
+            provider_error=provider_error,
         )
     if outcome == "cancel_requested":
         return cancel_execution(manager, client, lease)

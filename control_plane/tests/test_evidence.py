@@ -143,6 +143,9 @@ def test_final_result_package_is_content_addressed_and_immutable():
             "input_tokens": 100,
             "output_tokens": 40,
             "actual_cost": "0.125000",
+            "known_cost": "0.125000",
+            "cost_status": "known",
+            "unknown_automatic_cost_rows": 0,
         }
         assert package.package_digest == digest
         db.add(

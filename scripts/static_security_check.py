@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import yaml
 import os
 import re
 import subprocess
@@ -779,6 +780,35 @@ def main() -> int:
     assert "openai/gpt-5.6-sol" in direct
     assert "gemini/gemini-3.5-flash" in direct
     assert "gemini/gemini-3.5-flash-lite" in direct
+
+    token_caps = {
+        "orchestra-lead": 3072,
+        "orchestra-reviewer": 3072,
+        "orchestra-risk": 2048,
+        "orchestra-architect": 3072,
+        "orchestra-coder": 6144,
+        "orchestra-quant": 3072,
+        "orchestra-analyst": 3072,
+        "orchestra-fast": 1536,
+        "orchestra-qa": 3072,
+    }
+    for router_path in (
+        ROOT / "config/model-router.shared.yaml",
+        ROOT / "config/model-router.separate.yaml",
+    ):
+        router = yaml.safe_load(router_path.read_text(encoding="utf-8"))
+        observed = {
+            item["model_name"]: item.get("litellm_params", {}).get("max_tokens")
+            for item in router["model_list"]
+        }
+        assert observed == token_caps, (router_path, observed)
+
+    opencode = json.loads((ROOT / "config/opencode.gateway.json").read_text(encoding="utf-8"))
+    assert opencode.get("compaction") == {
+        "auto": True,
+        "prune": True,
+        "reserved": 12000,
+    }
 
     print("[OK] static security boundaries")
     return 0

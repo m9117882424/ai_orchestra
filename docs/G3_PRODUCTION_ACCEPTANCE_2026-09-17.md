@@ -18,6 +18,9 @@ Accepted capabilities:
 - PR #28: wrapped-checkpoint production hotfix and runtime source-readability hardening; merged as `8cea45110438636e266edc97ee87fd1babb0aa08`.
 - PR #28 CI run #396: all 19 gates green.
 - post-merge CI run #397: all 19 gates green.
+- Documentation closure PR #29 merged as `775019c5d0814c5a63e4ff0f4922ce6c196f2eac`;
+  [post-merge CI #400](https://github.com/m9117882424/ai_orchestra/actions/runs/35188890168)
+  completed successfully at 2026-09-17 06:17:49 UTC. Every substantive job step passed.
 - production smoke after final rollout: Model Gateway 5/5, schema check green, 9 runtime services healthy, `runnerd` active.
 - production disposable runner image: `sha256:235bc849835769854af3d08557f616e0294b8207b9ef7846147595b65d4a7c8e`.
 

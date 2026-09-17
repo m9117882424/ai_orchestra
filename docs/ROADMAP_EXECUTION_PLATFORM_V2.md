@@ -46,8 +46,8 @@ runtime schema creation and unlocked Python dependencies have been removed.
 Сохраняющиеся ограничения платформы:
 
 - Temporal доказан только изолированным PoC и не входит в production topology;
-- нет полноценного repository lifecycle и workspace preflight;
-- execution sandbox ещё не отделён от OpenCode runtime;
+- detailed durable child-run telemetry и result package ожидают G4;
+- текущий disposable runner не имеет network egress и не покрывает произвольные project dependency/toolchain profiles;
 - Git write/release autonomy отключена.
 
 ---

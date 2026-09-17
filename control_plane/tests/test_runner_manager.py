@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
+import pytest
 
 from control_plane.app.db import SessionLocal
 from control_plane.app.models import ExecutionRun, Repository, RunnerJob, Task, TaskWorkspace
@@ -308,3 +309,27 @@ def test_runnerd_payload_omits_snapshot_for_legacy_manual_job():
     lease = _claim(manager, job_id)
     payload = RunnerdClient._payload(lease)
     assert "source_snapshot_digest" not in payload
+
+
+@pytest.mark.parametrize("updates", [
+    {"exit_code": 1},
+    {"exit_code": False},
+    {"status": "failed", "exit_code": 0},
+    {"runner_image_id": "sha256:" + "z" * 64},
+    {"version": 2},
+    {"output_truncated": "false"},
+    {"stdout": {"unexpected": "object"}},
+])
+def test_inconsistent_terminal_evidence_fails_closed(updates):
+    job_id = _seed_job()
+    manager = RunnerJobLeaseManager("worker-a")
+    lease = _claim(manager, job_id)
+    response = _terminal_response(lease)
+    response.update(updates)
+    with SessionLocal() as db:
+        outcome = manager.mark_terminal(db, lease, response)
+    assert outcome == "cleanup_uncertain"
+    with SessionLocal() as db:
+        job = db.get(RunnerJob, job_id)
+        assert job.status == "cleanup_uncertain"
+        assert job.cleanup_confirmed is False

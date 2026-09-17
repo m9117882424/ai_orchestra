@@ -1,6 +1,9 @@
 from uuid import uuid4
+import json
+from pathlib import Path
 
 import pytest
+from runner.runnerd import RunnerConfig, parse_run_request
 
 from control_plane.app.runner_checkpoint import (
     CHECKPOINT_BEGIN,
@@ -72,3 +75,23 @@ def test_checkpoint_digest_binds_message_and_snapshot():
     two = runner_checkpoint_digest(execution_id, "msg_b", "1" * 64, checkpoint)
     three = runner_checkpoint_digest(execution_id, "msg_a", "2" * 64, checkpoint)
     assert len({one, two, three}) == 3
+
+
+@pytest.mark.parametrize("size", [64, 65])
+def test_checkpoint_argv_limit_matches_runnerd(size):
+    command = {"label": "test", "argv": ["true"] * size, "timeout_seconds": 1}
+    text = _text(json.dumps({"version": 1, "commands": [command]}))
+    config = RunnerConfig(Path("/tmp/runnerd.sock"), "test", "sha256:" + "a" * 64)
+    payload = {
+        "version": 1, "operation": "run", "request_id": str(uuid4()),
+        "workspace_id": str(uuid4()), "execution_id": str(uuid4()),
+        "base_commit": "b" * 40, "preflight_digest": "c" * 64,
+        "argv": command["argv"], "timeout_seconds": 1,
+    }
+    if size == 64:
+        assert parse_runner_checkpoint(text).commands[0].argv == parse_run_request(payload, config).argv
+    else:
+        with pytest.raises(RunnerCheckpointError, match="argv_invalid"):
+            parse_runner_checkpoint(text)
+        with pytest.raises(ValueError, match="argv"):
+            parse_run_request(payload, config)

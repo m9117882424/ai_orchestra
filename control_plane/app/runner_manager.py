@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import socket
 import time
 from dataclasses import dataclass
@@ -502,6 +503,15 @@ class RunnerJobLeaseManager:
             db.rollback()
             return "invalid"
         if (
+            type(response.get("version")) is not int
+            or response["version"] != 1
+            or not isinstance(response.get("stdout"), str)
+            or not isinstance(response.get("stderr"), str)
+            or type(response.get("output_truncated")) is not bool
+        ):
+            db.rollback()
+            return self.mark_uncertain(db, lease, "runner_protocol_evidence_invalid", now=now)
+        if (
             response.get("request_id") != job.id
             or response.get("execution_id") != job.execution_id
             or response.get("workspace_id") != job.workspace_id
@@ -515,13 +525,16 @@ class RunnerJobLeaseManager:
         if status in {"completed", "failed", "timed_out"}:
             if (
                 not isinstance(image_id, str)
-                or len(image_id) != 71
-                or not image_id.startswith("sha256:")
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is None
                 or cleanup_confirmed is not True
             ):
                 db.rollback()
                 return self.mark_uncertain(db, lease, "runner_terminal_evidence_invalid", now=now)
-        if status in {"completed", "failed"} and not isinstance(exit_code, int):
+        if status in {"completed", "failed"} and (
+            type(exit_code) is not int
+            or (status == "completed" and exit_code != 0)
+            or (status == "failed" and exit_code == 0)
+        ):
             db.rollback()
             return self.mark_uncertain(db, lease, "runner_exit_code_invalid", now=now)
         if status == "timed_out" and exit_code is not None:

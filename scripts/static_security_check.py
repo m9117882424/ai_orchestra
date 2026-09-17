@@ -316,6 +316,14 @@ def main() -> int:
     assert gateway["permission"]["bash"] == "deny"
     for agent_name, agent in gateway.get("agent", {}).items():
         assert agent.get("permission", {}).get("bash") == "deny", f"{agent_name} must not execute project shell"
+    lead = gateway["agent"]["department-lead"]
+    assert lead.get("steps") == 16, "department-lead must have a bounded orchestration step budget"
+    lead_permissions = lead.get("permission", {})
+    for tool_name in ("read", "glob", "grep", "webfetch", "websearch"):
+        assert lead_permissions.get(tool_name) == "deny", f"department-lead must delegate {tool_name}"
+    lead_tasks = lead_permissions.get("task", {})
+    for role_name in ("developer", "qa-engineer", "code-reviewer"):
+        assert lead_tasks.get(role_name) == "allow", f"department-lead must delegate to {role_name}"
     assert set(gateway["provider"]) == {"orchestra"}
     options = gateway["provider"]["orchestra"]["options"]
     assert options["baseURL"] == "http://model-gateway:8080/v1"

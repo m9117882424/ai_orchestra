@@ -15,6 +15,13 @@ import urllib.request
 
 DEFAULT_BASE_URL = "http://127.0.0.1:18089/v1"
 
+# Some reasoning-capable providers spend part of the completion budget on
+# hidden reasoning before producing visible content. Keep the default smoke
+# request tiny, but give those aliases enough bounded room to emit "OK".
+SMOKE_MAX_TOKENS = {
+    "orchestra-analyst": 512,
+}
+
 MODE_MODELS = {
     "shared": [
         "orchestra-lead",
@@ -109,7 +116,7 @@ def main() -> int:
                 {
                     "model": model,
                     "messages": [{"role": "user", "content": "Reply with exactly OK."}],
-                    "max_tokens": 64,
+                    "max_tokens": SMOKE_MAX_TOKENS.get(model, 64),
                 },
             )
             choices = result.get("choices") or []

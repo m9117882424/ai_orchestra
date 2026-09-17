@@ -83,7 +83,7 @@ print('STARTED')
 
 
 def test_declared_schema_head_is_stable():
-    assert head_revision() == "20260916_0009"
+    assert head_revision() == "20260917_0010"
 
 
 def test_fresh_database_is_created_by_alembic(tmp_path):
@@ -148,7 +148,7 @@ def test_fresh_database_is_created_by_alembic(tmp_path):
         }
 
     assert set(Base.metadata.tables).issubset(tables)
-    assert revision == "20260916_0009"
+    assert revision == "20260917_0010"
     assert session_column["nullable"] is True
     assert "deadline_at" in execution_columns
     assert "cancel_requested_at" in execution_columns
@@ -291,7 +291,7 @@ def test_matching_current_unversioned_database_is_verified_then_stamped(tmp_path
 
     with engine.connect() as connection:
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert revision == "20260916_0009"
+    assert revision == "20260917_0010"
 
 
 def test_unversioned_historical_baseline_is_verified_then_migrated(tmp_path):
@@ -336,7 +336,7 @@ def test_unversioned_historical_baseline_is_verified_then_migrated(tmp_path):
             if column["name"] == "opencode_session_id"
         )
 
-    assert revision == "20260916_0009"
+    assert revision == "20260917_0010"
     assert marker == "Legacy marker"
     assert {
         "lease_owner",
@@ -378,7 +378,7 @@ def test_versioned_0002_database_upgrades_to_current_execution_schema(tmp_path):
         execution_columns = {
             column["name"] for column in inspect(connection).get_columns("execution_runs")
         }
-    assert revision == "20260916_0009"
+    assert revision == "20260917_0010"
     assert after["nullable"] is True
     assert "deadline_at" in execution_columns
     assert "cancel_requested_at" in execution_columns
@@ -440,7 +440,7 @@ def test_versioned_0003_backfills_only_active_execution_deadlines(tmp_path):
             ).all()
         )
 
-    assert revision == "20260916_0009"
+    assert revision == "20260917_0010"
     assert deadlines["queued-run"] is not None
     assert deadlines["completed-run"] is None
 
@@ -477,7 +477,7 @@ def test_versioned_0004_adds_registry_without_mutating_existing_data(tmp_path):
         ).scalar_one()
         tables = set(inspect(connection).get_table_names())
 
-    assert revision == "20260916_0009"
+    assert revision == "20260917_0010"
     assert marker == "marker"
     assert "repositories" in tables
 
@@ -531,7 +531,7 @@ def test_versioned_0005_registry_is_requeued_without_losing_policy(tmp_path):
             )
         ).one()
 
-    assert revision == "20260916_0009"
+    assert revision == "20260917_0010"
     assert tuple(row[:5]) == (
         "existing-repository",
         "github.com/example/existing",
@@ -608,7 +608,7 @@ def test_versioned_0006_preserves_legacy_execution_as_contract_v1(tmp_path):
             text("SELECT count(*) FROM task_workspaces")
         ).scalar_one()
 
-    assert revision == "20260916_0009"
+    assert revision == "20260917_0010"
     assert task_repository is None
     assert tuple(run) == (1, None, None, None, None, "queued", "dispatch_pending")
     assert workspace_count == 0
@@ -729,3 +729,54 @@ def test_production_application_detects_repository_identity_index_drift(tmp_path
     assert "schema drift detected" in started.stderr
     assert "repositories" in started.stderr
     assert "indexes" in started.stderr
+
+
+def test_g4_evidence_schema_contract(tmp_path):
+    database_path = tmp_path / "g4-evidence.db"
+    database_url = f"sqlite+pysqlite:///{database_path}"
+    migrated = _run_schema_cli(database_url, "migrate")
+    assert migrated.returncode == 0, migrated.stderr
+
+    engine = create_engine(database_url)
+    inspector = inspect(engine)
+    usage_columns = {column["name"] for column in inspector.get_columns("usage_events")}
+    usage_indexes = {
+        (tuple(index["column_names"]), bool(index["unique"]))
+        for index in inspector.get_indexes("usage_events")
+    }
+    evidence_columns = {column["name"] for column in inspector.get_columns("execution_evidence")}
+    evidence_indexes = {
+        (tuple(index["column_names"]), bool(index["unique"]))
+        for index in inspector.get_indexes("execution_evidence")
+    }
+    evidence_checks = {
+        constraint["name"] for constraint in inspector.get_check_constraints("execution_evidence")
+    }
+    package_columns = {
+        column["name"] for column in inspector.get_columns("execution_result_packages")
+    }
+    package_checks = {
+        constraint["name"]
+        for constraint in inspector.get_check_constraints("execution_result_packages")
+    }
+
+    assert "execution_id" in usage_columns
+    assert (("execution_id",), False) in usage_indexes
+    assert {
+        "id", "execution_id", "source", "source_key", "kind", "role", "model",
+        "tool_name", "status", "attempt", "retry_of_id", "details", "occurred_at",
+        "created_at",
+    }.issubset(evidence_columns)
+    assert (("execution_id", "source", "source_key"), True) in evidence_indexes
+    assert (("execution_id", "occurred_at"), False) in evidence_indexes
+    assert {"ck_execution_evidence_kind", "ck_execution_evidence_attempt"}.issubset(evidence_checks)
+    assert {
+        "execution_id", "package_version", "state", "payload", "package_digest",
+        "generated_at", "finalized_at", "created_at", "updated_at",
+    }.issubset(package_columns)
+    assert {
+        "ck_execution_result_packages_version",
+        "ck_execution_result_packages_state",
+        "ck_execution_result_packages_digest",
+        "ck_execution_result_packages_final_state",
+    }.issubset(package_checks)

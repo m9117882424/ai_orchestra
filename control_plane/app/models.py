@@ -317,6 +317,9 @@ class UsageEvent(Base):
     task_id: Mapped[str | None] = mapped_column(
         ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    execution_id: Mapped[str | None] = mapped_column(
+        ForeignKey("execution_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     role: Mapped[str] = mapped_column(String(80))
     provider: Mapped[str] = mapped_column(String(80))
     model: Mapped[str] = mapped_column(String(120))
@@ -446,6 +449,76 @@ class ExecutionRun(Base):
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ExecutionEvidence(Base):
+    __tablename__ = "execution_evidence"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('stage', 'message', 'tool', 'runner', 'usage', 'error', 'retry', 'review', 'artifact')",
+            name="ck_execution_evidence_kind",
+        ),
+        CheckConstraint("attempt >= 1", name="ck_execution_evidence_attempt"),
+        Index(
+            "ux_execution_evidence_source_key",
+            "execution_id",
+            "source",
+            "source_key",
+            unique=True,
+        ),
+        Index("ix_execution_evidence_timeline", "execution_id", "occurred_at"),
+        Index("ix_execution_evidence_kind", "execution_id", "kind", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("execution_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    source: Mapped[str] = mapped_column(String(40), nullable=False)
+    source_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    role: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    tool_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    status: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    attempt: Mapped[int] = mapped_column(Integer, default=1)
+    retry_of_id: Mapped[str | None] = mapped_column(
+        ForeignKey("execution_evidence.id", ondelete="SET NULL"), nullable=True
+    )
+    details: Mapped[dict] = mapped_column(JSON, default=dict)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ExecutionResultPackage(Base):
+    __tablename__ = "execution_result_packages"
+    __table_args__ = (
+        CheckConstraint("package_version = 1", name="ck_execution_result_packages_version"),
+        CheckConstraint(
+            "state IN ('provisional', 'final')",
+            name="ck_execution_result_packages_state",
+        ),
+        CheckConstraint("length(package_digest) = 64", name="ck_execution_result_packages_digest"),
+        CheckConstraint(
+            "((state = 'final' AND finalized_at IS NOT NULL) OR "
+            "(state = 'provisional' AND finalized_at IS NULL))",
+            name="ck_execution_result_packages_final_state",
+        ),
+    )
+
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("execution_runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    package_version: Mapped[int] = mapped_column(Integer, default=1)
+    state: Mapped[str] = mapped_column(String(16), default="provisional")
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    package_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
 
 
 class RunnerJob(Base):

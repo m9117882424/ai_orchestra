@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This runbook is the supported path for moving the Control Plane PostgreSQL database through its reviewed Alembic chain. The accepted G3 schema is `20260916_0009` (G3.2 adds `0008` runner jobs; G3.3 adds `0009` checkpoint/snapshot bindings).
+This runbook is the supported path for moving the Control Plane PostgreSQL database through its reviewed Alembic chain. The accepted G3 production schema is `20260916_0009`; the reviewed G4.1 branch advances the repository head to `20260917_0010` for durable execution evidence/result packages.
 
 The first migration is special because production already contains tables created historically by SQLAlchemy `Base.metadata.create_all()`.
 
@@ -75,13 +75,13 @@ must fail closed on an old revision.
 For a versioned `20260904_0001` database the expected message is equivalent to:
 
 ```text
-[OK] Schema migrated to 20260916_0009
+[OK] Schema migrated to 20260917_0010
 ```
 
 For an unversioned database that exactly matches the historical baseline:
 
 ```text
-[OK] Historical baseline 20260904_0001 verified, migrated to 20260916_0009; data unchanged
+[OK] Historical baseline 20260904_0001 verified, migrated to 20260917_0010; data unchanged
 ```
 
 Active executions present during `0004` receive a fresh two-hour deadline grace
@@ -96,7 +96,7 @@ only newly requested executions use contract v2.
 If the database is already migrated, the expected message is:
 
 ```text
-[OK] Schema already at head: 20260916_0009
+[OK] Schema already at head: 20260917_0010
 ```
 
 ## Failure: legacy schema mismatch

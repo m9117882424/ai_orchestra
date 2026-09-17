@@ -153,7 +153,7 @@ sha = hashlib.sha256(archive.read_bytes()).hexdigest()
 assert payload["result"] == "success"
 assert payload["source_backup_sha256"] == sha
 assert payload["pre_migration_revision"] == "unversioned"
-assert payload["post_migration_revision"] == "20260916_0009"
+assert payload["post_migration_revision"] == "20260917_0010"
 assert payload["restored_table_counts"].get("audit_events", 0) >= 1
 assert payload["restored_table_counts"].get("alembic_version", 0) == 1
 assert payload["restored_table_counts"].get("repositories") == 0
@@ -169,7 +169,7 @@ assert payload["task_workspace_restore"] == {
 assert payload["runner_job_restore"] == {"bindings_verified": 0, "checkpoint_bindings_verified": 0, "database_rows": 0}
 assert payload["observed_restore_rto_seconds"] >= 0
 assert payload["observed_backup_age_seconds"] >= 0
-print("[OK] Historical 0001 backup was restored, adopted to 0009 and retained the seeded audit marker")
+print("[OK] Historical 0001 backup was restored, adopted to 0010 and retained the seeded audit marker")
 PY
 
 echo "[INFO] Creating current-head backup with durable runner-job evidence"
@@ -188,7 +188,8 @@ docker compose run --rm -T --no-deps \
 from datetime import datetime, timezone
 from uuid import uuid4
 from app.db import SessionLocal
-from app.models import ExecutionRun, Repository, RunnerJob, Task, TaskWorkspace
+from app.evidence import materialize_result_package, record_evidence
+from app.models import ExecutionRun, Repository, RunnerJob, Task, TaskWorkspace, UsageEvent
 
 now = datetime.now(timezone.utc)
 repo_id, task_id, workspace_id, run_id, job_id = [str(uuid4()) for _ in range(5)]
@@ -208,12 +209,12 @@ with SessionLocal() as db:
     ))
     db.add(Task(id=task_id, title="DR runner evidence", repository_id=repo_id, status="qa"))
     db.add(TaskWorkspace(
-        id=workspace_id, task_id=task_id, repository_id=repo_id, status="removed",
+        id=workspace_id, task_id=task_id, repository_id=repo_id, status="retained",
         base_commit=commit, base_branch="main",
         branch_name=f"ai-orchestra/task-{task_id.replace('-', '')[:12]}/run-{run_id.replace('-', '')}",
         opencode_path=f"/workspace/worktrees/managed/{workspace_id}", initial_tree=tree,
         preflight_digest=digest, tracked_entries=1, current_head_commit=commit, current_tree=tree,
-        cleaned_at=now, version=1,
+        change_digest="1" * 64, has_changes=False, changed_file_count=0, inspected_at=now, version=1,
     ))
     db.flush()
     db.add(ExecutionRun(
@@ -235,6 +236,19 @@ with SessionLocal() as db:
         cleanup_confirmed=True, lease_generation=1, failure_count=0,
         started_at=now, finished_at=now,
     ))
+    db.add(UsageEvent(
+        task_id=task_id, execution_id=run_id, role="department-lead", provider="ci",
+        model="orchestra-lead", input_tokens=10, output_tokens=5, cost=0,
+    ))
+    record_evidence(
+        db, execution_id=run_id, source="ci", source_key="dr-tool", kind="tool",
+        role="qa", model="orchestra-qa", tool_name="pytest", status="completed",
+        details={"fixture": "backup-restore-smoke"}, occurred_at=now,
+    )
+    materialize_result_package(db, run_id, final=True, now=now)
+    workspace = db.get(TaskWorkspace, workspace_id)
+    workspace.status = "removed"
+    workspace.cleaned_at = now
     db.commit()
 print(job_id)
 PYRUNNER
@@ -246,12 +260,15 @@ evidence="$(find "$BACKUP_ROOT/drills" -maxdepth 1 -type f -name 'restore-drill-
 python3 - "$evidence" <<'PYCHECK'
 import json, pathlib, sys
 payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-assert payload["pre_migration_revision"] == "20260916_0009"
-assert payload["post_migration_revision"] == "20260916_0009"
+assert payload["pre_migration_revision"] == "20260917_0010"
+assert payload["post_migration_revision"] == "20260917_0010"
 assert payload["restored_table_counts"].get("runner_jobs") == 1
 assert payload["runner_job_restore"] == {"bindings_verified": 1, "checkpoint_bindings_verified": 1, "database_rows": 1}
 assert payload["restored_table_counts"].get("task_workspaces") == 1
-print("[OK] Current-head runner job survived backup/restore with immutable binding verified")
+assert payload["restored_table_counts"].get("execution_evidence") == 1
+assert payload["restored_table_counts"].get("execution_result_packages") == 1
+assert payload["restored_table_counts"].get("usage_events") == 1
+print("[OK] Current-head runner/evidence/result-package data survived backup/restore")
 PYCHECK
 
 echo "[OK] Backup/restore smoke passed"

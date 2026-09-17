@@ -223,6 +223,7 @@ class BudgetRead(BudgetUpdate):
 
 class UsageCreate(BaseModel):
     task_id: str | None = None
+    execution_id: str | None = None
     role: str = Field(min_length=1, max_length=80)
     provider: str = Field(min_length=1, max_length=80)
     model: str = Field(min_length=1, max_length=120)
@@ -366,7 +367,7 @@ class RunnerJobCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     idempotency_key: UUID
-    argv: list[str] = Field(min_length=1, max_length=128)
+    argv: list[str] = Field(min_length=1, max_length=64)
     timeout_seconds: int = Field(default=300, ge=1, le=3600, strict=True)
 
     @field_validator("argv")
@@ -415,6 +416,56 @@ class RunnerJobRead(BaseModel):
     updated_at: datetime
 
 
+class ExecutionEvidenceRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    execution_id: str
+    source: str
+    source_key: str
+    kind: str
+    role: str | None
+    model: str | None
+    tool_name: str | None
+    status: str | None
+    attempt: int
+    retry_of_id: str | None
+    details: dict
+    occurred_at: datetime
+    created_at: datetime
+
+
+class ExecutionResultPackageRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    execution_id: str
+    package_version: int
+    state: Literal["provisional", "final"]
+    payload: dict
+    package_digest: str
+    generated_at: datetime
+    finalized_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ExecutionToolCallRead(BaseModel):
+    tool_name: str
+    status: str
+    role: str | None = None
+    model: str | None = None
+    occurred_at: datetime
+
+
+class ExecutionRunnerCheckRead(BaseModel):
+    job_id: str
+    label: str | None
+    status: RunnerJobStatus
+    exit_code: int | None
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
 class ExecutionProgressItem(BaseModel):
     role: str
     model: str | None = None
@@ -432,5 +483,12 @@ class ExecutionProgressRead(BaseModel):
     deadline_at: datetime | None
     cancel_requested_at: datetime | None
     lease_generation: int
+    current_role: str | None = None
+    tool_calls: list[ExecutionToolCallRead] = Field(default_factory=list)
+    runner_checks: list[ExecutionRunnerCheckRead] = Field(default_factory=list)
+    input_tokens: int = 0
+    output_tokens: int = 0
+    actual_cost: Decimal = Decimal("0")
+    retry_count: int = 0
     error: str
     items: list[ExecutionProgressItem]

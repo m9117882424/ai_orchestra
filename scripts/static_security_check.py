@@ -318,6 +318,13 @@ def main() -> int:
         assert agent.get("permission", {}).get("bash") == "deny", f"{agent_name} must not execute project shell"
     lead = gateway["agent"]["department-lead"]
     assert lead.get("steps") == 16, "department-lead must have a bounded orchestration step budget"
+    developer = gateway["agent"]["developer"]
+    assert developer.get("steps") == 48, "developer must have a bounded implementation step budget"
+    developer_prompt = (ROOT / "prompts/developer.txt").read_text(encoding="utf-8")
+    assert "bash=deny" in developer_prompt
+    assert "AI_ORCHESTRA_RUNNER_CHECKPOINT" in developer_prompt
+    lead_prompt = (ROOT / "prompts/department-lead.txt").read_text(encoding="utf-8")
+    assert "relay его как весь свой следующий visible response" in lead_prompt
     lead_permissions = lead.get("permission", {})
     for tool_name in ("read", "glob", "grep", "webfetch", "websearch"):
         assert lead_permissions.get(tool_name) == "deny", f"department-lead must delegate {tool_name}"
@@ -685,8 +692,10 @@ def main() -> int:
     runnerd_text = (ROOT / "runner/runnerd.py").read_text(encoding="utf-8")
     runner_entrypoint = (ROOT / "runner/entrypoint.py").read_text(encoding="utf-8")
     runner_dockerfile = (ROOT / "runner/Dockerfile").read_text(encoding="utf-8")
+    ai_orchestra_runner_dockerfile = (ROOT / "runner/Dockerfile.ai-orchestra").read_text(encoding="utf-8")
     runner_service = (ROOT / "runner/systemd/ai-orchestra-runnerd.service").read_text(encoding="utf-8")
     runner_smoke = (ROOT / "scripts/runner-isolation-smoke.sh").read_text(encoding="utf-8")
+    ai_orchestra_runner_smoke = (ROOT / "scripts/runner-ai-orchestra-toolchain-smoke.sh").read_text(encoding="utf-8")
     runner_manager_smoke = (ROOT / "scripts/runner-manager-durable-smoke.sh").read_text(encoding="utf-8")
     assert 'control-plane-runner-smoke:' in runner_manager_smoke
     assert 'runner-manager-control-smoke:' in runner_manager_smoke
@@ -703,6 +712,21 @@ def main() -> int:
                    "verify_manifest", "shutil.copytree", "os.execvp"):
         assert marker in runner_entrypoint, f"Runner entrypoint safety marker missing: {marker}"
     assert re.search(r"^FROM python:3\.12-slim@sha256:[0-9a-f]{64}$", runner_dockerfile, re.MULTILINE)
+    assert re.search(r"^FROM python:3\.12-slim@sha256:[0-9a-f]{64}$", ai_orchestra_runner_dockerfile, re.MULTILINE)
+    for marker in (
+        "COPY control_plane/requirements-dev.lock",
+        "--require-hashes",
+        "AI_ORCHESTRA_RUNNER_PROFILE=ai-orchestra-python",
+        'ENTRYPOINT ["python3", "/opt/ai-orchestra-runner/entrypoint.py"]',
+    ):
+        assert marker in ai_orchestra_runner_dockerfile, f"AI Orchestra runner profile marker missing: {marker}"
+    for marker in (
+        "runner/Dockerfile.ai-orchestra",
+        "--network none",
+        "-m pytest --version",
+        "AI Orchestra offline runner toolchain smoke passed",
+    ):
+        assert marker in ai_orchestra_runner_smoke, f"AI Orchestra runner smoke marker missing: {marker}"
     for marker in ("PrivateNetwork=true", "PrivateDevices=true", "ProtectSystem=strict",
                    "ProtectHome=true", "RestrictAddressFamilies=AF_UNIX",
                    "CapabilityBoundingSet=", "NoNewPrivileges=true"):

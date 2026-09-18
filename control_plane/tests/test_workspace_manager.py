@@ -334,6 +334,24 @@ def test_ignored_artifact_is_treated_as_a_change(tmp_path):
 
     assert inspection.has_changes is True
     assert inspection.changed_file_count == 1
+    assert inspection.changed_files == ("cache.tmp",)
+
+
+def test_inspection_reports_both_sides_of_staged_rename(tmp_path):
+    repository_id = str(uuid4())
+    mirror_root, commit = _build_mirror(tmp_path, repository_id)
+    workspace_root = tmp_path / "workspaces"
+    filesystem = _filesystem(mirror_root, workspace_root)
+    lease = _lease(workspace_root, repository_id, commit)
+    result = filesystem.prepare(lease, heartbeat=lambda: True)
+    lease = _prepared_lease(lease, result, "inspect")
+    workspace = Path(lease.opencode_path)
+
+    _git(workspace, "mv", "README.md", "README-renamed.md")
+    inspection = filesystem.inspect(lease, heartbeat=lambda: True)
+
+    assert inspection.has_changes is True
+    assert inspection.changed_files == ("README-renamed.md", "README.md")
 
 
 def test_recalculated_manifest_cannot_replace_durable_database_binding(tmp_path):

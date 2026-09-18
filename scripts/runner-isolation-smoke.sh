@@ -39,6 +39,7 @@ docker volume create "$VOLUME" >/dev/null
 WS_A="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 WS_B="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 EX_A="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+REPO_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 REQ_A="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 DIGEST="$(python3 -c 'print("d"*64)')"
 
@@ -112,6 +113,7 @@ echo "[OK] runnerd healthy"
 echo "[4/9] verify exact workspace subpath, snapshot, and readonly rootfs"
 RUN_OUT="$TMP_DIR/run-ok.json"
 python3 runner/runnerctl.py --socket "$SOCKET" run \
+  --repository-id "$REPO_ID" \
   --workspace-id "$WS_A" \
   --execution-id "$EX_A" \
   --base-commit "$COMMIT" \
@@ -133,6 +135,7 @@ echo "[5/9] verify network and secret isolation"
 NET_OUT="$TMP_DIR/run-net.json"
 REQ_NET="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 python3 runner/runnerctl.py --socket "$SOCKET" run \
+  --repository-id "$REPO_ID" \
   --workspace-id "$WS_A" --execution-id "$EX_A" \
   --base-commit "$COMMIT" --preflight-digest "$DIGEST" \
   --request-id "$REQ_NET" --timeout 30 -- python3 -c \
@@ -150,6 +153,7 @@ BAD_OUT="$TMP_DIR/run-bad.json"
 REQ_BAD="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 set +e
 python3 runner/runnerctl.py --socket "$SOCKET" run \
+  --repository-id "$REPO_ID" \
   --workspace-id "$WS_A" --execution-id "$EX_A" \
   --base-commit "$COMMIT" --preflight-digest "$(python3 -c 'print("0"*64)')" \
   --request-id "$REQ_BAD" --timeout 30 -- sh -c 'echo SHOULD_NOT_RUN' \
@@ -173,6 +177,7 @@ docker run --rm --user 0:0 --entrypoint sh -v "$VOLUME:/v" -e WS_A "$IMAGE_ID" -
   'printf "MUTATED\n" > "/v/$WS_A/marker"; chown 10001:10001 "/v/$WS_A/marker"'
 set +e
 python3 runner/runnerctl.py --socket "$SOCKET" run \
+  --repository-id "$REPO_ID" \
   --workspace-id "$WS_A" --execution-id "$EX_A" \
   --base-commit "$COMMIT" --preflight-digest "$DIGEST" \
   --source-snapshot-digest "$SNAPSHOT" \
@@ -197,6 +202,7 @@ TIME_OUT="$TMP_DIR/run-timeout.json"
 REQ_TIME="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 set +e
 python3 runner/runnerctl.py --socket "$SOCKET" run \
+  --repository-id "$REPO_ID" \
   --workspace-id "$WS_A" --execution-id "$EX_A" \
   --base-commit "$COMMIT" --preflight-digest "$DIGEST" \
   --request-id "$REQ_TIME" --timeout 1 -- python3 -c 'import time; time.sleep(30)' \

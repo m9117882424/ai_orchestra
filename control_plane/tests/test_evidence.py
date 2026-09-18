@@ -13,6 +13,7 @@ from control_plane.app.evidence import (
 )
 from control_plane.app.main import app
 from control_plane.app.models import (
+    AuditEvent,
     ExecutionEvidence,
     ExecutionResultPackage,
     ExecutionRun,
@@ -280,3 +281,111 @@ def test_failed_execution_waiting_for_workspace_inspection_stays_provisional():
     assert package.state == "provisional"
     assert package.finalized_at is None
     assert "workspace inspection is not final" in package.payload["known_risks_limitations"]
+
+
+def _seed_completed_workspace_run(now: datetime) -> tuple[str, str]:
+    repository_id = "55555555-5555-4555-8555-555555555555"
+    task_id = "66666666-6666-4666-8666-666666666666"
+    workspace_id = "77777777-7777-4777-8777-777777777777"
+    run_id = "88888888-8888-4888-8888-888888888888"
+    path = f"/workspace/worktrees/managed/{workspace_id}"
+    with SessionLocal() as db:
+        db.add(
+            Repository(
+                id=repository_id,
+                name="g4-changed-files",
+                remote_url="https://github.com/example/g4-changed-files.git",
+                remote_identity="github.com/example/g4-changed-files",
+                remote_host="github.com",
+                provider="github",
+            )
+        )
+        db.add(Task(id=task_id, title="G4 changed files", repository_id=repository_id, status="completed"))
+        db.flush()
+        db.add(
+            TaskWorkspace(
+                id=workspace_id,
+                task_id=task_id,
+                repository_id=repository_id,
+                status="retained",
+                base_commit="a" * 40,
+                base_branch="main",
+                branch_name="ai-orchestra/task-g4/run-changed-files",
+                opencode_path=path,
+                initial_tree="b" * 40,
+                preflight_digest="c" * 64,
+                tracked_entries=2,
+                current_head_commit="d" * 40,
+                current_tree="e" * 40,
+                has_changes=True,
+                changed_file_count=2,
+                change_digest="f" * 64,
+                prepared_at=now,
+                inspected_at=now,
+            )
+        )
+        db.add(
+            ExecutionRun(
+                id=run_id,
+                task_id=task_id,
+                contract_version=2,
+                repository_id=repository_id,
+                workspace_id=workspace_id,
+                base_commit="a" * 40,
+                workspace_path=path,
+                workspace_tree="b" * 40,
+                workspace_preflight_digest="c" * 64,
+                workspace_preflight_completed_at=now,
+                workspace_runtime_preflight_digest="c" * 64,
+                workspace_runtime_verified_at=now,
+                status="completed",
+                stage="manager_review",
+                result="done",
+                finished_at=now,
+            )
+        )
+        db.commit()
+    return workspace_id, run_id
+
+
+def test_result_package_contains_trusted_sorted_unique_changed_files():
+    now = datetime.now(timezone.utc)
+    workspace_id, run_id = _seed_completed_workspace_run(now)
+    with SessionLocal() as db:
+        db.add(
+            AuditEvent(
+                actor="workspace-manager:test",
+                action="workspace.inspected",
+                entity_type="workspace",
+                entity_id=workspace_id,
+                details={
+                    "changed_files": [
+                        "z-last.txt",
+                        "dir/b.txt",
+                        "dir/b.txt",
+                        "a-first.txt",
+                        "../unsafe",
+                        "",
+                        1,
+                    ]
+                },
+            )
+        )
+        package = materialize_result_package(db, run_id, final=True, now=now)
+        db.commit()
+
+    assert package.payload["changes"]["changed_files"] == [
+        "a-first.txt",
+        "dir/b.txt",
+        "z-last.txt",
+    ]
+
+
+def test_result_package_contains_empty_changed_files_without_audit_events():
+    now = datetime.now(timezone.utc)
+    _, run_id = _seed_completed_workspace_run(now)
+    with SessionLocal() as db:
+        package = materialize_result_package(db, run_id, final=True, now=now)
+        db.commit()
+
+    assert package.payload["changes"]["changed_files"] == []

@@ -61,6 +61,7 @@ jobs:
           bash -n scripts/backup-restore-smoke.sh
           bash -n scripts/temporal-durable-smoke.sh
           bash -n scripts/runner-isolation-smoke.sh
+          bash -n scripts/runner-ai-orchestra-toolchain-smoke.sh
           bash -n control_plane/app/repo_manager_git_wrapper.sh
           bash -n control_plane/app/workspace_volume_init.sh
           shellcheck scripts/*.sh
@@ -94,6 +95,9 @@ jobs:
 
       - name: Проверить disposable runner isolation boundary
         run: bash ./scripts/runner-isolation-smoke.sh
+
+      - name: Проверить AI Orchestra offline runner toolchain
+        run: bash ./scripts/runner-ai-orchestra-toolchain-smoke.sh
 
       - name: Проверить durable Runner Manager boundary
         run: bash ./scripts/runner-manager-durable-smoke.sh

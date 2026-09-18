@@ -732,8 +732,6 @@ class WorkspaceLeaseManager:
         workspace.last_error_code = None
         workspace.version += 1
         workspace.updated_at = now
-        if run.status in TERMINAL_EXECUTION_STATUSES:
-            materialize_result_package(db, run.id, final=True, now=now)
         write_audit(
             db,
             actor=self.audit_actor,
@@ -750,6 +748,9 @@ class WorkspaceLeaseManager:
                 "change_digest": result.change_digest,
             },
         )
+        if run.status in TERMINAL_EXECUTION_STATUSES:
+            db.flush()
+            materialize_result_package(db, run.id, final=True, now=now)
         db.commit()
         return "retained"
 

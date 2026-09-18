@@ -99,7 +99,7 @@ def test_checkpoint_argv_limit_matches_runnerd(size):
     config = RunnerConfig(Path("/tmp/runnerd.sock"), "test", "sha256:" + "a" * 64)
     payload = {
         "version": 1, "operation": "run", "request_id": str(uuid4()),
-        "workspace_id": str(uuid4()), "execution_id": str(uuid4()),
+        "repository_id": str(uuid4()), "workspace_id": str(uuid4()), "execution_id": str(uuid4()),
         "base_commit": "b" * 40, "preflight_digest": "c" * 64,
         "argv": command["argv"], "timeout_seconds": 1,
     }

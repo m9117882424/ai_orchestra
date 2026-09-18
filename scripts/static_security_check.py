@@ -690,6 +690,9 @@ def main() -> int:
     assert "shell=True" not in workspace_protocol_text
 
     runnerd_text = (ROOT / "runner/runnerd.py").read_text(encoding="utf-8")
+    runnerctl_text = (ROOT / "runner/runnerctl.py").read_text(encoding="utf-8")
+    runner_env_example = (ROOT / "runner/runnerd.env.example").read_text(encoding="utf-8")
+    runner_manager_text = (ROOT / "control_plane/app/runner_manager.py").read_text(encoding="utf-8")
     runner_entrypoint = (ROOT / "runner/entrypoint.py").read_text(encoding="utf-8")
     runner_dockerfile = (ROOT / "runner/Dockerfile").read_text(encoding="utf-8")
     ai_orchestra_runner_dockerfile = (ROOT / "runner/Dockerfile.ai-orchestra").read_text(encoding="utf-8")
@@ -708,6 +711,11 @@ def main() -> int:
         assert marker in runnerd_text, f"Disposable runner safety marker missing: {marker}"
     assert "shell=True" not in runnerd_text
     assert "/var/run/docker.sock" not in runnerd_text
+    assert "RUNNERD_REPOSITORY_IMAGE_MAP" in runnerd_text
+    assert "RUNNERD_REPOSITORY_IMAGE_MAP={}" in runner_env_example
+    assert '"repository_id": lease.repository_id' in runner_manager_text
+    assert 'run.add_argument("--repository-id", required=True)' in runnerctl_text
+    assert '"runner_profile"' not in runnerd_text
     for marker in ('SOURCE = Path("/source")', 'WORKSPACE = Path("/workspace")',
                    "verify_manifest", "shutil.copytree", "os.execvp"):
         assert marker in runner_entrypoint, f"Runner entrypoint safety marker missing: {marker}"

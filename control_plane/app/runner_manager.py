@@ -85,6 +85,7 @@ class RunnerdClient:
             "version": 1,
             "operation": "run",
             "request_id": lease.job_id,
+            "repository_id": lease.repository_id,
             "workspace_id": lease.workspace_id,
             "execution_id": lease.execution_id,
             "base_commit": lease.base_commit,

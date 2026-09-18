@@ -24,7 +24,7 @@ COMMIT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 VOLUME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 REQUEST_KEYS = frozenset({
-    "version", "operation", "request_id", "workspace_id", "execution_id",
+    "version", "operation", "request_id", "repository_id", "workspace_id", "execution_id",
     "base_commit", "preflight_digest", "source_snapshot_digest", "argv", "timeout_seconds",
 })
 
@@ -49,6 +49,7 @@ class RunnerConfig:
     socket_path: Path
     workspace_volume: str
     image_id: str
+    repository_image_ids: tuple[tuple[str, str], ...] = ()
     docker_bin: str = "/usr/bin/docker"
     max_timeout_seconds: int = 900
     max_output_bytes: int = 1_048_576
@@ -69,6 +70,19 @@ class RunnerConfig:
             raise ValueError("RUNNERD_WORKSPACE_VOLUME is invalid")
         if not IMAGE_ID_RE.fullmatch(image_id):
             raise ValueError("RUNNERD_IMAGE_ID must be an immutable sha256 image id")
+        raw_repository_images = os.getenv("RUNNERD_REPOSITORY_IMAGE_MAP", "{}")
+        try:
+            repository_images = json.loads(raw_repository_images)
+        except json.JSONDecodeError as exc:
+            raise ValueError("RUNNERD_REPOSITORY_IMAGE_MAP must be a JSON object") from exc
+        if not isinstance(repository_images, dict):
+            raise ValueError("RUNNERD_REPOSITORY_IMAGE_MAP must be a JSON object")
+        normalized_repository_images: list[tuple[str, str]] = []
+        for repository_id, repository_image_id in repository_images.items():
+            canonical_uuid(repository_id, "RUNNERD_REPOSITORY_IMAGE_MAP repository id")
+            if not isinstance(repository_image_id, str) or not IMAGE_ID_RE.fullmatch(repository_image_id):
+                raise ValueError("RUNNERD_REPOSITORY_IMAGE_MAP values must be immutable sha256 image ids")
+            normalized_repository_images.append((repository_id, repository_image_id))
         max_timeout = int(os.getenv("RUNNERD_MAX_TIMEOUT_SECONDS", "900"))
         max_output = int(os.getenv("RUNNERD_MAX_OUTPUT_BYTES", "1048576"))
         max_concurrent = int(os.getenv("RUNNERD_MAX_CONCURRENT", "2"))
@@ -88,6 +102,7 @@ class RunnerConfig:
             socket_path=socket_path,
             workspace_volume=volume,
             image_id=image_id,
+            repository_image_ids=tuple(sorted(normalized_repository_images)),
             docker_bin=os.getenv("RUNNERD_DOCKER_BIN", "/usr/bin/docker"),
             max_timeout_seconds=max_timeout,
             max_output_bytes=max_output,
@@ -98,10 +113,20 @@ class RunnerConfig:
             workspace_tmpfs_bytes=workspace_tmpfs,
         )
 
+    def image_id_for(self, repository_id: str) -> str:
+        for configured_repository_id, configured_image_id in self.repository_image_ids:
+            if configured_repository_id == repository_id:
+                return configured_image_id
+        return self.image_id
+
+    def all_image_ids(self) -> tuple[str, ...]:
+        return tuple(sorted({self.image_id, *(image_id for _, image_id in self.repository_image_ids)}))
+
 
 @dataclass(frozen=True)
 class RunRequest:
     request_id: str
+    repository_id: str
     workspace_id: str
     execution_id: str
     base_commit: str
@@ -109,6 +134,7 @@ class RunRequest:
     source_snapshot_digest: str | None
     argv: tuple[str, ...]
     timeout_seconds: int
+    image_id: str
 
 
 def parse_run_request(payload: object, config: RunnerConfig) -> RunRequest:
@@ -120,6 +146,7 @@ def parse_run_request(payload: object, config: RunnerConfig) -> RunRequest:
     if payload.get("version") != PROTOCOL_VERSION or payload.get("operation") != "run":
         raise ValueError("unsupported protocol version or operation")
     request_id = canonical_uuid(payload.get("request_id"), "request_id")
+    repository_id = canonical_uuid(payload.get("repository_id"), "repository_id")
     workspace_id = canonical_uuid(payload.get("workspace_id"), "workspace_id")
     execution_id = canonical_uuid(payload.get("execution_id"), "execution_id")
     base_commit = payload.get("base_commit")
@@ -152,8 +179,8 @@ def parse_run_request(payload: object, config: RunnerConfig) -> RunRequest:
     if not 1 <= timeout <= config.max_timeout_seconds:
         raise ValueError("timeout_seconds is outside the allowed range")
     return RunRequest(
-        request_id, workspace_id, execution_id, base_commit, preflight_digest,
-        source_snapshot_digest, tuple(normalized), timeout,
+        request_id, repository_id, workspace_id, execution_id, base_commit, preflight_digest,
+        source_snapshot_digest, tuple(normalized), timeout, config.image_id_for(repository_id),
     )
 
 
@@ -197,7 +224,7 @@ def build_docker_command(config: RunnerConfig, request: RunRequest) -> list[str]
             if request.source_snapshot_digest is not None
             else []
         ),
-        config.image_id,
+        request.image_id,
         *request.argv,
     ]
 
@@ -227,19 +254,20 @@ class DockerRunner:
         self.config = config
 
     def preflight(self) -> None:
-        image = subprocess.run(
-            [self.config.docker_bin, "image", "inspect", self.config.image_id],
-            check=True, capture_output=True, text=True, timeout=15,
-        )
-        payload = json.loads(image.stdout)
-        if not isinstance(payload, list) or len(payload) != 1:
-            raise RuntimeError("runner image inspect returned unexpected data")
-        item = payload[0]
-        if item.get("Id") != self.config.image_id:
-            raise RuntimeError("runner image id mismatch")
-        config = item.get("Config") or {}
-        if config.get("Entrypoint") != ["python3", "/opt/ai-orchestra-runner/entrypoint.py"]:
-            raise RuntimeError("runner image entrypoint mismatch")
+        for image_id in self.config.all_image_ids():
+            image = subprocess.run(
+                [self.config.docker_bin, "image", "inspect", image_id],
+                check=True, capture_output=True, text=True, timeout=15,
+            )
+            payload = json.loads(image.stdout)
+            if not isinstance(payload, list) or len(payload) != 1:
+                raise RuntimeError("runner image inspect returned unexpected data")
+            item = payload[0]
+            if item.get("Id") != image_id:
+                raise RuntimeError("runner image id mismatch")
+            image_config = item.get("Config") or {}
+            if image_config.get("Entrypoint") != ["python3", "/opt/ai-orchestra-runner/entrypoint.py"]:
+                raise RuntimeError("runner image entrypoint mismatch")
         subprocess.run(
             [self.config.docker_bin, "volume", "inspect", self.config.workspace_volume],
             check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15,
@@ -311,7 +339,7 @@ class DockerRunner:
             "stdout": stdout_capture.text(),
             "stderr": stderr_capture.text(),
             "output_truncated": stdout_capture.truncated or stderr_capture.truncated,
-            "runner_image_id": self.config.image_id,
+            "runner_image_id": request.image_id,
             "cleanup_confirmed": cleanup_confirmed,
             "started_at": started_at,
             "finished_at": utc_iso(),

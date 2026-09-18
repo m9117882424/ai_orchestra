@@ -31,6 +31,7 @@ def main() -> int:
     sub = parser.add_subparsers(dest="operation", required=True)
     sub.add_parser("health")
     run = sub.add_parser("run")
+    run.add_argument("--repository-id", required=True)
     run.add_argument("--workspace-id", required=True)
     run.add_argument("--execution-id", required=True)
     run.add_argument("--base-commit", required=True)
@@ -52,6 +53,7 @@ def main() -> int:
             "version": 1,
             "operation": "run",
             "request_id": args.request_id or str(uuid4()),
+            "repository_id": args.repository_id,
             "workspace_id": args.workspace_id,
             "execution_id": args.execution_id,
             "base_commit": args.base_commit,

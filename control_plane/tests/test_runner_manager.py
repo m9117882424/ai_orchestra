@@ -280,6 +280,7 @@ def test_runnerd_payload_exposes_only_declared_protocol_fields():
         "version",
         "operation",
         "request_id",
+        "repository_id",
         "workspace_id",
         "execution_id",
         "base_commit",
@@ -287,7 +288,8 @@ def test_runnerd_payload_exposes_only_declared_protocol_fields():
         "argv",
         "timeout_seconds",
     }
-    forbidden = {"volume", "host_path", "network", "environment", "secrets", "image"}
+    assert payload["repository_id"] == lease.repository_id
+    forbidden = {"volume", "host_path", "network", "environment", "secrets", "image", "image_id", "runner_profile"}
     assert forbidden.isdisjoint(payload)
 
 

@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .models import (
+    AuditEvent,
     ExecutionChildRun,
     ExecutionEvidence,
     ExecutionResultPackage,
@@ -19,6 +20,7 @@ from .models import (
     TaskWorkspace,
     UsageEvent,
 )
+from .workspace_protocol import WorkspacePreflightError, validate_relative_git_path
 
 
 def utc_now() -> datetime:
@@ -252,6 +254,34 @@ def execution_cost_summary(db: Session, execution_id: str) -> dict:
     }
 
 
+def _trusted_changed_files(db: Session, workspace_id: str) -> list[str]:
+    events = list(
+        db.scalars(
+            select(AuditEvent)
+            .where(
+                AuditEvent.entity_type == "workspace",
+                AuditEvent.entity_id == workspace_id,
+                AuditEvent.action.in_(("workspace.inspected", "workspace.cleanup_blocked")),
+            )
+            .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+        )
+    )
+    for event in events:
+        raw = event.details.get("changed_files") if isinstance(event.details, dict) else None
+        if not isinstance(raw, list):
+            continue
+        trusted: set[str] = set()
+        for item in raw:
+            if not isinstance(item, str):
+                continue
+            try:
+                trusted.add(str(validate_relative_git_path(item)))
+            except WorkspacePreflightError:
+                continue
+        return sorted(trusted)
+    return []
+
+
 def build_result_package_payload(db: Session, execution_id: str) -> dict:
     # SessionLocal intentionally disables autoflush. A result package must cover
     # evidence/usage written in the same terminal-state transaction before its
@@ -290,11 +320,12 @@ def build_result_package_payload(db: Session, execution_id: str) -> dict:
         )
     ) or 0
     cost_summary = execution_cost_summary(db, execution_id)
+    changed_files = _trusted_changed_files(db, workspace.id) if workspace is not None else []
     limitations: list[str] = []
     if workspace is not None and workspace.status != "retained":
         limitations.append("workspace inspection is not final")
-    if workspace is not None and workspace.changed_file_count:
-        limitations.append("changed-file names and full diff are not persisted yet")
+    if workspace is not None and workspace.changed_file_count and not changed_files:
+        limitations.append("changed-file names were unavailable from trusted inspection evidence")
     if not any(event.kind == "review" for event in evidence):
         limitations.append("structured QA/reviewer verdicts are not persisted yet")
     if not any(event.kind == "artifact" for event in evidence):
@@ -330,7 +361,7 @@ def build_result_package_payload(db: Session, execution_id: str) -> dict:
             "has_changes": workspace.has_changes if workspace else None,
             "changed_file_count": workspace.changed_file_count if workspace else None,
             "change_digest": workspace.change_digest if workspace else None,
-            "changed_files": [],
+            "changed_files": changed_files,
             "diff": None,
         },
         "commits": [],

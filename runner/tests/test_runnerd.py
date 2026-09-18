@@ -17,6 +17,7 @@ from runner.runnerd import (
 )
 
 IMAGE_ID = "sha256:" + "a" * 64
+PROFILE_IMAGE_ID = "sha256:" + "d" * 64
 COMMIT = "b" * 40
 DIGEST = "c" * 64
 
@@ -37,6 +38,7 @@ def payload() -> dict:
         "version": 1,
         "operation": "run",
         "request_id": str(uuid4()),
+        "repository_id": str(uuid4()),
         "workspace_id": str(uuid4()),
         "execution_id": str(uuid4()),
         "base_commit": COMMIT,
@@ -59,6 +61,7 @@ def test_parse_run_request_accepts_immutable_binding():
 @pytest.mark.parametrize(
     ("field", "value"),
     [
+        ("repository_id", "not-a-uuid"),
         ("workspace_id", "not-a-uuid"),
         ("execution_id", "not-a-uuid"),
         ("base_commit", "deadbeef"),
@@ -78,6 +81,63 @@ def test_parse_run_request_rejects_unknown_fields():
     raw["host_path"] = "/etc"
     with pytest.raises(ValueError, match="unsupported request fields"):
         parse_run_request(raw, config())
+
+
+def test_repository_specific_image_is_selected_only_from_host_config():
+    raw = payload()
+    selected = config(repository_image_ids=((raw["repository_id"], PROFILE_IMAGE_ID),))
+    request = parse_run_request(raw, selected)
+    assert request.image_id == PROFILE_IMAGE_ID
+    command = build_docker_command(selected, request)
+    assert PROFILE_IMAGE_ID in command
+    assert IMAGE_ID not in command
+
+
+def test_unmapped_repository_uses_generic_default_image():
+    raw = payload()
+    selected = config(repository_image_ids=((str(uuid4()), PROFILE_IMAGE_ID),))
+    request = parse_run_request(raw, selected)
+    assert request.image_id == IMAGE_ID
+
+
+def test_runner_config_parses_trusted_repository_image_map(monkeypatch, tmp_path):
+    repository_id = str(uuid4())
+    monkeypatch.setenv("RUNNERD_SOCKET_PATH", str(tmp_path / "runnerd.sock"))
+    monkeypatch.setenv("RUNNERD_WORKSPACE_VOLUME", "test-workspaces")
+    monkeypatch.setenv("RUNNERD_IMAGE_ID", IMAGE_ID)
+    monkeypatch.setenv(
+        "RUNNERD_REPOSITORY_IMAGE_MAP",
+        f'{{"{repository_id}":"{PROFILE_IMAGE_ID}"}}',
+    )
+    parsed = RunnerConfig.from_env()
+    assert parsed.image_id_for(repository_id) == PROFILE_IMAGE_ID
+    assert parsed.image_id_for(str(uuid4())) == IMAGE_ID
+    assert set(parsed.all_image_ids()) == {IMAGE_ID, PROFILE_IMAGE_ID}
+
+
+@pytest.mark.parametrize(
+    "mapping",
+    [
+        "[]",
+        '{"not-a-uuid":"sha256:' + "d" * 64 + '"}',
+        '{"00000000-0000-0000-0000-000000000000":"not-a-digest"}',
+    ],
+)
+def test_runner_config_rejects_invalid_repository_image_map(monkeypatch, tmp_path, mapping):
+    monkeypatch.setenv("RUNNERD_SOCKET_PATH", str(tmp_path / "runnerd.sock"))
+    monkeypatch.setenv("RUNNERD_WORKSPACE_VOLUME", "test-workspaces")
+    monkeypatch.setenv("RUNNERD_IMAGE_ID", IMAGE_ID)
+    monkeypatch.setenv("RUNNERD_REPOSITORY_IMAGE_MAP", mapping)
+    with pytest.raises(ValueError, match="RUNNERD_REPOSITORY_IMAGE_MAP"):
+        RunnerConfig.from_env()
+
+
+def test_request_cannot_select_image_or_profile():
+    for field in ("image", "image_id", "runner_profile"):
+        raw = payload()
+        raw[field] = PROFILE_IMAGE_ID
+        with pytest.raises(ValueError, match="unsupported request fields"):
+            parse_run_request(raw, config())
 
 
 def test_docker_command_has_hard_security_boundary():

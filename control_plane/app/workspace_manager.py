@@ -118,6 +118,40 @@ class WorkspaceInspection:
     change_digest: str
     has_changes: bool
     changed_file_count: int
+    changed_files: tuple[str, ...]
+
+
+def _changed_files_from_porcelain(raw_status: bytes) -> tuple[str, ...]:
+    records = [record for record in raw_status.split(b"\x00") if record]
+    changed: list[str] = []
+    index = 0
+    while index < len(records):
+        record = records[index]
+        status_bytes = record[:3]
+        path_bytes = record[3:]
+        if len(status_bytes) != 3 or status_bytes[2:3] != b" ":
+            raise WorkspaceOperationError("workspace_status_invalid", terminal=True)
+        try:
+            path = path_bytes.decode("utf-8", errors="strict")
+            validate_relative_git_path(path)
+        except (UnicodeError, WorkspacePreflightError) as exc:
+            raise WorkspaceOperationError("workspace_status_invalid", terminal=True) from exc
+        changed.append(path)
+
+        if status_bytes[:1] in {b"R", b"C"}:
+            index += 1
+            if index >= len(records):
+                raise WorkspaceOperationError("workspace_status_invalid", terminal=True)
+            rename_bytes = records[index]
+            try:
+                rename_path = rename_bytes.decode("utf-8", errors="strict")
+                validate_relative_git_path(rename_path)
+            except (UnicodeError, WorkspacePreflightError) as exc:
+                raise WorkspaceOperationError("workspace_status_invalid", terminal=True) from exc
+            changed.append(rename_path)
+        index += 1
+
+    return tuple(sorted(set(changed)))
 
 
 def _operation_for_status(status: str) -> str:
@@ -712,6 +746,7 @@ class WorkspaceLeaseManager:
                 "tree": result.tree,
                 "has_changes": result.has_changes,
                 "changed_file_count": result.changed_file_count,
+                "changed_files": list(result.changed_files),
                 "change_digest": result.change_digest,
             },
         )
@@ -806,6 +841,7 @@ class WorkspaceLeaseManager:
                 "tree": result.tree,
                 "has_changes": result.has_changes,
                 "changed_file_count": result.changed_file_count,
+                "changed_files": list(result.changed_files),
                 "change_digest": result.change_digest,
             },
         )
@@ -834,6 +870,7 @@ class WorkspaceLeaseManager:
             change_digest=result.change_digest,
             has_changes=result.has_changes,
             changed_file_count=result.changed_file_count,
+            changed_files=tuple(sorted(set(result.changed_files))),
         )
 
     def mark_failure(
@@ -1472,6 +1509,7 @@ class WorkspaceFilesystem:
         records = [record for record in raw_status.split(b"\x00") if record]
         if len(records) > self.max_files * 2:
             raise WorkspaceOperationError("workspace_change_limit_exceeded", terminal=True)
+        changed_files = _changed_files_from_porcelain(raw_status)
         try:
             head = normalize_commit(head, field="current_head_commit")
             tree = normalize_commit(tree, field="current_tree")
@@ -1483,6 +1521,7 @@ class WorkspaceFilesystem:
             change_digest=hashlib.sha256(raw_status).hexdigest(),
             has_changes=bool(records),
             changed_file_count=len(records),
+            changed_files=changed_files,
         )
 
 

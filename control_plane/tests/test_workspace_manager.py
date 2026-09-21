@@ -14,10 +14,18 @@ from sqlalchemy.exc import IntegrityError
 from control_plane.app import workspace_protocol as workspace_protocol_module
 from control_plane.app.db import SessionLocal
 from control_plane.app.execution_worker import ExecutionLease, ExecutionLeaseManager, poll_execution
-from control_plane.app.models import AuditEvent, ExecutionRun, Repository, Task, TaskWorkspace
+from control_plane.app.models import (
+    AuditEvent,
+    ExecutionResultPackage,
+    ExecutionRun,
+    Repository,
+    Task,
+    TaskWorkspace,
+)
 from control_plane.app.workspace_manager import (
     PreparedWorkspace,
     WorkspaceFilesystem,
+    WorkspaceInspection,
     WorkspaceLease,
     WorkspaceLeaseManager,
     WorkspaceOperationError,
@@ -933,6 +941,77 @@ def test_verified_workspace_dispatches_and_terminal_run_queues_inspection(tmp_pa
     assert workspace.next_attempt_at is not None
     assert "execution.workspace_runtime_verified" in actions
     assert "workspace.inspection_requested" in actions
+
+
+def test_terminal_inspection_finalizes_result_package_with_trusted_changed_files(tmp_path):
+    repository_id = str(uuid4())
+    mirror_root, commit = _build_mirror(tmp_path, repository_id)
+    workspace_root = tmp_path / "workspaces"
+    filesystem = _filesystem(mirror_root, workspace_root)
+    source_lease = _lease(workspace_root, repository_id, commit)
+    prepared = filesystem.prepare(source_lease, heartbeat=lambda: True)
+    now = _seed_ready_bound_execution(source_lease, prepared)
+
+    with SessionLocal() as db:
+        run = db.get(ExecutionRun, source_lease.execution_id)
+        workspace = db.get(TaskWorkspace, source_lease.workspace_id)
+        assert run is not None and workspace is not None
+        run.status = "failed"
+        run.stage = "opencode_error"
+        run.error = "provider budget exhausted"
+        run.finished_at = now
+        workspace.status = "inspection_pending"
+        workspace.inspection_requested_at = now
+        workspace.next_attempt_at = now
+        workspace.version += 1
+        workspace.updated_at = now
+        db.commit()
+
+    manager = WorkspaceLeaseManager(
+        "inspection-result-package",
+        lease_seconds=60,
+        workspace_root=workspace_root,
+    )
+    with SessionLocal() as db:
+        [inspection_lease] = manager.claim_available(db, limit=1, now=now)
+
+    changed_file = "control_plane/tests/test_evidence.py"
+    result = WorkspaceInspection(
+        head_commit=commit,
+        tree=prepared.tree,
+        change_digest="e" * 64,
+        has_changes=True,
+        changed_file_count=1,
+        changed_files=(changed_file,),
+    )
+    with SessionLocal() as db:
+        outcome = manager.mark_inspection_success(
+            db,
+            inspection_lease,
+            result,
+            now=now + timedelta(seconds=1),
+        )
+
+    with SessionLocal() as db:
+        package = db.get(ExecutionResultPackage, source_lease.execution_id)
+        inspection_event = (
+            db.query(AuditEvent)
+            .filter(
+                AuditEvent.entity_type == "workspace",
+                AuditEvent.entity_id == source_lease.workspace_id,
+                AuditEvent.action == "workspace.inspected",
+            )
+            .one()
+        )
+
+    assert outcome == "retained"
+    assert package is not None and package.state == "final"
+    assert package.payload["changes"]["changed_file_count"] == 1
+    assert package.payload["changes"]["changed_files"] == [changed_file]
+    assert inspection_event.details["changed_files"] == [changed_file]
+    assert "changed-file names were unavailable from trusted inspection evidence" not in (
+        package.payload["known_risks_limitations"]
+    )
 
 
 def test_binding_is_revalidated_before_prepare_result_is_committed():

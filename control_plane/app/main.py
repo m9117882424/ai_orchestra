@@ -47,6 +47,7 @@ from .schemas import (
     ExecutionEvidenceRead,
     ExecutionProgressRead,
     ExecutionResultPackageRead,
+    ExecutionTimelineRead,
     RepositoryCreate,
     RepositoryProvider,
     RepositoryRead,
@@ -713,6 +714,136 @@ def execution_child_runs(
             .limit(limit)
         )
     )
+
+
+@app.get(
+    "/api/executions/{execution_id}/timeline",
+    response_model=ExecutionTimelineRead,
+)
+def execution_timeline(
+    execution_id: str,
+    db: DbSession,
+    _: Manager,
+    limit: Annotated[int, Query(ge=1, le=2000)] = 1000,
+) -> dict:
+    run = db.get(ExecutionRun, execution_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Запуск не найден")
+
+    items: list[dict] = [
+        {
+            "occurred_at": run.created_at,
+            "category": "lifecycle",
+            "source": "execution",
+            "source_id": run.id,
+            "status": run.status,
+            "role": run.lead_role,
+            "label": "execution.created",
+            "details": {"stage": run.stage},
+        }
+    ]
+    if run.started_at is not None:
+        items.append({
+            "occurred_at": run.started_at,
+            "category": "lifecycle",
+            "source": "execution",
+            "source_id": run.id,
+            "status": run.status,
+            "role": run.lead_role,
+            "label": "execution.started",
+            "details": {"stage": run.stage},
+        })
+    if run.finished_at is not None:
+        items.append({
+            "occurred_at": run.finished_at,
+            "category": "lifecycle",
+            "source": "execution",
+            "source_id": run.id,
+            "status": run.status,
+            "role": run.lead_role,
+            "label": "execution.finished",
+            "details": {"stage": run.stage, "error": run.error},
+        })
+
+    for event in db.scalars(
+        select(ExecutionEvidence)
+        .where(ExecutionEvidence.execution_id == execution_id)
+        .order_by(ExecutionEvidence.occurred_at.asc(), ExecutionEvidence.id.asc())
+    ):
+        items.append({
+            "occurred_at": event.occurred_at,
+            "category": "evidence",
+            "source": event.source,
+            "source_id": event.source_key,
+            "status": event.status,
+            "role": event.role,
+            "label": f"evidence.{event.kind}",
+            "details": {
+                "tool_name": event.tool_name,
+                "attempt": event.attempt,
+                "retry_of_id": event.retry_of_id,
+                **(event.details if isinstance(event.details, dict) else {}),
+            },
+        })
+
+    for child in db.scalars(
+        select(ExecutionChildRun)
+        .where(ExecutionChildRun.execution_id == execution_id)
+        .order_by(ExecutionChildRun.started_at.asc(), ExecutionChildRun.id.asc())
+    ):
+        items.append({
+            "occurred_at": child.started_at,
+            "category": "child_run",
+            "source": child.source,
+            "source_id": child.id,
+            "status": child.status,
+            "role": child.role,
+            "label": "child_run.started",
+            "details": {
+                "provider": child.provider,
+                "model": child.model,
+                "attempt": child.attempt,
+                "retry_of_id": child.retry_of_id,
+                "parent_call_id": child.parent_call_id,
+            },
+        })
+        if child.finished_at is not None:
+            items.append({
+                "occurred_at": child.finished_at,
+                "category": "child_run",
+                "source": child.source,
+                "source_id": child.id,
+                "status": child.status,
+                "role": child.role,
+                "label": "child_run.finished",
+                "details": {"attempt": child.attempt, "retry_of_id": child.retry_of_id},
+            })
+
+    for job in db.scalars(
+        select(RunnerJob)
+        .where(RunnerJob.execution_id == execution_id)
+        .order_by(RunnerJob.created_at.asc(), RunnerJob.id.asc())
+    ):
+        occurred_at = job.started_at or job.created_at
+        items.append({
+            "occurred_at": occurred_at,
+            "category": "runner_check",
+            "source": "runner",
+            "source_id": job.id,
+            "status": job.status,
+            "role": None,
+            "label": job.checkpoint_label or "runner.check",
+            "details": {
+                "exit_code": job.exit_code,
+                "checkpoint_digest": job.checkpoint_digest,
+                "source_snapshot_digest": job.source_snapshot_digest,
+                "runner_image_id": job.runner_image_id,
+                "cleanup_confirmed": job.cleanup_confirmed,
+            },
+        })
+
+    items.sort(key=lambda item: (item["occurred_at"], item["category"], item["source_id"] or ""))
+    return {"execution_id": execution_id, "items": items[:limit]}
 
 
 @app.get(

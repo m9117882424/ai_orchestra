@@ -9,7 +9,6 @@ from control_plane.app.models import ExecutionChildRun, ExecutionEvidence, Execu
 
 def test_operator_timeline_merges_lifecycle_evidence_and_child_runs(auth):
     created = datetime(2026, 9, 22, 10, 0, tzinfo=timezone.utc)
-    started = created + timedelta(seconds=2)
     tool_at = created + timedelta(seconds=5)
     child_started = created + timedelta(seconds=7)
     child_finished = created + timedelta(seconds=11)
@@ -26,7 +25,6 @@ def test_operator_timeline_merges_lifecycle_evidence_and_child_runs(auth):
             stage="qa",
             lead_role="department-lead",
             assigned_roles=["department-lead", "qa-engineer"],
-            started_at=started,
             finished_at=finished,
             result="done",
             created_at=created,
@@ -76,7 +74,6 @@ def test_operator_timeline_merges_lifecycle_evidence_and_child_runs(auth):
     labels = [item["label"] for item in body["items"]]
     assert labels == [
         "execution.created",
-        "execution.started",
         "evidence.tool",
         "child_run.started",
         "child_run.finished",

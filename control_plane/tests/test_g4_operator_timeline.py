@@ -41,7 +41,7 @@ def test_operator_timeline_merges_lifecycle_evidence_and_child_runs(auth):
                 role="department-lead",
                 tool_name="bash",
                 status="completed",
-                details={"summary": "tests executed"},
+                details={"summary": "tests executed", "tool_name": "spoofed"},
                 occurred_at=tool_at,
             )
         )
@@ -81,6 +81,7 @@ def test_operator_timeline_merges_lifecycle_evidence_and_child_runs(auth):
     ]
     tool = next(item for item in body["items"] if item["label"] == "evidence.tool")
     assert tool["details"]["tool_name"] == "bash"
+    assert tool["details"]["attempt"] == 1
     assert tool["details"]["summary"] == "tests executed"
     assert "RAW_INPUT_SECRET" not in str(body)
 

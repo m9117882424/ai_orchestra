@@ -234,7 +234,6 @@ def test_failed_execution_waiting_for_workspace_inspection_stays_provisional():
                 remote_identity="github.com/example/g4-provisional",
                 remote_host="github.com",
                 provider="github",
-                assurance_tier=assurance_tier,
             )
         )
         db.add(Task(id=task_id, title="G4 provisional", repository_id=repository_id, status="failed"))

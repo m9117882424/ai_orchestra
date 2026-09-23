@@ -305,6 +305,7 @@ def _seed_completed_workspace_run(
                 remote_identity="github.com/example/g4-changed-files",
                 remote_host="github.com",
                 provider="github",
+                assurance_tier=assurance_tier,
             )
         )
         db.add(Task(id=task_id, title="G4 changed files", repository_id=repository_id, status="completed"))

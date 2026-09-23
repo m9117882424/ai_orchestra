@@ -493,6 +493,35 @@ class ExecutionTimelineRead(BaseModel):
     items: list[ExecutionTimelineItem] = Field(default_factory=list)
 
 
+class ObservabilityAlertRead(BaseModel):
+    code: str
+    severity: Literal["warning", "critical"]
+    entity_type: str
+    entity_id: str | None = None
+    message: str
+    observed_at: datetime
+    details: dict = Field(default_factory=dict)
+
+
+class ObservabilitySummaryRead(BaseModel):
+    generated_at: datetime
+    executions_by_status: dict[str, int] = Field(default_factory=dict)
+    runner_jobs_by_status: dict[str, int] = Field(default_factory=dict)
+    workspaces_by_status: dict[str, int] = Field(default_factory=dict)
+    active_execution_count: int = 0
+    active_runner_job_count: int = 0
+    active_workspace_count: int = 0
+    current_month_known_cost: Decimal = Decimal("0")
+    current_month_cost_status: Literal["known", "partial", "unknown"] = "known"
+    unknown_automatic_cost_rows: int = 0
+    department_budget_limit: Decimal | None = None
+    department_budget_warning_pct: int | None = None
+    department_budget_hard_stop: bool | None = None
+    alert_count: int = 0
+    alerts_truncated: bool = False
+    alerts: list[ObservabilityAlertRead] = Field(default_factory=list)
+
+
 class ExecutionToolCallRead(BaseModel):
     tool_name: str
     status: str

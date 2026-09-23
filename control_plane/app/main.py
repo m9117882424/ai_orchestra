@@ -742,17 +742,6 @@ def execution_timeline(
             "details": {"stage": run.stage},
         }
     ]
-    if run.started_at is not None:
-        items.append({
-            "occurred_at": run.started_at,
-            "category": "lifecycle",
-            "source": "execution",
-            "source_id": run.id,
-            "status": run.status,
-            "role": run.lead_role,
-            "label": "execution.started",
-            "details": {"stage": run.stage},
-        })
     if run.finished_at is not None:
         items.append({
             "occurred_at": run.finished_at,

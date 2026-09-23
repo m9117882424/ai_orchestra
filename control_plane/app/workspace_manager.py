@@ -112,6 +112,14 @@ class PreparedWorkspace:
 
 
 @dataclass(frozen=True)
+class WorkspaceArtifact:
+    path: str
+    kind: str
+    sha256: str | None
+    size_bytes: int | None
+
+
+@dataclass(frozen=True)
 class WorkspaceInspection:
     head_commit: str
     tree: str
@@ -119,6 +127,7 @@ class WorkspaceInspection:
     has_changes: bool
     changed_file_count: int
     changed_files: tuple[str, ...]
+    artifacts: tuple[WorkspaceArtifact, ...] = ()
 
 
 def _changed_files_from_porcelain(raw_status: bytes) -> tuple[str, ...]:
@@ -745,6 +754,15 @@ class WorkspaceLeaseManager:
                 "has_changes": result.has_changes,
                 "changed_file_count": result.changed_file_count,
                 "changed_files": list(result.changed_files),
+                "artifacts": [
+                    {
+                        "path": artifact.path,
+                        "kind": artifact.kind,
+                        "sha256": artifact.sha256,
+                        "size_bytes": artifact.size_bytes,
+                    }
+                    for artifact in result.artifacts
+                ],
                 "change_digest": result.change_digest,
             },
         )
@@ -843,6 +861,15 @@ class WorkspaceLeaseManager:
                 "has_changes": result.has_changes,
                 "changed_file_count": result.changed_file_count,
                 "changed_files": list(result.changed_files),
+                "artifacts": [
+                    {
+                        "path": artifact.path,
+                        "kind": artifact.kind,
+                        "sha256": artifact.sha256,
+                        "size_bytes": artifact.size_bytes,
+                    }
+                    for artifact in result.artifacts
+                ],
                 "change_digest": result.change_digest,
             },
         )
@@ -865,13 +892,55 @@ class WorkspaceLeaseManager:
             or re.fullmatch(r"[0-9a-f]{64}", result.change_digest) is None
         ):
             raise WorkspaceOperationError("workspace_inspection_result_invalid", terminal=True)
+        changed_files: list[str] = []
+        try:
+            for path in result.changed_files:
+                changed_files.append(str(validate_relative_git_path(path)))
+        except (TypeError, WorkspacePreflightError) as exc:
+            raise WorkspaceOperationError("workspace_inspection_result_invalid", terminal=True) from exc
+        normalized_changed_files = tuple(sorted(set(changed_files)))
+
+        artifacts: list[WorkspaceArtifact] = []
+        for artifact in result.artifacts:
+            if not isinstance(artifact, WorkspaceArtifact):
+                raise WorkspaceOperationError("workspace_inspection_result_invalid", terminal=True)
+            try:
+                path = str(validate_relative_git_path(artifact.path))
+            except (TypeError, WorkspacePreflightError) as exc:
+                raise WorkspaceOperationError("workspace_inspection_result_invalid", terminal=True) from exc
+            if artifact.kind not in {"file", "symlink", "deleted"}:
+                raise WorkspaceOperationError("workspace_inspection_result_invalid", terminal=True)
+            if artifact.kind == "deleted":
+                if artifact.sha256 is not None or artifact.size_bytes is not None:
+                    raise WorkspaceOperationError("workspace_inspection_result_invalid", terminal=True)
+            elif (
+                not isinstance(artifact.sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", artifact.sha256) is None
+                or isinstance(artifact.size_bytes, bool)
+                or not isinstance(artifact.size_bytes, int)
+                or artifact.size_bytes < 0
+            ):
+                raise WorkspaceOperationError("workspace_inspection_result_invalid", terminal=True)
+            artifacts.append(
+                WorkspaceArtifact(
+                    path=path,
+                    kind=artifact.kind,
+                    sha256=artifact.sha256,
+                    size_bytes=artifact.size_bytes,
+                )
+            )
+        normalized_artifacts = tuple(sorted(artifacts, key=lambda artifact: artifact.path))
+        if tuple(artifact.path for artifact in normalized_artifacts) != normalized_changed_files:
+            raise WorkspaceOperationError("workspace_inspection_result_invalid", terminal=True)
+
         return WorkspaceInspection(
             head_commit=head,
             tree=tree,
             change_digest=result.change_digest,
             has_changes=result.has_changes,
             changed_file_count=result.changed_file_count,
-            changed_files=tuple(sorted(set(result.changed_files))),
+            changed_files=normalized_changed_files,
+            artifacts=normalized_artifacts,
         )
 
     def mark_failure(
@@ -1470,6 +1539,126 @@ class WorkspaceFilesystem:
             shutil.rmtree(trash_path)
             return None
 
+    def _artifact_provenance(
+        self,
+        workspace: Path,
+        changed_files: tuple[str, ...],
+        *,
+        heartbeat,
+    ) -> tuple[WorkspaceArtifact, ...]:
+        artifacts: list[WorkspaceArtifact] = []
+        total_artifact_bytes = 0
+        for relative_path in changed_files:
+            self._heartbeat(heartbeat)
+            try:
+                normalized = str(validate_relative_git_path(relative_path))
+            except WorkspacePreflightError as exc:
+                raise WorkspaceOperationError("workspace_artifact_invalid", terminal=True) from exc
+            candidate = workspace / normalized
+            try:
+                metadata = candidate.lstat()
+            except FileNotFoundError:
+                artifacts.append(
+                    WorkspaceArtifact(
+                        path=normalized,
+                        kind="deleted",
+                        sha256=None,
+                        size_bytes=None,
+                    )
+                )
+                continue
+
+            if metadata.st_size > self.max_file_bytes:
+                raise WorkspaceOperationError(
+                    "workspace_file_size_limit_exceeded", terminal=True
+                )
+
+            if stat.S_ISLNK(metadata.st_mode):
+                try:
+                    target = os.readlink(candidate)
+                    repeated = candidate.lstat()
+                except OSError as exc:
+                    raise WorkspaceOperationError(
+                        "workspace_artifact_changed_during_inspection", terminal=True
+                    ) from exc
+                if (
+                    metadata.st_dev != repeated.st_dev
+                    or metadata.st_ino != repeated.st_ino
+                    or metadata.st_size != repeated.st_size
+                    or metadata.st_mtime_ns != repeated.st_mtime_ns
+                ):
+                    raise WorkspaceOperationError(
+                        "workspace_artifact_changed_during_inspection", terminal=True
+                    )
+                payload = os.fsencode(target)
+                total_artifact_bytes += len(payload)
+                if total_artifact_bytes > self.max_workspace_bytes:
+                    raise WorkspaceOperationError("workspace_size_limit_exceeded", terminal=True)
+                artifacts.append(
+                    WorkspaceArtifact(
+                        path=normalized,
+                        kind="symlink",
+                        sha256=hashlib.sha256(payload).hexdigest(),
+                        size_bytes=len(payload),
+                    )
+                )
+                continue
+
+            if not stat.S_ISREG(metadata.st_mode):
+                raise WorkspaceOperationError("workspace_artifact_type_unsupported", terminal=True)
+
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                descriptor = os.open(candidate, flags)
+            except OSError as exc:
+                raise WorkspaceOperationError(
+                    "workspace_artifact_changed_during_inspection", terminal=True
+                ) from exc
+            digest = hashlib.sha256()
+            total = 0
+            with os.fdopen(descriptor, "rb") as stream:
+                opened = os.fstat(stream.fileno())
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or opened.st_dev != metadata.st_dev
+                    or opened.st_ino != metadata.st_ino
+                ):
+                    raise WorkspaceOperationError(
+                        "workspace_artifact_changed_during_inspection", terminal=True
+                    )
+                while True:
+                    chunk = stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    total += len(chunk)
+                    if total > self.max_file_bytes:
+                        raise WorkspaceOperationError(
+                            "workspace_file_size_limit_exceeded", terminal=True
+                        )
+                    self._heartbeat(heartbeat)
+                closed = os.fstat(stream.fileno())
+            if (
+                opened.st_size != closed.st_size
+                or opened.st_mtime_ns != closed.st_mtime_ns
+                or total != closed.st_size
+            ):
+                raise WorkspaceOperationError(
+                    "workspace_artifact_changed_during_inspection", terminal=True
+                )
+            total_artifact_bytes += total
+            if total_artifact_bytes > self.max_workspace_bytes:
+                raise WorkspaceOperationError("workspace_size_limit_exceeded", terminal=True)
+            artifacts.append(
+                WorkspaceArtifact(
+                    path=normalized,
+                    kind="file",
+                    sha256=digest.hexdigest(),
+                    size_bytes=total,
+                )
+            )
+        return tuple(sorted(artifacts, key=lambda artifact: artifact.path))
+
     def inspect_without_lock(self, lease: WorkspaceLease, *, heartbeat) -> WorkspaceInspection:
         """Inspect while the caller already holds the per-workspace filesystem lock."""
         workspace = self.workspace_root / lease.workspace_id
@@ -1511,6 +1700,11 @@ class WorkspaceFilesystem:
         if len(records) > self.max_files * 2:
             raise WorkspaceOperationError("workspace_change_limit_exceeded", terminal=True)
         changed_files = _changed_files_from_porcelain(raw_status)
+        artifacts = self._artifact_provenance(
+            workspace,
+            changed_files,
+            heartbeat=heartbeat,
+        )
         try:
             head = normalize_commit(head, field="current_head_commit")
             tree = normalize_commit(tree, field="current_tree")
@@ -1523,6 +1717,7 @@ class WorkspaceFilesystem:
             has_changes=bool(records),
             changed_file_count=len(records),
             changed_files=changed_files,
+            artifacts=artifacts,
         )
 
 

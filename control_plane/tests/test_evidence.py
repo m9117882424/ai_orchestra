@@ -367,7 +367,27 @@ def test_result_package_contains_trusted_sorted_unique_changed_files():
                         "../unsafe",
                         "",
                         1,
-                    ]
+                    ],
+                    "artifacts": [
+                        {
+                            "path": "z-last.txt",
+                            "kind": "file",
+                            "sha256": "1" * 64,
+                            "size_bytes": 30,
+                        },
+                        {
+                            "path": "dir/b.txt",
+                            "kind": "file",
+                            "sha256": "2" * 64,
+                            "size_bytes": 20,
+                        },
+                        {
+                            "path": "a-first.txt",
+                            "kind": "file",
+                            "sha256": "3" * 64,
+                            "size_bytes": 10,
+                        },
+                    ],
                 },
             )
         )
@@ -379,6 +399,56 @@ def test_result_package_contains_trusted_sorted_unique_changed_files():
         "dir/b.txt",
         "z-last.txt",
     ]
+    assert [artifact["path"] for artifact in package.payload["generated_artifacts"]] == [
+        "a-first.txt",
+        "dir/b.txt",
+        "z-last.txt",
+    ]
+    assert [artifact["sha256"] for artifact in package.payload["generated_artifacts"]] == [
+        "3" * 64,
+        "2" * 64,
+        "1" * 64,
+    ]
+    assert all(
+        artifact["provenance_source"] == "trusted-workspace-inspection"
+        for artifact in package.payload["generated_artifacts"]
+    )
+    assert "generated artifact provenance was unavailable from trusted workspace inspection" not in (
+        package.payload["known_risks_limitations"]
+    )
+
+
+def test_result_package_rejects_mismatched_trusted_artifact_paths():
+    now = datetime.now(timezone.utc)
+    workspace_id, run_id = _seed_completed_workspace_run(now)
+    with SessionLocal() as db:
+        db.add(
+            AuditEvent(
+                actor="workspace-manager:test",
+                action="workspace.inspected",
+                entity_type="workspace",
+                entity_id=workspace_id,
+                details={
+                    "changed_files": ["a-first.txt"],
+                    "artifacts": [
+                        {
+                            "path": "different.txt",
+                            "kind": "file",
+                            "sha256": "4" * 64,
+                            "size_bytes": 10,
+                        }
+                    ],
+                },
+            )
+        )
+        package = materialize_result_package(db, run_id, final=True, now=now)
+        db.commit()
+
+    assert package.payload["changes"]["changed_files"] == ["a-first.txt"]
+    assert package.payload["generated_artifacts"] == []
+    assert "generated artifact provenance was unavailable from trusted workspace inspection" in (
+        package.payload["known_risks_limitations"]
+    )
 
 
 def test_result_package_contains_empty_changed_files_without_audit_events():

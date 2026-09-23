@@ -282,6 +282,82 @@ def _trusted_changed_files(db: Session, workspace_id: str) -> list[str]:
     return []
 
 
+def _trusted_artifacts(
+    db: Session,
+    workspace_id: str,
+    expected_paths: list[str],
+) -> list[dict]:
+    events = list(
+        db.scalars(
+            select(AuditEvent)
+            .where(
+                AuditEvent.entity_type == "workspace",
+                AuditEvent.entity_id == workspace_id,
+                AuditEvent.action.in_(("workspace.inspected", "workspace.cleanup_blocked")),
+            )
+            .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+        )
+    )
+    expected = sorted(set(expected_paths))
+    for event in events:
+        details = event.details if isinstance(event.details, dict) else {}
+        raw = details.get("artifacts")
+        if not isinstance(raw, list):
+            continue
+        normalized: list[dict] = []
+        seen: set[str] = set()
+        valid = True
+        for item in raw:
+            if not isinstance(item, dict):
+                valid = False
+                break
+            path = item.get("path")
+            kind = item.get("kind")
+            sha256 = item.get("sha256")
+            size_bytes = item.get("size_bytes")
+            if not isinstance(path, str) or kind not in {"file", "symlink", "deleted"}:
+                valid = False
+                break
+            try:
+                path = str(validate_relative_git_path(path))
+            except WorkspacePreflightError:
+                valid = False
+                break
+            if path in seen:
+                valid = False
+                break
+            seen.add(path)
+            if kind == "deleted":
+                if sha256 is not None or size_bytes is not None:
+                    valid = False
+                    break
+            elif (
+                not isinstance(sha256, str)
+                or len(sha256) != 64
+                or any(character not in "0123456789abcdef" for character in sha256)
+                or isinstance(size_bytes, bool)
+                or not isinstance(size_bytes, int)
+                or size_bytes < 0
+            ):
+                valid = False
+                break
+            normalized.append(
+                {
+                    "path": path,
+                    "kind": kind,
+                    "sha256": sha256,
+                    "size_bytes": size_bytes,
+                    "provenance_source": "trusted-workspace-inspection",
+                    "audit_event_id": event.id,
+                    "observed_at": _iso(event.created_at),
+                }
+            )
+        normalized.sort(key=lambda artifact: artifact["path"])
+        if valid and [artifact["path"] for artifact in normalized] == expected:
+            return normalized
+    return []
+
+
 def build_result_package_payload(db: Session, execution_id: str) -> dict:
     # SessionLocal intentionally disables autoflush. A result package must cover
     # evidence/usage written in the same terminal-state transaction before its
@@ -321,6 +397,11 @@ def build_result_package_payload(db: Session, execution_id: str) -> dict:
     ) or 0
     cost_summary = execution_cost_summary(db, execution_id)
     changed_files = _trusted_changed_files(db, workspace.id) if workspace is not None else []
+    trusted_artifacts = (
+        _trusted_artifacts(db, workspace.id, changed_files)
+        if workspace is not None
+        else []
+    )
     limitations: list[str] = []
     if workspace is not None and workspace.status != "retained":
         limitations.append("workspace inspection is not final")
@@ -328,8 +409,8 @@ def build_result_package_payload(db: Session, execution_id: str) -> dict:
         limitations.append("changed-file names were unavailable from trusted inspection evidence")
     if not any(event.kind == "review" for event in evidence):
         limitations.append("structured QA/reviewer verdicts are not persisted yet")
-    if not any(event.kind == "artifact" for event in evidence):
-        limitations.append("generated artifact provenance is not persisted yet")
+    if workspace is not None and workspace.changed_file_count and not trusted_artifacts:
+        limitations.append("generated artifact provenance was unavailable from trusted workspace inspection")
     if automatic_usage_count == 0:
         limitations.append("automatic provider token/cost telemetry was unavailable")
     elif cost_summary["unknown_automatic_cost_rows"]:
@@ -414,7 +495,7 @@ def build_result_package_payload(db: Session, execution_id: str) -> dict:
             for event in evidence
             if event.kind == "review"
         ],
-        "generated_artifacts": [event.details for event in evidence if event.kind == "artifact"],
+        "generated_artifacts": trusted_artifacts,
         "execution": {
             "status": run.status,
             "stage": run.stage,

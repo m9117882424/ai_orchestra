@@ -355,6 +355,33 @@ def test_ignored_artifact_is_treated_as_a_change(tmp_path):
     )
 
 
+def test_inspection_hashes_symlink_payload_without_following_target(tmp_path):
+    repository_id = str(uuid4())
+    mirror_root, commit = _build_mirror(tmp_path, repository_id)
+    workspace_root = tmp_path / "workspaces"
+    filesystem = _filesystem(mirror_root, workspace_root)
+    lease = _lease(workspace_root, repository_id, commit)
+    result = filesystem.prepare(lease, heartbeat=lambda: True)
+    lease = _prepared_lease(lease, result, "inspect")
+    workspace = Path(lease.opencode_path)
+    os.symlink("README.md", workspace / "result-link")
+
+    inspection = filesystem.inspect(lease, heartbeat=lambda: True)
+
+    assert inspection.changed_files == ("result-link",)
+    assert inspection.artifacts == (
+        WorkspaceArtifact(
+            path="result-link",
+            kind="symlink",
+            sha256=hashlib.sha256(b"README.md").hexdigest(),
+            size_bytes=len(b"README.md"),
+        ),
+    )
+    assert inspection.artifacts[0].sha256 != hashlib.sha256(
+        b"workspace fixture\n"
+    ).hexdigest()
+
+
 def test_inspection_reports_both_sides_of_staged_rename(tmp_path):
     repository_id = str(uuid4())
     mirror_root, commit = _build_mirror(tmp_path, repository_id)

@@ -48,6 +48,7 @@ from .schemas import (
     ExecutionProgressRead,
     ExecutionResultPackageRead,
     ExecutionTimelineRead,
+    ObservabilitySummaryRead,
     RepositoryCreate,
     RepositoryProvider,
     RepositoryRead,
@@ -714,6 +715,251 @@ def execution_child_runs(
             .limit(limit)
         )
     )
+
+
+@app.get(
+    "/api/observability/summary",
+    response_model=ObservabilitySummaryRead,
+)
+def observability_summary(
+    db: DbSession,
+    _: Manager,
+    alert_limit: Annotated[int, Query(ge=1, le=500)] = 200,
+) -> dict:
+    now = datetime.now(timezone.utc)
+
+    def status_counts(model) -> dict[str, int]:
+        rows = db.execute(
+            select(model.status, func.count()).group_by(model.status)
+        ).all()
+        return {str(status_value): int(count) for status_value, count in rows}
+
+    executions_by_status = status_counts(ExecutionRun)
+    runner_jobs_by_status = status_counts(RunnerJob)
+    workspaces_by_status = status_counts(TaskWorkspace)
+    alerts: list[dict] = []
+
+    def add_alert(
+        *,
+        code: str,
+        severity: str,
+        entity_type: str,
+        entity_id: str | None,
+        message: str,
+        observed_at: datetime,
+        details: dict | None = None,
+    ) -> None:
+        alerts.append(
+            {
+                "code": code,
+                "severity": severity,
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "message": message,
+                "observed_at": observed_at,
+                "details": details or {},
+            }
+        )
+
+    for run in db.scalars(
+        select(ExecutionRun).where(
+            ExecutionRun.status.in_(("preparing", "queued", "running")),
+            ExecutionRun.deadline_at.is_not(None),
+            ExecutionRun.deadline_at <= now,
+        )
+    ):
+        add_alert(
+            code="execution_deadline_exceeded",
+            severity="critical",
+            entity_type="execution",
+            entity_id=run.id,
+            message="Execution exceeded its durable deadline.",
+            observed_at=run.deadline_at,
+            details={"status": run.status, "stage": run.stage},
+        )
+
+    for run in db.scalars(
+        select(ExecutionRun).where(
+            ExecutionRun.status == "running",
+            ExecutionRun.lease_expires_at.is_not(None),
+            ExecutionRun.lease_expires_at <= now,
+        )
+    ):
+        add_alert(
+            code="execution_lease_expired",
+            severity="critical",
+            entity_type="execution",
+            entity_id=run.id,
+            message="Running execution has an expired lease.",
+            observed_at=run.lease_expires_at,
+            details={"stage": run.stage, "lease_generation": run.lease_generation},
+        )
+
+    for job in db.scalars(
+        select(RunnerJob).where(
+            RunnerJob.status == "running",
+            RunnerJob.lease_expires_at.is_not(None),
+            RunnerJob.lease_expires_at <= now,
+        )
+    ):
+        add_alert(
+            code="runner_lease_expired",
+            severity="critical",
+            entity_type="runner_job",
+            entity_id=job.id,
+            message="Running runner job has an expired lease.",
+            observed_at=job.lease_expires_at,
+            details={"execution_id": job.execution_id, "failure_count": job.failure_count},
+        )
+
+    for job in db.scalars(
+        select(RunnerJob).where(RunnerJob.status == "cleanup_uncertain")
+    ):
+        add_alert(
+            code="runner_cleanup_uncertain",
+            severity="critical",
+            entity_type="runner_job",
+            entity_id=job.id,
+            message="Runner cleanup could not be confirmed.",
+            observed_at=job.finished_at or job.updated_at,
+            details={"execution_id": job.execution_id, "last_error_code": job.last_error_code},
+        )
+
+    for job in db.scalars(
+        select(RunnerJob).where(
+            RunnerJob.status == "queued",
+            RunnerJob.failure_count >= 2,
+        )
+    ):
+        add_alert(
+            code="runner_repeated_retry",
+            severity="warning",
+            entity_type="runner_job",
+            entity_id=job.id,
+            message="Runner job has failed repeatedly and is queued for another attempt.",
+            observed_at=job.updated_at,
+            details={"execution_id": job.execution_id, "failure_count": job.failure_count, "last_error_code": job.last_error_code},
+        )
+
+    for workspace in db.scalars(
+        select(TaskWorkspace).where(
+            TaskWorkspace.status.in_(("preparing", "inspecting", "cleaning")),
+            TaskWorkspace.lease_expires_at.is_not(None),
+            TaskWorkspace.lease_expires_at <= now,
+        )
+    ):
+        add_alert(
+            code="workspace_lease_expired",
+            severity="critical",
+            entity_type="workspace",
+            entity_id=workspace.id,
+            message="Active workspace operation has an expired lease.",
+            observed_at=workspace.lease_expires_at,
+            details={"status": workspace.status, "failure_count": workspace.failure_count},
+        )
+
+    for workspace in db.scalars(
+        select(TaskWorkspace).where(
+            TaskWorkspace.status.in_(("pending", "unavailable", "inspection_pending", "cleanup_pending")),
+            TaskWorkspace.failure_count >= 2,
+        )
+    ):
+        add_alert(
+            code="workspace_repeated_retry",
+            severity="warning",
+            entity_type="workspace",
+            entity_id=workspace.id,
+            message="Workspace operation has failed repeatedly and remains queued.",
+            observed_at=workspace.updated_at,
+            details={"status": workspace.status, "failure_count": workspace.failure_count, "last_error_code": workspace.last_error_code},
+        )
+
+    cost_summary = current_month_cost_summary(db)
+    known_cost = cost_summary["known_cost"]
+    cost_status = cost_summary["cost_status"]
+    unknown_cost_rows = cost_summary["unknown_automatic_cost_rows"]
+    if cost_status != "known":
+        add_alert(
+            code="cost_telemetry_incomplete",
+            severity="warning",
+            entity_type="budget",
+            entity_id="department",
+            message="Automatic provider cost telemetry is incomplete; known cost is a lower bound.",
+            observed_at=now,
+            details={"cost_status": cost_status, "unknown_automatic_cost_rows": unknown_cost_rows},
+        )
+
+    budget = db.get(Budget, "department")
+    if budget is not None and budget.enabled and budget.monthly_limit > 0:
+        warning_threshold = budget.monthly_limit * budget.warning_pct / 100
+        if known_cost >= budget.monthly_limit:
+            add_alert(
+                code="department_budget_exhausted",
+                severity="critical" if budget.hard_stop else "warning",
+                entity_type="budget",
+                entity_id=budget.scope,
+                message="Known monthly cost reached or exceeded the department budget.",
+                observed_at=now,
+                details={"known_cost": str(known_cost), "monthly_limit": str(budget.monthly_limit), "hard_stop": budget.hard_stop},
+            )
+        elif known_cost >= warning_threshold:
+            add_alert(
+                code="department_budget_warning",
+                severity="warning",
+                entity_type="budget",
+                entity_id=budget.scope,
+                message="Known monthly cost reached the configured department warning threshold.",
+                observed_at=now,
+                details={"known_cost": str(known_cost), "monthly_limit": str(budget.monthly_limit), "warning_pct": budget.warning_pct},
+            )
+
+    severity_order = {"critical": 0, "warning": 1}
+    alerts.sort(
+        key=lambda item: (
+            severity_order[item["severity"]],
+            item["code"],
+            item["entity_type"],
+            item["entity_id"] or "",
+        )
+    )
+    alert_count = len(alerts)
+    active_workspace_statuses = {
+        "pending",
+        "preparing",
+        "unavailable",
+        "inspection_pending",
+        "inspecting",
+        "cleanup_pending",
+        "cleaning",
+    }
+
+    return {
+        "generated_at": now,
+        "executions_by_status": executions_by_status,
+        "runner_jobs_by_status": runner_jobs_by_status,
+        "workspaces_by_status": workspaces_by_status,
+        "active_execution_count": sum(
+            executions_by_status.get(status_value, 0)
+            for status_value in ("preparing", "queued", "running")
+        ),
+        "active_runner_job_count": sum(
+            runner_jobs_by_status.get(status_value, 0)
+            for status_value in ("queued", "running")
+        ),
+        "active_workspace_count": sum(
+            workspaces_by_status.get(status_value, 0)
+            for status_value in active_workspace_statuses
+        ),
+        "current_month_known_cost": known_cost,
+        "current_month_cost_status": cost_status,
+        "unknown_automatic_cost_rows": unknown_cost_rows,
+        "department_budget_limit": budget.monthly_limit if budget is not None else None,
+        "department_budget_warning_pct": budget.warning_pct if budget is not None else None,
+        "department_budget_hard_stop": budget.hard_stop if budget is not None else None,
+        "alert_count": alert_count,
+        "alerts_truncated": alert_count > alert_limit,
+        "alerts": alerts[:alert_limit],
+    }
 
 
 @app.get(

@@ -185,7 +185,7 @@ Evidence/Observability и не заявляется как завершённа�
 
 # G4 — Evidence, Result Package & Observability
 
-Статус: **in progress 2026-09-17**. G4.1 durable evidence/result-package foundation принят в production (`59755a39`, schema `20260917_0010`). G4.2 child-run telemetry, structured review и automatic usage развивается в отдельной feature-ветке с schema `20260917_0011`. Контракт: [`G4_EVIDENCE_OBSERVABILITY.md`](G4_EVIDENCE_OBSERVABILITY.md).
+Статус: **G4.3 engineering complete, production 2026-09-23** (`b5f6179`, schema `20260917_0011`). G4.1-G4.3 прошли engineering CI, post-merge CI и production smoke. Единственное внешнее ограничение acceptance: свежий полный provider-backed end-to-end QA не подтверждён из-за недоступного provider balance; платные provider-вызовы в engineering closure не выполнялись. Контракт: [`G4_EVIDENCE_OBSERVABILITY.md`](G4_EVIDENCE_OBSERVABILITY.md).
 
 ### Live progress
 - stage/role;
@@ -201,16 +201,23 @@ Evidence/Observability и не заявляется как завершённа�
 - original task;
 - plan;
 - base/head SHA;
-- changed files/diff;
+- trusted changed-file identity и change digest;
+- trusted generated-artifact provenance (`path/kind/sha256/size` или explicit deleted state);
+- full source diff намеренно не сохраняется;
 - commits/proposed commits;
 - lint/test/build outputs;
 - reviewer/QA verdicts;
-- generated artifacts;
 - known risks/limitations;
-- actual cost.
+- actual recorded cost и provenance его источника.
+
+### Operator observability
+- единый read-only execution timeline;
+- durable status counters по executions/runner/workspaces;
+- evidence-backed alerts по deadline/lease/retry/cleanup/cost;
+- никаких выдуманных процентов, outage-причин или стоимости.
 
 ### High-assurance projects
-При выбранном профиле добавляются stronger provenance/evidence/traceability requirements. Они не навязываются обычному проекту.
+Для `general-high-assurance` и `regulated-critical` Result Package содержит machine-checkable provenance baseline: source identity, changed-file identity, artifact digests, runner snapshot/checkpoint/image binding и automatic provider-usage provenance. Неполный финальный пакет формирует critical observability alert. Для `general-standard` этот обязательный baseline не навязывается.
 
 ---
 

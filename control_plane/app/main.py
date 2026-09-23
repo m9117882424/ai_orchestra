@@ -768,10 +768,10 @@ def execution_timeline(
             "role": event.role,
             "label": f"evidence.{event.kind}",
             "details": {
+                **(event.details if isinstance(event.details, dict) else {}),
                 "tool_name": event.tool_name,
                 "attempt": event.attempt,
                 "retry_of_id": event.retry_of_id,
-                **(event.details if isinstance(event.details, dict) else {}),
             },
         })
 

@@ -367,7 +367,27 @@ def test_result_package_contains_trusted_sorted_unique_changed_files():
                         "../unsafe",
                         "",
                         1,
-                    ]
+                    ],
+                    "artifacts": [
+                        {
+                            "path": "z-last.txt",
+                            "kind": "file",
+                            "sha256": "1" * 64,
+                            "size_bytes": 30,
+                        },
+                        {
+                            "path": "dir/b.txt",
+                            "kind": "file",
+                            "sha256": "2" * 64,
+                            "size_bytes": 20,
+                        },
+                        {
+                            "path": "a-first.txt",
+                            "kind": "file",
+                            "sha256": "3" * 64,
+                            "size_bytes": 10,
+                        },
+                    ],
                 },
             )
         )
@@ -379,6 +399,23 @@ def test_result_package_contains_trusted_sorted_unique_changed_files():
         "dir/b.txt",
         "z-last.txt",
     ]
+    assert [artifact["path"] for artifact in package.payload["generated_artifacts"]] == [
+        "a-first.txt",
+        "dir/b.txt",
+        "z-last.txt",
+    ]
+    assert [artifact["sha256"] for artifact in package.payload["generated_artifacts"]] == [
+        "3" * 64,
+        "2" * 64,
+        "1" * 64,
+    ]
+    assert all(
+        artifact["provenance_source"] == "trusted-workspace-inspection"
+        for artifact in package.payload["generated_artifacts"]
+    )
+    assert "generated artifact provenance was unavailable from trusted workspace inspection" not in (
+        package.payload["known_risks_limitations"]
+    )
 
 
 def test_result_package_contains_empty_changed_files_without_audit_events():

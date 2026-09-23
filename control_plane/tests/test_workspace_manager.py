@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 import subprocess
@@ -24,6 +25,7 @@ from control_plane.app.models import (
 )
 from control_plane.app.workspace_manager import (
     PreparedWorkspace,
+    WorkspaceArtifact,
     WorkspaceFilesystem,
     WorkspaceInspection,
     WorkspaceLease,
@@ -343,6 +345,14 @@ def test_ignored_artifact_is_treated_as_a_change(tmp_path):
     assert inspection.has_changes is True
     assert inspection.changed_file_count == 1
     assert inspection.changed_files == ("cache.tmp",)
+    assert inspection.artifacts == (
+        WorkspaceArtifact(
+            path="cache.tmp",
+            kind="file",
+            sha256=hashlib.sha256(b"ignored but material\n").hexdigest(),
+            size_bytes=len(b"ignored but material\n"),
+        ),
+    )
 
 
 def test_inspection_reports_both_sides_of_staged_rename(tmp_path):
@@ -360,6 +370,20 @@ def test_inspection_reports_both_sides_of_staged_rename(tmp_path):
 
     assert inspection.has_changes is True
     assert inspection.changed_files == ("README-renamed.md", "README.md")
+    assert inspection.artifacts == (
+        WorkspaceArtifact(
+            path="README-renamed.md",
+            kind="file",
+            sha256=hashlib.sha256(b"workspace fixture\n").hexdigest(),
+            size_bytes=len(b"workspace fixture\n"),
+        ),
+        WorkspaceArtifact(
+            path="README.md",
+            kind="deleted",
+            sha256=None,
+            size_bytes=None,
+        ),
+    )
 
 
 def test_recalculated_manifest_cannot_replace_durable_database_binding(tmp_path):
@@ -983,6 +1007,14 @@ def test_terminal_inspection_finalizes_result_package_with_trusted_changed_files
         has_changes=True,
         changed_file_count=1,
         changed_files=(changed_file,),
+        artifacts=(
+            WorkspaceArtifact(
+                path=changed_file,
+                kind="file",
+                sha256="f" * 64,
+                size_bytes=123,
+            ),
+        ),
     )
     with SessionLocal() as db:
         outcome = manager.mark_inspection_success(
@@ -1009,7 +1041,25 @@ def test_terminal_inspection_finalizes_result_package_with_trusted_changed_files
     assert package.payload["changes"]["changed_file_count"] == 1
     assert package.payload["changes"]["changed_files"] == [changed_file]
     assert inspection_event.details["changed_files"] == [changed_file]
+    assert inspection_event.details["artifacts"] == [
+        {
+            "path": changed_file,
+            "kind": "file",
+            "sha256": "f" * 64,
+            "size_bytes": 123,
+        }
+    ]
+    [artifact] = package.payload["generated_artifacts"]
+    assert artifact["path"] == changed_file
+    assert artifact["kind"] == "file"
+    assert artifact["sha256"] == "f" * 64
+    assert artifact["size_bytes"] == 123
+    assert artifact["provenance_source"] == "trusted-workspace-inspection"
+    assert artifact["audit_event_id"] == inspection_event.id
     assert "changed-file names were unavailable from trusted inspection evidence" not in (
+        package.payload["known_risks_limitations"]
+    )
+    assert "generated artifact provenance was unavailable from trusted workspace inspection" not in (
         package.payload["known_risks_limitations"]
     )
 

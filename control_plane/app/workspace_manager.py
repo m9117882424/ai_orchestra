@@ -1547,6 +1547,7 @@ class WorkspaceFilesystem:
         heartbeat,
     ) -> tuple[WorkspaceArtifact, ...]:
         artifacts: list[WorkspaceArtifact] = []
+        total_artifact_bytes = 0
         for relative_path in changed_files:
             self._heartbeat(heartbeat)
             try:
@@ -1567,6 +1568,11 @@ class WorkspaceFilesystem:
                 )
                 continue
 
+            if metadata.st_size > self.max_file_bytes:
+                raise WorkspaceOperationError(
+                    "workspace_file_size_limit_exceeded", terminal=True
+                )
+
             if stat.S_ISLNK(metadata.st_mode):
                 try:
                     target = os.readlink(candidate)
@@ -1585,6 +1591,9 @@ class WorkspaceFilesystem:
                         "workspace_artifact_changed_during_inspection", terminal=True
                     )
                 payload = os.fsencode(target)
+                total_artifact_bytes += len(payload)
+                if total_artifact_bytes > self.max_workspace_bytes:
+                    raise WorkspaceOperationError("workspace_size_limit_exceeded", terminal=True)
                 artifacts.append(
                     WorkspaceArtifact(
                         path=normalized,
@@ -1623,9 +1632,9 @@ class WorkspaceFilesystem:
                         break
                     digest.update(chunk)
                     total += len(chunk)
-                    if total > self.max_workspace_bytes:
+                    if total > self.max_file_bytes:
                         raise WorkspaceOperationError(
-                            "workspace_change_limit_exceeded", terminal=True
+                            "workspace_file_size_limit_exceeded", terminal=True
                         )
                     self._heartbeat(heartbeat)
                 closed = os.fstat(stream.fileno())
@@ -1637,6 +1646,9 @@ class WorkspaceFilesystem:
                 raise WorkspaceOperationError(
                     "workspace_artifact_changed_during_inspection", terminal=True
                 )
+            total_artifact_bytes += total
+            if total_artifact_bytes > self.max_workspace_bytes:
+                raise WorkspaceOperationError("workspace_size_limit_exceeded", terminal=True)
             artifacts.append(
                 WorkspaceArtifact(
                     path=normalized,

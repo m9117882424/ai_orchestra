@@ -477,6 +477,22 @@ class ExecutionResultPackageRead(BaseModel):
     updated_at: datetime
 
 
+class ExecutionTimelineItem(BaseModel):
+    occurred_at: datetime
+    category: Literal["lifecycle", "evidence", "child_run", "runner_check"]
+    source: str
+    source_id: str | None = None
+    status: str | None = None
+    role: str | None = None
+    label: str
+    details: dict = Field(default_factory=dict)
+
+
+class ExecutionTimelineRead(BaseModel):
+    execution_id: str
+    items: list[ExecutionTimelineItem] = Field(default_factory=list)
+
+
 class ExecutionToolCallRead(BaseModel):
     tool_name: str
     status: str

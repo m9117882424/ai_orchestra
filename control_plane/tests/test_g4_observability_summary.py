@@ -9,6 +9,7 @@ from control_plane.app.db import SessionLocal
 from control_plane.app.main import app
 from control_plane.app.models import (
     AuditEvent,
+    ExecutionResultPackage,
     ExecutionRun,
     Repository,
     RunnerJob,
@@ -170,3 +171,78 @@ def test_observability_summary_bounds_alert_payload(auth):
     assert body["alert_count"] > 2
     assert body["alerts_truncated"] is True
     assert len(body["alerts"]) == 2
+
+
+def test_observability_alerts_on_incomplete_high_assurance_final_package(auth):
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        repository = Repository(
+            name="high-assurance-observability",
+            remote_url="https://github.com/example/high-assurance-observability.git",
+            remote_identity="github.com/example/high-assurance-observability",
+            remote_host="github.com",
+            provider="github",
+            assurance_tier="general-high-assurance",
+        )
+        db.add(repository)
+        db.flush()
+        task = Task(
+            title="High assurance provenance",
+            status="done",
+            repository_id=repository.id,
+        )
+        db.add(task)
+        db.flush()
+        run = ExecutionRun(
+            task_id=task.id,
+            contract_version=1,
+            repository_id=repository.id,
+            status="completed",
+            stage="manager_review",
+            result="done",
+            finished_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(run)
+        db.flush()
+        db.add(
+            ExecutionResultPackage(
+                execution_id=run.id,
+                package_version=2,
+                state="final",
+                payload={
+                    "assurance": {
+                        "tier": "general-high-assurance",
+                        "provenance_required": True,
+                        "provenance_status": "incomplete",
+                        "missing_requirements": ["automatic_provider_usage_provenance"],
+                    }
+                },
+                package_digest="a" * 64,
+                generated_at=now,
+                finalized_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        db.commit()
+        run_id = run.id
+
+    with TestClient(app) as client:
+        response = client.get("/api/observability/summary", auth=auth)
+
+    assert response.status_code == 200
+    alerts = [
+        item
+        for item in response.json()["alerts"]
+        if item["code"] == "high_assurance_provenance_incomplete"
+    ]
+    assert len(alerts) == 1
+    alert = alerts[0]
+    assert alert["severity"] == "critical"
+    assert alert["entity_id"] == run_id
+    assert alert["details"]["provenance_status"] == "incomplete"
+    assert alert["details"]["missing_requirements"] == [
+        "automatic_provider_usage_provenance"
+    ]

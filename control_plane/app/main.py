@@ -66,7 +66,7 @@ from .schemas import (
     UsageRead,
     WorkspaceCleanupRequest,
 )
-from .evidence import execution_cost_summary
+from .evidence import HIGH_ASSURANCE_TIERS, execution_cost_summary
 from .services import current_month_cost_summary, seed_defaults, write_audit
 from .opencode_client import OpenCodeClient, OpenCodeError
 from .settings import get_settings
@@ -872,6 +872,46 @@ def observability_summary(
             message="Workspace operation has failed repeatedly and remains queued.",
             observed_at=workspace.updated_at,
             details={"status": workspace.status, "failure_count": workspace.failure_count, "last_error_code": workspace.last_error_code},
+        )
+
+    for package, run, repository in db.execute(
+        select(ExecutionResultPackage, ExecutionRun, Repository)
+        .join(ExecutionRun, ExecutionRun.id == ExecutionResultPackage.execution_id)
+        .join(Repository, Repository.id == ExecutionRun.repository_id)
+        .where(
+            ExecutionResultPackage.state == "final",
+            Repository.assurance_tier.in_(tuple(HIGH_ASSURANCE_TIERS)),
+        )
+    ).all():
+        payload = package.payload if isinstance(package.payload, dict) else {}
+        assurance = payload.get("assurance") if isinstance(payload, dict) else None
+        provenance_status = (
+            assurance.get("provenance_status")
+            if isinstance(assurance, dict)
+            else "unassessed"
+        )
+        if provenance_status == "complete":
+            continue
+        missing = (
+            assurance.get("missing_requirements", [])
+            if isinstance(assurance, dict)
+            else ["result_package_assurance_unassessed"]
+        )
+        add_alert(
+            code="high_assurance_provenance_incomplete",
+            severity="critical",
+            entity_type="execution",
+            entity_id=run.id,
+            message="Final high-assurance Result Package has incomplete provenance evidence.",
+            observed_at=package.finalized_at or package.updated_at,
+            details={
+                "repository_id": repository.id,
+                "assurance_tier": repository.assurance_tier,
+                "assurance_profile": repository.assurance_profile,
+                "provenance_status": provenance_status,
+                "missing_requirements": missing,
+                "package_digest": package.package_digest,
+            },
         )
 
     cost_summary = current_month_cost_summary(db)

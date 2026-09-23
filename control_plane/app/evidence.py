@@ -15,6 +15,7 @@ from .models import (
     ExecutionEvidence,
     ExecutionResultPackage,
     ExecutionRun,
+    Repository,
     RunnerJob,
     Task,
     TaskWorkspace,
@@ -358,6 +359,106 @@ def _trusted_artifacts(
     return []
 
 
+HIGH_ASSURANCE_TIERS = {"general-high-assurance", "regulated-critical"}
+
+
+def _assurance_provenance(
+    *,
+    repository: Repository | None,
+    run: ExecutionRun,
+    workspace: TaskWorkspace | None,
+    jobs: list[RunnerJob],
+    changed_files: list[str],
+    trusted_artifacts: list[dict],
+    automatic_usage_count: int,
+) -> dict:
+    tier = repository.assurance_tier if repository is not None else "general-standard"
+    profile = repository.assurance_profile if repository is not None else None
+    high_assurance = tier in HIGH_ASSURANCE_TIERS
+    changed = bool(workspace is not None and workspace.changed_file_count)
+    source_complete = bool(
+        run.base_commit
+        and run.workspace_tree
+        and (workspace.current_head_commit if workspace is not None else run.base_commit)
+        and (workspace.current_tree if workspace is not None else run.workspace_tree)
+    )
+    changed_files_complete = (
+        not changed
+        or (
+            workspace is not None
+            and len(changed_files) > 0
+            and len(changed_files) == len(set(changed_files))
+        )
+    )
+    artifact_paths = [str(item.get("path")) for item in trusted_artifacts]
+    artifact_complete = (
+        not changed
+        or (
+            bool(trusted_artifacts)
+            and artifact_paths == sorted(changed_files)
+            and all(
+                item.get("kind") == "deleted"
+                or (item.get("sha256") and item.get("size_bytes") is not None)
+                for item in trusted_artifacts
+            )
+        )
+    )
+    runner_binding_complete = (
+        not changed
+        or (
+            bool(jobs)
+            and all(
+                job.source_snapshot_digest
+                and job.checkpoint_digest
+                and job.runner_image_id
+                for job in jobs
+            )
+        )
+    )
+    controls = [
+        {
+            "code": "immutable_source_identity",
+            "required": high_assurance,
+            "satisfied": source_complete,
+        },
+        {
+            "code": "trusted_changed_file_identity",
+            "required": high_assurance and changed,
+            "satisfied": changed_files_complete,
+        },
+        {
+            "code": "trusted_artifact_digests",
+            "required": high_assurance and changed,
+            "satisfied": artifact_complete,
+        },
+        {
+            "code": "runner_snapshot_checkpoint_image_binding",
+            "required": high_assurance and changed,
+            "satisfied": runner_binding_complete,
+        },
+        {
+            "code": "automatic_provider_usage_provenance",
+            "required": high_assurance,
+            "satisfied": automatic_usage_count > 0,
+        },
+    ]
+    missing = [
+        control["code"]
+        for control in controls
+        if control["required"] and not control["satisfied"]
+    ]
+    return {
+        "tier": tier,
+        "profile": profile,
+        "provenance_required": high_assurance,
+        "provenance_status": (
+            "not_required" if not high_assurance else "complete" if not missing else "incomplete"
+        ),
+        "controls": controls,
+        "missing_requirements": missing,
+    }
+
+
 def build_result_package_payload(db: Session, execution_id: str) -> dict:
     # SessionLocal intentionally disables autoflush. A result package must cover
     # evidence/usage written in the same terminal-state transaction before its
@@ -367,6 +468,7 @@ def build_result_package_payload(db: Session, execution_id: str) -> dict:
     if run is None:
         raise ValueError("execution_not_found")
     task = db.get(Task, run.task_id)
+    repository = db.get(Repository, run.repository_id) if run.repository_id else None
     workspace = db.get(TaskWorkspace, run.workspace_id) if run.workspace_id else None
     jobs = list(
         db.scalars(
@@ -402,6 +504,15 @@ def build_result_package_payload(db: Session, execution_id: str) -> dict:
         if workspace is not None
         else []
     )
+    assurance = _assurance_provenance(
+        repository=repository,
+        run=run,
+        workspace=workspace,
+        jobs=jobs,
+        changed_files=changed_files,
+        trusted_artifacts=trusted_artifacts,
+        automatic_usage_count=int(automatic_usage_count),
+    )
     limitations: list[str] = []
     if workspace is not None and workspace.status != "retained":
         limitations.append("workspace inspection is not final")
@@ -415,10 +526,16 @@ def build_result_package_payload(db: Session, execution_id: str) -> dict:
         limitations.append("automatic provider token/cost telemetry was unavailable")
     elif cost_summary["unknown_automatic_cost_rows"]:
         limitations.append("automatic provider monetary cost was unavailable; token telemetry is present")
+    if assurance["provenance_status"] == "incomplete":
+        limitations.append(
+            "high-assurance provenance requirements were incomplete: "
+            + ", ".join(assurance["missing_requirements"])
+        )
 
     return {
         "schema_version": 2,
         "execution_id": run.id,
+        "assurance": assurance,
         "original_task": {
             "id": task.id if task else run.task_id,
             "title": task.title if task else None,

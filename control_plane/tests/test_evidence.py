@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -18,6 +19,7 @@ from control_plane.app.models import (
     ExecutionResultPackage,
     ExecutionRun,
     Repository,
+    RunnerJob,
     Task,
     TaskWorkspace,
     UsageEvent,
@@ -283,7 +285,11 @@ def test_failed_execution_waiting_for_workspace_inspection_stays_provisional():
     assert "workspace inspection is not final" in package.payload["known_risks_limitations"]
 
 
-def _seed_completed_workspace_run(now: datetime) -> tuple[str, str]:
+def _seed_completed_workspace_run(
+    now: datetime,
+    *,
+    assurance_tier: str = "general-standard",
+) -> tuple[str, str]:
     repository_id = "55555555-5555-4555-8555-555555555555"
     task_id = "66666666-6666-4666-8666-666666666666"
     workspace_id = "77777777-7777-4777-8777-777777777777"
@@ -298,6 +304,7 @@ def _seed_completed_workspace_run(now: datetime) -> tuple[str, str]:
                 remote_identity="github.com/example/g4-changed-files",
                 remote_host="github.com",
                 provider="github",
+                assurance_tier=assurance_tier,
             )
         )
         db.add(Task(id=task_id, title="G4 changed files", repository_id=repository_id, status="completed"))
@@ -448,6 +455,123 @@ def test_result_package_rejects_mismatched_trusted_artifact_paths():
     assert package.payload["generated_artifacts"] == []
     assert "generated artifact provenance was unavailable from trusted workspace inspection" in (
         package.payload["known_risks_limitations"]
+    )
+
+
+def test_high_assurance_result_package_marks_missing_provenance_incomplete():
+    now = datetime.now(timezone.utc)
+    _, run_id = _seed_completed_workspace_run(
+        now, assurance_tier="general-high-assurance"
+    )
+
+    with SessionLocal() as db:
+        package = materialize_result_package(db, run_id, final=True, now=now)
+        db.commit()
+
+    assurance = package.payload["assurance"]
+    assert assurance["tier"] == "general-high-assurance"
+    assert assurance["provenance_required"] is True
+    assert assurance["provenance_status"] == "incomplete"
+    assert assurance["missing_requirements"] == [
+        "trusted_changed_file_identity",
+        "trusted_artifact_digests",
+        "runner_snapshot_checkpoint_image_binding",
+        "automatic_provider_usage_provenance",
+    ]
+    assert any(
+        limitation.startswith("high-assurance provenance requirements were incomplete:")
+        for limitation in package.payload["known_risks_limitations"]
+    )
+
+
+def test_high_assurance_result_package_proves_complete_provenance_baseline():
+    now = datetime.now(timezone.utc)
+    workspace_id, run_id = _seed_completed_workspace_run(
+        now, assurance_tier="general-high-assurance"
+    )
+    repository_id = "55555555-5555-4555-8555-555555555555"
+    paths = ["a-first.txt", "z-last.txt"]
+
+    with SessionLocal() as db:
+        db.add(
+            AuditEvent(
+                actor="workspace-manager:test",
+                action="workspace.inspected",
+                entity_type="workspace",
+                entity_id=workspace_id,
+                details={
+                    "changed_files": paths,
+                    "artifacts": [
+                        {
+                            "path": "a-first.txt",
+                            "kind": "file",
+                            "sha256": "1" * 64,
+                            "size_bytes": 10,
+                        },
+                        {
+                            "path": "z-last.txt",
+                            "kind": "deleted",
+                            "sha256": None,
+                            "size_bytes": None,
+                        },
+                    ],
+                },
+                created_at=now,
+            )
+        )
+        db.add(
+            RunnerJob(
+                execution_id=run_id,
+                repository_id=repository_id,
+                workspace_id=workspace_id,
+                idempotency_key=str(uuid4()),
+                status="completed",
+                argv=["python3", "-m", "pytest"],
+                timeout_seconds=30,
+                base_commit="a" * 40,
+                preflight_digest="c" * 64,
+                stdout="ok",
+                stderr="",
+                output_truncated=False,
+                cleanup_confirmed=True,
+                runner_image_id="sha256:" + "4" * 64,
+                source_snapshot_digest="5" * 64,
+                checkpoint_digest="6" * 64,
+                checkpoint_command_index=0,
+                checkpoint_label="tests",
+                exit_code=0,
+                finished_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        db.add(
+            UsageEvent(
+                execution_id=run_id,
+                source="opencode-session",
+                source_key="session-high-assurance",
+                role="department-lead",
+                provider="orchestra",
+                model="orchestra-lead",
+                input_tokens=10,
+                output_tokens=5,
+                cost=Decimal("0.100000"),
+                created_at=now,
+            )
+        )
+        package = materialize_result_package(db, run_id, final=True, now=now)
+        db.commit()
+
+    assurance = package.payload["assurance"]
+    assert assurance["provenance_status"] == "complete"
+    assert assurance["missing_requirements"] == []
+    assert all(
+        not control["required"] or control["satisfied"]
+        for control in assurance["controls"]
+    )
+    assert not any(
+        limitation.startswith("high-assurance provenance requirements were incomplete:")
+        for limitation in package.payload["known_risks_limitations"]
     )
 
 

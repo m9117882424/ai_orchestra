@@ -2,6 +2,55 @@
 
 AI Orchestra — самостоятельный AI-отдел, который принимает задачи владельца, декомпозирует их между профильными ролями, реализует изменения в изолированных Git worktree, проводит QA и независимое review и оставляет проверяемый audit trail.
 
+## Разработка через ChatGPT Pro / Codex CLI
+
+Для запуска первой задачи без оплаты запросов AITunnel есть отдельный операторский
+маршрут `scripts/codex_task.py`. Он запускает **официальный Codex CLI** от имени
+владельца подписки, создаёт отдельный Git worktree и сохраняет ответ и JSONL
+события. API-ключи ему не нужны; при наличии `OPENAI_API_KEY`, `CODEX_API_KEY`
+или `CODEX_ACCESS_TOKEN` в окружении запуск блокируется.
+
+На машине, где будет работать Codex (в том числе на доверенном сервере):
+
+```bash
+npm install -g @openai/codex@0.156.1
+codex login --device-auth
+codex login status
+```
+
+При входе используйте тот ChatGPT-аккаунт, на котором активна подписка Pro.
+Ссылку и одноразовый код из `codex login --device-auth` открывайте и вводите
+самостоятельно; не добавляйте их в репозиторий и переписку. На личном аккаунте
+может понадобиться предварительно включить device code login в настройках
+безопасности ChatGPT. CLI хранит авторизацию в `~/.codex`; запускайте задачи
+от того же пользователя ОС. Пример для отдельного продуктового репозитория:
+
+```bash
+mkdir -p /opt/ai_orchestra/data/codex-prompts
+editor /opt/ai_orchestra/data/codex-prompts/taxi-001.txt
+cd /opt/ai_orchestra
+python3 scripts/codex_task.py \
+  --repository /opt/corporate_taxi \
+  --task-id taxi-001 \
+  --role developer \
+  --prompt-file data/codex-prompts/taxi-001.txt
+```
+
+Репозиторий должен существовать и не иметь незакоммиченных изменений.
+Результат окажется в `worktrees/codex/taxi-001`, ветка — `codex/taxi-001`,
+а файлы `events.jsonl`, `final.txt` и `run.json` — в `data/codex-tasks/taxi-001`.
+Роли: `architect` и `reviewer` (по умолчанию Astra, только чтение),
+`developer` (Sol, запись в рабочую копию), `qa` (Sol, только чтение).
+Если нужная модель недоступна аккаунту, передайте `--model` с доступной моделью.
+Лимиты подписки действуют; истечение лимита завершит задачу с ошибкой и не
+переключит её на платный API.
+
+Этот маршрут пока запускается оператором и **не регистрирует выполнение в
+`execution_runs`**: его события не являются Result Package control plane.
+Для работы с автоматическим назначением ролей, QA и approval gates потребуется
+отдельная интеграция Codex с lifecycle execution worker. Не запускайте его на
+worktree из `worktrees/managed`, которым владеет OpenCode execution worker.
+
 **AI Orchestra не является частью Trading Platform.** Trading Platform, Arvento, Wialon, Fuel Monitor, BI и другие системы — отдельные продукты, которые отдел может разрабатывать.
 
 > G1 принят для pilot 2026-09-07, G2 — в production 2026-09-15,

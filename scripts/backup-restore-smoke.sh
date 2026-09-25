@@ -153,12 +153,15 @@ sha = hashlib.sha256(archive.read_bytes()).hexdigest()
 assert payload["result"] == "success"
 assert payload["source_backup_sha256"] == sha
 assert payload["pre_migration_revision"] == "unversioned"
-assert payload["post_migration_revision"] == "20260917_0011"
+assert payload["post_migration_revision"] == "20260925_0012"
 assert payload["restored_table_counts"].get("audit_events", 0) >= 1
 assert payload["restored_table_counts"].get("alembic_version", 0) == 1
 assert payload["restored_table_counts"].get("repositories") == 0
 assert payload["restored_table_counts"].get("task_workspaces") == 0
 assert payload["restored_table_counts"].get("runner_jobs") == 0
+assert payload["restored_table_counts"].get("controlled_actions") == 0
+assert payload["restored_table_counts"].get("controlled_action_authorizations") == 0
+assert payload["restored_table_counts"].get("controlled_action_effects") == 0
 assert payload["task_workspace_restore"] == {
     "backup_format": 3,
     "cleaning_rows_verified": 0,
@@ -169,7 +172,7 @@ assert payload["task_workspace_restore"] == {
 assert payload["runner_job_restore"] == {"bindings_verified": 0, "checkpoint_bindings_verified": 0, "database_rows": 0}
 assert payload["observed_restore_rto_seconds"] >= 0
 assert payload["observed_backup_age_seconds"] >= 0
-print("[OK] Historical 0001 backup was restored, adopted to 0011 and retained the seeded audit marker")
+print("[OK] Historical 0001 backup was restored, adopted to 0012 and retained the seeded audit marker")
 PY
 
 echo "[INFO] Creating current-head backup with durable runner-job evidence"
@@ -187,12 +190,19 @@ docker compose run --rm -T --no-deps \
   control-plane python - <<'PYRUNNER'
 from datetime import datetime, timezone
 from uuid import uuid4
+from app.controlled_actions import action_digest_for_manifest, build_action_manifest, operation_key_for_digest
 from app.db import SessionLocal
 from app.evidence import materialize_result_package, record_evidence
-from app.models import ExecutionChildRun, ExecutionRun, Repository, RunnerJob, Task, TaskWorkspace, UsageEvent
+from app.models import (
+    ControlledAction, ControlledActionAuthorization, ControlledActionEffect,
+    ExecutionChildRun, ExecutionRun, Repository, RunnerJob, Task, TaskWorkspace, UsageEvent,
+)
 
 now = datetime.now(timezone.utc)
-repo_id, task_id, workspace_id, run_id, job_id, child_id = [str(uuid4()) for _ in range(6)]
+(
+    repo_id, task_id, workspace_id, run_id, job_id, child_id,
+    action_id, authorization_id, effect_id,
+) = [str(uuid4()) for _ in range(9)]
 idempotency_key = str(uuid4())
 commit = "a" * 40
 tree = "b" * 40
@@ -254,7 +264,40 @@ with SessionLocal() as db:
         role="qa", model="orchestra-qa", tool_name="pytest", status="completed",
         details={"fixture": "backup-restore-smoke"}, occurred_at=now,
     )
-    materialize_result_package(db, run_id, final=True, now=now)
+    package = materialize_result_package(db, run_id, final=True, now=now)
+    action_manifest = build_action_manifest(
+        task_id=task_id,
+        repository_id=repo_id,
+        action_type="git_push",
+        source_sha=commit,
+        head_sha="2" * 40,
+        destination="refs/heads/feature/dr-g5",
+        result_package_digest=package.package_digest,
+        payload={"fixture": "backup-restore-smoke"},
+    )
+    action_digest = action_digest_for_manifest(action_manifest)
+    operation_key = operation_key_for_digest(action_digest)
+    db.add(ControlledAction(
+        id=action_id, task_id=task_id, repository_id=repo_id, action_type="git_push",
+        source_sha=commit, head_sha="2" * 40, destination="refs/heads/feature/dr-g5",
+        result_package_digest=package.package_digest, payload={"fixture": "backup-restore-smoke"},
+        action_digest=action_digest, status="claimed", created_by="ci", version=3,
+        created_at=now, updated_at=now,
+    ))
+    db.add(ControlledActionAuthorization(
+        id=authorization_id, action_id=action_id, action_digest=action_digest,
+        status="consumed", requested_by="ci", reason="DR exact-digest authorization fixture",
+        expires_at=now.replace(year=now.year + 1), decided_by="ci",
+        decision_comment="approved for DR fixture", decided_at=now,
+        consumed_by="ci", consumed_at=now, operation_key=operation_key,
+        created_at=now, updated_at=now,
+    ))
+    db.add(ControlledActionEffect(
+        id=effect_id, action_id=action_id, authorization_id=authorization_id,
+        action_digest=action_digest, operation_key=operation_key, status="reserved",
+        claimed_by="ci", details={"fixture": "backup-restore-smoke"},
+        claimed_at=now, created_at=now, updated_at=now,
+    ))
     workspace = db.get(TaskWorkspace, workspace_id)
     workspace.status = "removed"
     workspace.cleaned_at = now
@@ -269,8 +312,8 @@ evidence="$(find "$BACKUP_ROOT/drills" -maxdepth 1 -type f -name 'restore-drill-
 python3 - "$evidence" <<'PYCHECK'
 import json, pathlib, sys
 payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-assert payload["pre_migration_revision"] == "20260917_0011"
-assert payload["post_migration_revision"] == "20260917_0011"
+assert payload["pre_migration_revision"] == "20260925_0012"
+assert payload["post_migration_revision"] == "20260925_0012"
 assert payload["restored_table_counts"].get("runner_jobs") == 1
 assert payload["runner_job_restore"] == {"bindings_verified": 1, "checkpoint_bindings_verified": 1, "database_rows": 1}
 assert payload["restored_table_counts"].get("task_workspaces") == 1
@@ -278,7 +321,10 @@ assert payload["restored_table_counts"].get("execution_evidence") == 1
 assert payload["restored_table_counts"].get("execution_child_runs") == 1
 assert payload["restored_table_counts"].get("execution_result_packages") == 1
 assert payload["restored_table_counts"].get("usage_events") == 1
-print("[OK] Current-head runner/evidence/result-package data survived backup/restore")
+assert payload["restored_table_counts"].get("controlled_actions") == 1
+assert payload["restored_table_counts"].get("controlled_action_authorizations") == 1
+assert payload["restored_table_counts"].get("controlled_action_effects") == 1
+print("[OK] Current-head runner/evidence/result-package/G5 controlled-action data survived backup/restore")
 PYCHECK
 
 echo "[OK] Backup/restore smoke passed"

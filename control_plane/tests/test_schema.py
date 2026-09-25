@@ -83,7 +83,7 @@ print('STARTED')
 
 
 def test_declared_schema_head_is_stable():
-    assert head_revision() == "20260917_0011"
+    assert head_revision() == "20260925_0012"
 
 
 def test_fresh_database_is_created_by_alembic(tmp_path):
@@ -148,7 +148,7 @@ def test_fresh_database_is_created_by_alembic(tmp_path):
         }
 
     assert set(Base.metadata.tables).issubset(tables)
-    assert revision == "20260917_0011"
+    assert revision == "20260925_0012"
     assert session_column["nullable"] is True
     assert "deadline_at" in execution_columns
     assert "cancel_requested_at" in execution_columns
@@ -291,7 +291,7 @@ def test_matching_current_unversioned_database_is_verified_then_stamped(tmp_path
 
     with engine.connect() as connection:
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert revision == "20260917_0011"
+    assert revision == "20260925_0012"
 
 
 def test_unversioned_historical_baseline_is_verified_then_migrated(tmp_path):
@@ -336,7 +336,7 @@ def test_unversioned_historical_baseline_is_verified_then_migrated(tmp_path):
             if column["name"] == "opencode_session_id"
         )
 
-    assert revision == "20260917_0011"
+    assert revision == "20260925_0012"
     assert marker == "Legacy marker"
     assert {
         "lease_owner",
@@ -378,7 +378,7 @@ def test_versioned_0002_database_upgrades_to_current_execution_schema(tmp_path):
         execution_columns = {
             column["name"] for column in inspect(connection).get_columns("execution_runs")
         }
-    assert revision == "20260917_0011"
+    assert revision == "20260925_0012"
     assert after["nullable"] is True
     assert "deadline_at" in execution_columns
     assert "cancel_requested_at" in execution_columns
@@ -440,7 +440,7 @@ def test_versioned_0003_backfills_only_active_execution_deadlines(tmp_path):
             ).all()
         )
 
-    assert revision == "20260917_0011"
+    assert revision == "20260925_0012"
     assert deadlines["queued-run"] is not None
     assert deadlines["completed-run"] is None
 
@@ -477,7 +477,7 @@ def test_versioned_0004_adds_registry_without_mutating_existing_data(tmp_path):
         ).scalar_one()
         tables = set(inspect(connection).get_table_names())
 
-    assert revision == "20260917_0011"
+    assert revision == "20260925_0012"
     assert marker == "marker"
     assert "repositories" in tables
 
@@ -531,7 +531,7 @@ def test_versioned_0005_registry_is_requeued_without_losing_policy(tmp_path):
             )
         ).one()
 
-    assert revision == "20260917_0011"
+    assert revision == "20260925_0012"
     assert tuple(row[:5]) == (
         "existing-repository",
         "github.com/example/existing",
@@ -608,7 +608,7 @@ def test_versioned_0006_preserves_legacy_execution_as_contract_v1(tmp_path):
             text("SELECT count(*) FROM task_workspaces")
         ).scalar_one()
 
-    assert revision == "20260917_0011"
+    assert revision == "20260925_0012"
     assert task_repository is None
     assert tuple(run) == (1, None, None, None, None, "queued", "dispatch_pending")
     assert workspace_count == 0
@@ -810,3 +810,72 @@ def test_g4_evidence_schema_contract(tmp_path):
         "ck_execution_result_packages_digest",
         "ck_execution_result_packages_final_state",
     }.issubset(package_checks)
+
+
+def test_versioned_0011_upgrades_to_g5_without_reinterpreting_legacy_approvals(tmp_path):
+    database_path = tmp_path / "revision-0011-to-g5.db"
+    database_url = f"sqlite+pysqlite:///{database_path}"
+    created = _run_alembic_upgrade(database_url, "20260917_0011")
+    assert created.returncode == 0, created.stderr
+
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO tasks (
+                    id, title, description, project, domain, priority, status,
+                    risk_level, owner_role, repository_id, created_at, updated_at
+                ) VALUES (
+                    '99999999-9999-4999-8999-999999999999', 'G5 migration marker',
+                    '', 'general', 'development', 'normal', 'waiting_approval',
+                    'low', NULL, NULL, '2026-09-25 00:00:00', '2026-09-25 00:00:00'
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO approvals (
+                    id, task_id, kind, status, requested_by, reason,
+                    decided_by, decision_comment, created_at, decided_at
+                ) VALUES (
+                    'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+                    '99999999-9999-4999-8999-999999999999',
+                    'git_push', 'approved', 'legacy-manager', 'legacy record',
+                    'legacy-manager', 'legacy decision',
+                    '2026-09-25 00:00:00', '2026-09-25 00:01:00'
+                )
+                """
+            )
+        )
+
+    migrated = _run_schema_cli(database_url, "migrate")
+    assert migrated.returncode == 0, migrated.stderr
+
+    with engine.connect() as connection:
+        revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        legacy = connection.execute(
+            text(
+                """
+                SELECT kind, status, requested_by, decided_by
+                FROM approvals
+                WHERE id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+                """
+            )
+        ).one()
+        tables = set(inspect(connection).get_table_names())
+
+    assert revision == "20260925_0012"
+    assert tuple(legacy) == (
+        "git_push",
+        "approved",
+        "legacy-manager",
+        "legacy-manager",
+    )
+    assert {
+        "controlled_actions",
+        "controlled_action_authorizations",
+        "controlled_action_effects",
+    }.issubset(tables)

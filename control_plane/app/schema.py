@@ -51,6 +51,9 @@ _REVISION_ABSENT_TABLES = {
             "execution_evidence",
             "execution_result_packages",
             "execution_child_runs",
+            "controlled_actions",
+            "controlled_action_authorizations",
+            "controlled_action_effects",
         }
     ),
 }

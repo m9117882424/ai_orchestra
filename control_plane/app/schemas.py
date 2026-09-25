@@ -28,6 +28,27 @@ ApprovalKind = Literal[
     "financial_execution",
 ]
 ApprovalDecision = Literal["approved", "rejected"]
+ControlledActionType = Literal["git_push", "pull_request", "merge", "deploy", "external_write"]
+ControlledActionStatus = Literal[
+    "proposed",
+    "pending_approval",
+    "approved",
+    "approval_rejected",
+    "claimed",
+    "succeeded",
+    "failed",
+    "uncertain",
+    "reconciled",
+]
+ControlledActionAuthorizationStatus = Literal[
+    "pending", "approved", "rejected", "expired", "consumed"
+]
+ControlledActionEffectStatus = Literal[
+    "reserved", "succeeded", "failed", "uncertain", "reconciled"
+]
+ControlledActionReconciliationOutcome = Literal[
+    "source_state", "desired_state", "diverged", "unknown"
+]
 RepositoryProvider = Literal["github", "gitlab", "bitbucket", "generic"]
 RepositoryStatus = Literal[
     "pending_validation", "validating", "ready", "unavailable", "invalid"
@@ -205,6 +226,151 @@ class ApprovalRead(BaseModel):
     decision_comment: str | None
     created_at: datetime
     decided_at: datetime | None
+
+
+class ControlledActionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str | None = Field(default=None, min_length=36, max_length=36)
+    repository_id: str = Field(min_length=36, max_length=36)
+    action_type: ControlledActionType
+    source_sha: str = Field(pattern=r"^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$")
+    head_sha: str = Field(pattern=r"^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$")
+    destination: str = Field(min_length=1, max_length=512)
+    result_package_digest: str | None = Field(
+        default=None, pattern=r"^[0-9a-fA-F]{64}$"
+    )
+    payload: dict = Field(default_factory=dict)
+
+    @field_validator("source_sha", "head_sha", "result_package_digest")
+    @classmethod
+    def normalize_digest(cls, value: str | None) -> str | None:
+        return value.lower() if value is not None else None
+
+    @field_validator("destination")
+    @classmethod
+    def normalize_destination(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("destination не может быть пустым")
+        return normalized
+
+
+class ControlledActionRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    task_id: str | None
+    repository_id: str
+    action_type: ControlledActionType
+    source_sha: str
+    head_sha: str
+    destination: str
+    result_package_digest: str | None
+    payload: dict
+    action_digest: str
+    status: ControlledActionStatus
+    created_by: str
+    version: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class ControlledActionAuthorizationCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=3, max_length=5000)
+    ttl_seconds: int = Field(default=3600, ge=60, le=86400, strict=True)
+    expected_action_digest: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+
+    @field_validator("expected_action_digest")
+    @classmethod
+    def normalize_expected_digest(cls, value: str) -> str:
+        return value.lower()
+
+
+class ControlledActionAuthorizationDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["approved", "rejected"]
+    expected_action_digest: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    comment: str = Field(default="", max_length=5000)
+
+    @field_validator("expected_action_digest")
+    @classmethod
+    def normalize_expected_digest(cls, value: str) -> str:
+        return value.lower()
+
+
+class ControlledActionAuthorizationRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    action_id: str
+    action_digest: str
+    status: ControlledActionAuthorizationStatus
+    requested_by: str
+    reason: str
+    expires_at: datetime
+    decided_by: str | None
+    decision_comment: str | None
+    decided_at: datetime | None
+    consumed_by: str | None
+    consumed_at: datetime | None
+    operation_key: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ControlledActionClaim(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_action_digest: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    @field_validator("expected_action_digest")
+    @classmethod
+    def normalize_expected_digest(cls, value: str) -> str:
+        return value.lower()
+
+
+class ControlledActionEffectReconciliation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operation_key: str = Field(
+        min_length=16, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$"
+    )
+    outcome: ControlledActionReconciliationOutcome
+    observed_state_digest: str | None = Field(
+        default=None, pattern=r"^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$"
+    )
+    external_ref: str | None = Field(default=None, max_length=512)
+    details: dict = Field(default_factory=dict)
+
+    @field_validator("observed_state_digest")
+    @classmethod
+    def normalize_observed_digest(cls, value: str | None) -> str | None:
+        return value.lower() if value is not None else None
+
+
+class ControlledActionEffectRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    action_id: str
+    authorization_id: str
+    action_digest: str
+    operation_key: str
+    status: ControlledActionEffectStatus
+    claimed_by: str
+    external_ref: str | None
+    observed_before_digest: str | None
+    result_digest: str | None
+    details: dict
+    claimed_at: datetime
+    preflight_reconciled_at: datetime | None
+    finished_at: datetime | None
+    reconciled_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
 
 
 class BudgetUpdate(BaseModel):

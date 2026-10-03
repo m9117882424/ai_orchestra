@@ -75,3 +75,114 @@ def test_codex_task_rejects_dirty_repository(tmp_path):
     assert result.returncode == 2
     assert "uncommitted changes" in result.stderr
     assert not (tmp_path / "worktrees" / "taxi-001").exists()
+
+
+def _load_runner():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("codex_task_under_test", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_codex_task_rejects_zero_exit_without_final(tmp_path):
+    _, command, env = _setup(tmp_path)
+    fake = Path(command[command.index("--codex") + 1])
+    text = fake.read_text()
+    text = text.replace("    pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1]).write_text('Done')", "    pass")
+    fake.write_text(text)
+    result = subprocess.run(command, text=True, capture_output=True, env=env)
+    assert result.returncode == 65
+    summary = json.loads((tmp_path / "output/taxi-001/run.json").read_text())
+    assert summary["outcome"] == "incomplete_result"
+    assert summary["final_received"] is False
+    assert summary["turn_completed"] is True
+
+
+def test_codex_task_rejects_zero_exit_without_completed_turn(tmp_path):
+    _, command, env = _setup(tmp_path)
+    fake = Path(command[command.index("--codex") + 1])
+    fake.write_text(fake.read_text().replace("'turn.completed'", "'turn.started'"))
+    result = subprocess.run(command, text=True, capture_output=True, env=env)
+    assert result.returncode == 65
+    summary = json.loads((tmp_path / "output/taxi-001/run.json").read_text())
+    assert summary["outcome"] == "incomplete_result"
+    assert summary["final_received"] is True
+
+
+def test_codex_completed_events_fail_closed(tmp_path):
+    module = _load_runner()
+    events = tmp_path / "events.jsonl"
+    events.write_text('[]\ninvalid-json\n{"type":"turn.completed"}\n')
+    assert module.has_completed_turn(events)
+    events.write_text('{"type":"turn.completed"}\n{"type":"turn.failed"}\n')
+    assert not module.has_completed_turn(events)
+    events.write_text('{"type":"error"}\n{"type":"turn.completed"}\n')
+    assert not module.has_completed_turn(events)
+
+
+def test_codex_bounded_process_timeout_stops_descendants(tmp_path):
+    import time
+    module = _load_runner()
+    pidfile = tmp_path / "child.pid"
+    child = "import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(60)"
+    parent = ("import subprocess,sys,time,pathlib;"
+              "p=subprocess.Popen([sys.executable,'-c'," + repr(child) + "]);"
+              "pathlib.Path(" + repr(str(pidfile)) + ").write_text(str(p.pid));time.sleep(60)")
+    events, errors = tmp_path / "events", tmp_path / "errors"
+    started = time.monotonic()
+    code, error, outcome = module.execute_bounded([sys.executable, "-c", parent], "test", events, errors, 0.5)
+    assert (code, outcome) == (124, "local_timeout")
+    assert "process group stopped" in error
+    assert time.monotonic() - started < 6
+    assert events.stat().st_mode & 0o777 == 0o600
+    child_pid = int(pidfile.read_text())
+    stat = Path(f"/proc/{child_pid}/stat")
+    for _ in range(50):
+        if not stat.exists() or stat.read_text().split()[2] == "Z":
+            break
+        time.sleep(0.02)
+    else:
+        os.kill(child_pid, 9)
+        raise AssertionError("Child survived the deadline")
+
+
+def test_codex_bounded_process_preserves_partial_work_and_logs(tmp_path):
+    module = _load_runner()
+    artifact = tmp_path / "partial.txt"
+    program = ("import pathlib,time,sys;pathlib.Path(" + repr(str(artifact)) +
+               ").write_text('checkpoint');print('partial-event',flush=True);"
+               "print('diagnostic',file=sys.stderr,flush=True);time.sleep(60)")
+    events, errors = tmp_path / "events", tmp_path / "errors"
+    code, error, outcome = module.execute_bounded([sys.executable, "-c", program], "", events, errors, 0.3)
+    assert (code, outcome) == (124, "local_timeout")
+    assert artifact.read_text() == "checkpoint"
+    assert events.read_text().strip() == "partial-event"
+    assert "diagnostic" in error
+
+
+def test_codex_guard_failure_not_retried_or_classified_as_timeout(tmp_path):
+    module = _load_runner()
+    program = "import sys;print('NO_CREDIT_BLOCKED',file=sys.stderr);sys.exit(78)"
+    code, error, outcome = module.execute_bounded([sys.executable, "-c", program], "", tmp_path / "events", tmp_path / "errors", 1)
+    assert (code, outcome) == (78, "no_credit_guard_blocked")
+    assert "NO_CREDIT_BLOCKED" in error
+
+
+def test_micro_task_defaults_and_explicit_bounds(tmp_path):
+    import importlib.util
+    path = SCRIPT.with_name("orchestra_task_entrypoint.py")
+    spec = importlib.util.spec_from_file_location("micro_entrypoint", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.micro_timeout([]) == 420
+    for role in ("architect", "qa", "reviewer"):
+        assert module.micro_timeout(["--role", role]) == 300
+    assert module.micro_timeout(["--role", "developer", "--timeout=120"]) == 120
+    for timeout in (0, 59, 601, 900):
+        try:
+            module.micro_timeout(["--timeout", str(timeout)])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Unbounded task accepted")

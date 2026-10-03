@@ -12,6 +12,7 @@ import fcntl
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -39,6 +40,69 @@ def verify_chatgpt_auth(codex: str) -> None:
     status = (result.stdout + "\n" + result.stderr).lower()
     if result.returncode != 0 or "chatgpt" not in status or "api key" in status:
         raise RuntimeError("Codex must be signed in with ChatGPT (run codex login --device-auth)")
+
+
+
+def execute_bounded(command, prompt, events, stderr_path, timeout):
+    """Bound the whole POSIX process tree, not only a billing-guard wrapper.
+
+    File-backed logs prevent pipe deadlocks and survive interruption. Never retry
+    inference here: timeout, quota exhaustion and incomplete output are distinct.
+    """
+    def stop_group(process, sig):
+        try:
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            pass
+
+    with events.open("x", encoding="utf-8") as stream, stderr_path.open("x", encoding="utf-8") as errors:
+        os.chmod(events, 0o600)
+        os.chmod(stderr_path, 0o600)
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=stream,
+                                   stderr=errors, text=True, start_new_session=True)
+        try:
+            process.communicate(prompt, timeout=timeout)
+            code, outcome = process.returncode, "completed" if process.returncode == 0 else "execution_failed"
+        except subprocess.TimeoutExpired:
+            stop_group(process, signal.SIGTERM)
+            try:
+                process.communicate(timeout=3)
+            except subprocess.TimeoutExpired:
+                pass
+            # A wrapper may exit while descendants ignore TERM. Always reap
+            # the group, even when its leader has already returned.
+            stop_group(process, signal.SIGKILL)
+            process.communicate()
+            code, outcome = 124, "local_timeout"
+        except BaseException:
+            stop_group(process, signal.SIGKILL)
+            process.wait()
+            raise
+    with stderr_path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        handle.seek(max(0, handle.tell() - 4000))
+        error = handle.read().decode("utf-8", errors="replace")
+    if outcome == "local_timeout":
+        error = f"Local task deadline ({timeout}s); complete process group stopped. " + error
+    if code == 78:
+        outcome = "no_credit_guard_blocked"
+    return code, error, outcome
+
+
+def has_completed_turn(events):
+    completed = False
+    for line in events.read_text(encoding="utf-8").splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") in ("turn.failed", "error"):
+            return False
+        if event.get("type") == "turn.completed":
+            completed = True
+    return completed
 
 
 def run(args: argparse.Namespace) -> int:
@@ -84,22 +148,29 @@ def run(args: argparse.Namespace) -> int:
         "--cd", str(worktree), "--output-last-message", str(final), "-",
     ]
     started = datetime.now(timezone.utc).isoformat()
-    # Codex may return nonzero after making changes. Preserve the worktree and
-    # evidence for review; never retry inference or switch to a paid provider.
-    with events.open("x", encoding="utf-8") as stream:
-        os.chmod(events, 0o600)
-        try:
-            completed = subprocess.run(command, input=prompt, text=True, stdout=stream,
-                                       stderr=subprocess.PIPE, timeout=args.timeout)
-            exit_code, error = completed.returncode, completed.stderr[-4000:]
-        except subprocess.TimeoutExpired as exc:
-            exit_code, error = 124, f"Codex timed out after {args.timeout}s: {exc}"
+    # Persist a running checkpoint before invoking inference. An interruption
+    # cannot be confused with a completed review or implementation.
+    summary.write_text(json.dumps({"task_id": args.task_id, "role": args.role,
+        "model": args.model or DEFAULT_MODELS[args.role], "base_commit": base,
+        "worktree": str(worktree), "started_at": started, "outcome": "running"},
+        ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.chmod(summary, 0o600)
+    stderr_path = task_output / "stderr.log"
+    exit_code, error, outcome = execute_bounded(command, prompt, events, stderr_path, args.timeout)
+    final_received = final.is_file() and bool(final.read_text(encoding="utf-8").strip())
+    turn_completed = has_completed_turn(events)
+    if exit_code == 0 and not (final_received and turn_completed):
+        exit_code, outcome = 65, "incomplete_result"
+        error = "Process returned zero without a complete turn and nonempty final report. " + error
     payload = {
         "task_id": args.task_id, "role": args.role, "model": args.model or DEFAULT_MODELS[args.role],
         "repository": str(repository), "worktree": str(worktree), "branch": branch,
         "base_commit": base, "started_at": started,
         "finished_at": datetime.now(timezone.utc).isoformat(), "exit_code": exit_code,
         "error": error, "events": str(events), "final": str(final),
+        "outcome": outcome, "timeout_seconds": args.timeout,
+        "final_received": final_received, "turn_completed": turn_completed,
+        "stderr": str(stderr_path),
     }
     summary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.chmod(summary, 0o600)

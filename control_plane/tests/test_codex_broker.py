@@ -186,7 +186,9 @@ def test_preflight_rejects_revoked_repository_without_paid_fallback(broker_clien
     assert client.post("/api/codex-worker/claim", headers=headers).status_code == 200
     with SessionLocal() as db:
         run = db.get(ExecutionRun, run_id)
-        db.get(Repository, run.repository_id).enabled = False
+        repository = db.get(Repository, run.repository_id)
+        repository.status = "unavailable"
+        repository.enabled = False
         db.commit()
     assert client.post(f"/api/codex-worker/{run_id}/preflight", headers=headers,
                        json=preflight_result()).status_code == 409

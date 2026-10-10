@@ -165,7 +165,7 @@ def test_worker_never_starts_inference_before_preflight_ack(tmp_path, monkeypatc
             return {"status": "running", "stage": "architect_running"}
 
     monkeypatch.setattr(worker, "Broker", FakeBroker)
-    monkeypatch.setattr(worker.os, "geteuid", lambda: 10001)
+    monkeypatch.setattr(worker.os, "geteuid", lambda: tmp_path.stat().st_uid)
     monkeypatch.setattr(worker.os, "umask", lambda _mask: 0o077)
     monkeypatch.setattr(sys, "argv", ["worker", "--broker", "http://127.0.0.1:8000",
                                         "--token-file", str(tmp_path / "token"),

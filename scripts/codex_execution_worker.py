@@ -163,6 +163,17 @@ def heartbeat(broker: Broker, claim: dict) -> None:
     if not isinstance(beat, dict) or beat.get("ok") is not True:
         raise RuntimeError("Lease heartbeat rejected")
 
+def acknowledge_preflight(broker: Broker, claim: dict) -> None:
+    binding = WorkspaceBinding(**claim["workspace"])
+    verify_runtime_workspace(binding)
+    response = broker.post(f"/api/codex-worker/{claim['execution_id']}/preflight", {
+        "generation": claim["generation"], "base_commit": binding.base_commit,
+        "base_tree": binding.initial_tree,
+        "workspace_preflight_digest": binding.preflight_digest,
+    })
+    if response != {"status": "running", "stage": "architect_running"}:
+        raise RuntimeError("Runtime preflight acknowledgement rejected")
+
 
 def run_phase(broker: Broker, claim: dict, role: str, output: Path, codex: str) -> dict:
     binding = WorkspaceBinding(**claim["workspace"])
@@ -290,6 +301,15 @@ def main():
     while True:
         claim = broker.post("/api/codex-worker/claim")
         if claim:
+            # A failed G2 check or rejected acknowledgement leaves the pending lease
+            # fenced. Its expiry fails the run; no inference or automatic retry occurs.
+            try:
+                acknowledge_preflight(broker, claim)
+            except (RuntimeError, OSError, ValueError, HTTPError):
+                if args.once:
+                    break
+                time.sleep(5)
+                continue
             for role in ("architect", "qa", "reviewer"):
                 try:
                     result = run_phase(broker, claim, role, args.output, args.codex)

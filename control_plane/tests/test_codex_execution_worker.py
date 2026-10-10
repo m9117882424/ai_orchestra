@@ -143,3 +143,49 @@ def test_worker_disables_dumpability_before_model():
               "disable_dumpable();assert ctypes.CDLL(None).prctl(3,0,0,0,0)==0")
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+def test_worker_never_starts_inference_before_preflight_ack(tmp_path, monkeypatch):
+    claim = {"execution_id": "run-1", "generation": 1,
+             "workspace": {"execution_id": "run-1", "task_id": "task-1",
+                           "repository_id": "repo-1", "workspace_id": "workspace-1",
+                           "base_commit": "a" * 40, "branch_name": "main",
+                           "workspace_path": "/workspace/worktrees/managed/workspace-1",
+                           "initial_tree": "b" * 40, "tracked_entries": 1,
+                           "preflight_digest": "c" * 64}}
+    calls = []
+
+    class FakeBroker:
+        def __init__(self, *_args):
+            pass
+
+        def post(self, path, data=None):
+            calls.append((path, data))
+            if path.endswith("/claim"):
+                return claim
+            return {"status": "running", "stage": "architect_running"}
+
+    monkeypatch.setattr(worker, "Broker", FakeBroker)
+    monkeypatch.setattr(worker.os, "geteuid", lambda: 10001)
+    monkeypatch.setattr(worker.os, "umask", lambda _mask: 0o077)
+    monkeypatch.setattr(sys, "argv", ["worker", "--broker", "http://127.0.0.1:8000",
+                                        "--token-file", str(tmp_path / "token"),
+                                        "--output", str(tmp_path / "out"), "--once"])
+    monkeypatch.setattr(worker, "run_phase", lambda *_args: pytest.fail("inference before acknowledgement"))
+
+    def failed_verification(_binding):
+        raise RuntimeError("G2 verification failed")
+
+    monkeypatch.setattr(worker, "verify_runtime_workspace", failed_verification)
+    worker.main()
+    assert [path for path, _ in calls] == ["/api/codex-worker/claim"]
+
+    monkeypatch.setattr(worker, "verify_runtime_workspace", lambda _binding: calls.append(("verified", None)))
+    monkeypatch.setattr(FakeBroker, "post", lambda self, path, data=None:
+                        calls.append((path, data)) or
+                        (claim if path.endswith("/claim") else {"status": "queued", "stage": "codex_preflight_pending"}))
+    calls.clear()
+    worker.main()
+    assert [path for path, _ in calls] == ["/api/codex-worker/claim", "verified",
+                                         "/api/codex-worker/run-1/preflight"]
+    assert calls[-1][1] == {"generation": 1, "base_commit": "a" * 40,
+                            "base_tree": "b" * 40, "workspace_preflight_digest": "c" * 64}

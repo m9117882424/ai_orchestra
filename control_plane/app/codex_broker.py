@@ -127,12 +127,17 @@ def terminal(db: Session, run: ExecutionRun, code: str, now: datetime, *, status
     materialize_terminal_result_package(db, run, now=now)
 
 
-def owned(db: Session, run_id: str, generation: int) -> ExecutionRun:
+def owned(db: Session, run_id: str, generation: int, *, pending: bool = False,
+          allow_pending: bool = False) -> ExecutionRun:
     run = db.scalar(select(ExecutionRun).where(ExecutionRun.id == run_id).with_for_update())
     now = now_utc()
-    if not run or run.backend != "codex-subscription" or run.status != "running" or run.lease_generation != generation or run.lease_owner != "codex-worker":
+    is_pending = bool(run and run.status == "queued" and run.stage == "codex_preflight_pending")
+    valid_state = is_pending if pending else bool(run and run.status == "running") or (allow_pending and is_pending)
+    if (not run or run.backend != "codex-subscription" or not valid_state
+            or run.lease_generation != generation or run.lease_owner != "codex-worker"):
         raise HTTPException(409, "Lease lost")
-    if run.cancel_requested_at or as_utc(run.deadline_at) <= now or as_utc(run.lease_expires_at) <= now:
+    if (run.cancel_requested_at or not run.deadline_at or as_utc(run.deadline_at) <= now
+            or not run.lease_expires_at or as_utc(run.lease_expires_at) <= now):
         terminal(db, run, "codex_cancelled" if run.cancel_requested_at else "codex_lease_expired",
                  now, status="cancelled" if run.cancel_requested_at else "failed")
         db.commit()
@@ -143,9 +148,11 @@ def owned(db: Session, run_id: str, generation: int) -> ExecutionRun:
 @router.post("/claim")
 def claim(db: Db, _: Worker):
     now = now_utc()
-    # Never recover a running inference. An expired worker is fenced and failed.
+    # Never recover an expired claim: a worker may still be verifying or inferring.
     expired = list(db.scalars(select(ExecutionRun).where(
-        ExecutionRun.backend == "codex-subscription", ExecutionRun.status == "running",
+        ExecutionRun.backend == "codex-subscription",
+        ((ExecutionRun.status == "running") |
+         ((ExecutionRun.status == "queued") & (ExecutionRun.stage == "codex_preflight_pending"))),
         ExecutionRun.lease_expires_at <= now,
     ).with_for_update(skip_locked=True)))
     for run in expired:
@@ -153,6 +160,7 @@ def claim(db: Db, _: Worker):
                  now, status="cancelled" if run.cancel_requested_at else "failed")
     queued = db.scalar(select(ExecutionRun).where(
         ExecutionRun.backend == "codex-subscription", ExecutionRun.status == "queued",
+        ExecutionRun.stage == "dispatch_pending", ExecutionRun.lease_owner.is_(None),
     ).order_by(ExecutionRun.created_at).with_for_update(skip_locked=True))
     if queued is None:
         db.commit()
@@ -181,8 +189,7 @@ def claim(db: Db, _: Worker):
     queued.lease_owner = "codex-worker"
     queued.lease_expires_at = now + timedelta(seconds=120)
     queued.heartbeat_at = now
-    queued.status = "running"
-    queued.stage = "architect_running"
+    queued.stage = "codex_preflight_pending"
     queued.updated_at = now
     write_audit(db, actor="codex-worker", action="execution.claimed", entity_type="execution", entity_id=queued.id, details={"generation": queued.lease_generation, "backend": queued.backend})
     response = {"execution_id": queued.id, "generation": queued.lease_generation,
@@ -196,9 +203,49 @@ class LeaseRequest(BaseModel):
     generation: int = Field(ge=1)
 
 
+class PreflightRequest(LeaseRequest):
+    model_config = ConfigDict(extra="forbid")
+    base_commit: str
+    base_tree: str
+    workspace_preflight_digest: str
+
+
+@router.post("/{run_id}/preflight")
+def preflight(run_id: str, body: PreflightRequest, db: Db, _: Worker):
+    run = owned(db, run_id, body.generation, pending=True)
+    if (body.base_commit != run.base_commit or body.base_tree != run.workspace_tree
+            or body.workspace_preflight_digest != run.workspace_preflight_digest):
+        raise HTTPException(409, "Immutable workspace binding mismatch")
+    # Hold the source rows stable through the verified transition.
+    db.scalar(select(TaskWorkspace).where(TaskWorkspace.id == run.workspace_id).with_for_update())
+    db.scalar(select(Repository).where(Repository.id == run.repository_id).with_for_update())
+    try:
+        workspace = binding(db, run)
+    except (WorkspacePreflightError, OSError):
+        raise HTTPException(409, "Workspace binding changed") from None
+    if (workspace.base_commit != body.base_commit or workspace.initial_tree != body.base_tree
+            or workspace.preflight_digest != body.workspace_preflight_digest
+            or not repository_trusted(db, run)
+            or run.workspace_runtime_preflight_digest is not None
+            or run.workspace_runtime_verified_at is not None):
+        raise HTTPException(409, "Workspace trust or binding changed")
+    now = now_utc()
+    run.workspace_runtime_preflight_digest = body.workspace_preflight_digest
+    run.workspace_runtime_verified_at = now
+    run.status = "running"
+    run.stage = "architect_running"
+    run.heartbeat_at = now
+    run.lease_expires_at = now + timedelta(seconds=120)
+    run.updated_at = now
+    write_audit(db, actor="codex-worker", action="execution.runtime_preflight_verified",
+                entity_type="execution", entity_id=run.id, details={"generation": body.generation})
+    db.commit()
+    return {"status": run.status, "stage": run.stage}
+
+
 @router.post("/{run_id}/heartbeat")
 def heartbeat(run_id: str, body: LeaseRequest, db: Db, _: Worker):
-    run = owned(db, run_id, body.generation)
+    run = owned(db, run_id, body.generation, allow_pending=True)
     now = now_utc()
     run.heartbeat_at = now
     run.lease_expires_at = now + timedelta(seconds=120)
@@ -253,9 +300,6 @@ def phase(run_id: str, body: PhaseResult, db: Db, _: Worker):
         terminal(db, run, "repository_trust_revoked", now)
         db.commit()
         return {"status": "failed"}
-    if body.outcome == "completed":
-        run.workspace_runtime_preflight_digest = body.workspace_preflight_digest
-        run.workspace_runtime_verified_at = now
     child = ExecutionChildRun(
         execution_id=run.id, source="codex-subscription",
         source_run_id=f"{run.id}:{body.role}", role=body.role,

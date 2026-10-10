@@ -58,6 +58,7 @@ _REVISION_ABSENT_TABLES = {
     ),
 }
 _REVISION_EXCLUDED_INDEXES = {
+    PREVIOUS_HEAD_REVISION: frozenset(),
     LEGACY_BASELINE_REVISION: frozenset(
         {
             ("execution_runs", ("lease_expires_at",), False),

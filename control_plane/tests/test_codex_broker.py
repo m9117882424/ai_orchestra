@@ -64,6 +64,11 @@ def result(generation=1, role="architect", outcome="completed", text="Independen
             "workspace_preflight_digest": "c" * 64}
 
 
+def preflight_result(generation=1):
+    return {"generation": generation, "base_commit": "a" * 40,
+            "base_tree": "b" * 40, "workspace_preflight_digest": "c" * 64}
+
+
 def test_claim_requires_scoped_token(broker_client):
     client, headers, _ = broker_client
     assert client.post("/api/codex-worker/claim").status_code == 401
@@ -101,8 +106,19 @@ def test_claim_is_single_use_and_fenced(broker_client):
     assert client.post("/api/codex-worker/claim", headers=headers).json() is None
     with SessionLocal() as db:
         run = db.get(ExecutionRun, run_id)
-        assert run.stage == "architect_running"
+        assert run.status == "queued" and run.stage == "codex_preflight_pending"
         assert run.workspace_runtime_verified_at is None
+        assert run.workspace_runtime_preflight_digest is None
+    assert client.post(f"/api/codex-worker/{run_id}/phase", headers=headers,
+                       json=result()).status_code == 409
+    response = client.post(f"/api/codex-worker/{run_id}/preflight", headers=headers,
+                           json=preflight_result())
+    assert response.status_code == 200 and response.json()["stage"] == "architect_running"
+    assert client.post(f"/api/codex-worker/{run_id}/preflight", headers=headers,
+                       json=preflight_result()).status_code == 409
+    with SessionLocal() as db:
+        run = db.get(ExecutionRun, run_id)
+        assert run.status == "running" and run.workspace_runtime_verified_at is not None
 
 
 def test_control_plane_claim_and_phase_never_touch_git_or_workspace(broker_client, monkeypatch):
@@ -113,10 +129,71 @@ def test_control_plane_claim_and_phase_never_touch_git_or_workspace(broker_clien
     monkeypatch.setattr("control_plane.app.workspace_protocol.verify_runtime_workspace", forbidden)
     monkeypatch.setattr("subprocess.run", forbidden)
     assert client.post("/api/codex-worker/claim", headers=headers).json()["execution_id"] == run_id
+    assert client.post(f"/api/codex-worker/{run_id}/preflight", headers=headers,
+                       json=preflight_result()).status_code == 200
     assert client.post(f"/api/codex-worker/{run_id}/phase", headers=headers,
                        json=result()).json()["stage"] == "qa_running"
     with SessionLocal() as db:
         assert db.get(ExecutionRun, run_id).workspace_runtime_preflight_digest == "c" * 64
+
+
+def test_preflight_rejects_stale_or_changed_binding(broker_client):
+    client, headers, _ = broker_client
+    run_id = seed()
+    assert client.post("/api/codex-worker/claim", headers=headers).status_code == 200
+    url = f"/api/codex-worker/{run_id}/preflight"
+    assert client.post(url, headers=headers, json=preflight_result(2)).status_code == 409
+    for field, value in (("base_commit", "f" * 40), ("base_tree", "f" * 40),
+                         ("workspace_preflight_digest", "f" * 64)):
+        payload = preflight_result()
+        payload[field] = value
+        assert client.post(url, headers=headers, json=payload).status_code == 409
+    payload = preflight_result()
+    payload["preflight_digest"] = "c" * 64
+    assert client.post(url, headers=headers, json=payload).status_code == 422
+    with SessionLocal() as db:
+        run = db.get(ExecutionRun, run_id)
+        db.get(TaskWorkspace, run.workspace_id).initial_tree = "f" * 40
+        db.commit()
+    assert client.post(url, headers=headers, json=preflight_result()).status_code == 409
+    with SessionLocal() as db:
+        run = db.get(ExecutionRun, run_id)
+        assert run.status == "queued" and run.workspace_runtime_verified_at is None
+
+
+def test_pending_heartbeat_and_expiry_are_fenced(broker_client):
+    client, headers, _ = broker_client
+    run_id = seed()
+    assert client.post("/api/codex-worker/claim", headers=headers).status_code == 200
+    heartbeat = f"/api/codex-worker/{run_id}/heartbeat"
+    assert client.post(heartbeat, headers=headers, json={"generation": 2}).status_code == 409
+    assert client.post(heartbeat, headers=headers, json={"generation": 1}).json()["stage"] == "codex_preflight_pending"
+    with SessionLocal() as db:
+        db.get(ExecutionRun, run_id).lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        db.commit()
+    assert client.post(f"/api/codex-worker/{run_id}/preflight", headers=headers,
+                       json=preflight_result()).status_code == 409
+    assert client.post("/api/codex-worker/claim", headers=headers).json() is None
+    with SessionLocal() as db:
+        run = db.get(ExecutionRun, run_id)
+        assert run.status == "failed" and run.lease_generation == 2
+        assert run.workspace_runtime_verified_at is None
+
+
+def test_preflight_rejects_revoked_repository_without_paid_fallback(broker_client):
+    client, headers, _ = broker_client
+    run_id = seed()
+    assert client.post("/api/codex-worker/claim", headers=headers).status_code == 200
+    with SessionLocal() as db:
+        run = db.get(ExecutionRun, run_id)
+        db.get(Repository, run.repository_id).enabled = False
+        db.commit()
+    assert client.post(f"/api/codex-worker/{run_id}/preflight", headers=headers,
+                       json=preflight_result()).status_code == 409
+    with SessionLocal() as db:
+        run = db.get(ExecutionRun, run_id)
+        assert run.backend == "codex-subscription"
+        assert run.status == "queued" and run.workspace_runtime_verified_at is None
 
 
 def test_opencode_worker_never_claims_subscription(broker_client):

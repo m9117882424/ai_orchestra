@@ -83,7 +83,7 @@ print('STARTED')
 
 
 def test_declared_schema_head_is_stable():
-    assert head_revision() == "20260917_0011"
+    assert head_revision() == "20261010_0012"
 
 
 def test_fresh_database_is_created_by_alembic(tmp_path):
@@ -148,11 +148,12 @@ def test_fresh_database_is_created_by_alembic(tmp_path):
         }
 
     assert set(Base.metadata.tables).issubset(tables)
-    assert revision == "20260917_0011"
+    assert revision == "20261010_0012"
     assert session_column["nullable"] is True
     assert "deadline_at" in execution_columns
     assert "cancel_requested_at" in execution_columns
     assert {
+        "backend",
         "contract_version",
         "repository_id",
         "workspace_id",
@@ -166,6 +167,7 @@ def test_fresh_database_is_created_by_alembic(tmp_path):
     }.issubset(execution_columns)
     assert ("status", "deadline_at") in execution_indexes
     assert {
+        "ck_execution_runs_backend",
         "ck_execution_runs_contract_version",
         "ck_execution_runs_workspace_binding",
         "ck_execution_runs_workspace_preflight",
@@ -291,7 +293,7 @@ def test_matching_current_unversioned_database_is_verified_then_stamped(tmp_path
 
     with engine.connect() as connection:
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert revision == "20260917_0011"
+    assert revision == "20261010_0012"
 
 
 def test_unversioned_historical_baseline_is_verified_then_migrated(tmp_path):
@@ -336,7 +338,7 @@ def test_unversioned_historical_baseline_is_verified_then_migrated(tmp_path):
             if column["name"] == "opencode_session_id"
         )
 
-    assert revision == "20260917_0011"
+    assert revision == "20261010_0012"
     assert marker == "Legacy marker"
     assert {
         "lease_owner",
@@ -348,6 +350,41 @@ def test_unversioned_historical_baseline_is_verified_then_migrated(tmp_path):
     }.issubset(execution_columns)
     assert session_column["nullable"] is True
     assert "repositories" in inspect(engine).get_table_names()
+
+
+def test_unversioned_previous_head_is_verified_then_migrated_without_data_loss(tmp_path):
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'previous-head.db'}"
+    created = _run_alembic_upgrade(database_url, "20260917_0011")
+    assert created.returncode == 0, created.stderr
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(text("""
+            INSERT INTO audit_events (id, actor, action, entity_type, entity_id, details, created_at)
+            VALUES ('previous-head-marker', 'test', 'marker', 'test', 'previous-head-marker', '{}',
+                    '2026-09-17 00:00:00')
+        """))
+        connection.exec_driver_sql("DROP TABLE alembic_version")
+    migrated = _run_schema_cli(database_url, "migrate")
+    assert migrated.returncode == 0, migrated.stderr
+    assert "Historical baseline 20260917_0011 verified" in migrated.stdout
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "20261010_0012"
+        assert connection.execute(text("SELECT action FROM audit_events WHERE id = 'previous-head-marker'")).scalar_one() == "marker"
+        assert "backend" in {column["name"] for column in inspect(connection).get_columns("execution_runs")}
+
+
+def test_drifted_previous_head_is_not_stamped(tmp_path):
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'drifted-previous.db'}"
+    created = _run_alembic_upgrade(database_url, "20260917_0011")
+    assert created.returncode == 0, created.stderr
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DROP TABLE alembic_version")
+        connection.exec_driver_sql("DROP TABLE audit_events")
+    migrated = _run_schema_cli(database_url, "migrate")
+    assert migrated.returncode != 0
+    assert "refusing stamp" in migrated.stderr
+    assert "alembic_version" not in inspect(engine).get_table_names()
 
 
 def test_versioned_0002_database_upgrades_to_current_execution_schema(tmp_path):
@@ -378,7 +415,7 @@ def test_versioned_0002_database_upgrades_to_current_execution_schema(tmp_path):
         execution_columns = {
             column["name"] for column in inspect(connection).get_columns("execution_runs")
         }
-    assert revision == "20260917_0011"
+    assert revision == "20261010_0012"
     assert after["nullable"] is True
     assert "deadline_at" in execution_columns
     assert "cancel_requested_at" in execution_columns
@@ -440,7 +477,7 @@ def test_versioned_0003_backfills_only_active_execution_deadlines(tmp_path):
             ).all()
         )
 
-    assert revision == "20260917_0011"
+    assert revision == "20261010_0012"
     assert deadlines["queued-run"] is not None
     assert deadlines["completed-run"] is None
 
@@ -477,7 +514,7 @@ def test_versioned_0004_adds_registry_without_mutating_existing_data(tmp_path):
         ).scalar_one()
         tables = set(inspect(connection).get_table_names())
 
-    assert revision == "20260917_0011"
+    assert revision == "20261010_0012"
     assert marker == "marker"
     assert "repositories" in tables
 
@@ -531,7 +568,7 @@ def test_versioned_0005_registry_is_requeued_without_losing_policy(tmp_path):
             )
         ).one()
 
-    assert revision == "20260917_0011"
+    assert revision == "20261010_0012"
     assert tuple(row[:5]) == (
         "existing-repository",
         "github.com/example/existing",
@@ -608,7 +645,7 @@ def test_versioned_0006_preserves_legacy_execution_as_contract_v1(tmp_path):
             text("SELECT count(*) FROM task_workspaces")
         ).scalar_one()
 
-    assert revision == "20260917_0011"
+    assert revision == "20261010_0012"
     assert task_repository is None
     assert tuple(run) == (1, None, None, None, None, "queued", "dispatch_pending")
     assert workspace_count == 0

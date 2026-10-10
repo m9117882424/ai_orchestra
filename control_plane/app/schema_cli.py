@@ -10,6 +10,7 @@ from sqlalchemy import text
 from .database_engine import create_configured_engine
 from .schema import (
     LEGACY_BASELINE_REVISION,
+    PREVIOUS_HEAD_REVISION,
     alembic_config,
     head_revision,
     legacy_schema_diff,
@@ -79,23 +80,23 @@ def migrate_schema() -> None:
                 print(f"[OK] Existing schema verified and stamped at {expected}; data unchanged")
                 return
 
-            baseline_differences = schema_diff_for_revision(
-                connection,
-                LEGACY_BASELINE_REVISION,
-            )
-            if baseline_differences:
-                joined = "\n - ".join(baseline_differences)
+            historical = (PREVIOUS_HEAD_REVISION, LEGACY_BASELINE_REVISION)
+            matches = [revision for revision in historical
+                       if not schema_diff_for_revision(connection, revision)]
+            if not matches:
+                joined = "\n - ".join(current_shape_differences)
                 raise RuntimeError(
                     "Legacy database does not match current head or the declared historical baseline; "
                     "refusing stamp:\n - "
                     + joined
                 )
 
-            command.stamp(cfg, LEGACY_BASELINE_REVISION)
+            baseline = matches[0]
+            command.stamp(cfg, baseline)
             stamped = _current_revision(connection)
-            if stamped != LEGACY_BASELINE_REVISION:
+            if stamped != baseline:
                 raise RuntimeError(
-                    f"baseline stamp finished at {stamped}, expected {LEGACY_BASELINE_REVISION}"
+                    f"baseline stamp finished at {stamped}, expected {baseline}"
                 )
             command.upgrade(cfg, "head")
             final = _current_revision(connection)
@@ -106,7 +107,7 @@ def migrate_schema() -> None:
                 joined = "\n - ".join(differences)
                 raise RuntimeError("migration reached head but schema shape differs:\n - " + joined)
             print(
-                f"[OK] Historical baseline {LEGACY_BASELINE_REVISION} verified, "
+                f"[OK] Historical baseline {baseline} verified, "
                 f"migrated to {expected}; data unchanged"
             )
             return

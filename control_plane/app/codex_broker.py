@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -24,7 +24,7 @@ from .models import ExecutionChildRun, ExecutionEvidence, ExecutionRun, Reposito
 from .services import write_audit
 from .settings import get_settings
 from .workspace_manager import request_workspace_inspection
-from .workspace_protocol import WorkspaceBinding, WorkspacePreflightError
+from .workspace_protocol import WorkspaceBinding, WorkspacePreflightError, workspace_path_for
 
 router = APIRouter(prefix="/api/codex-worker", tags=["codex-worker"])
 ROLES = ("architect", "qa", "reviewer")
@@ -71,12 +71,19 @@ Worker = Annotated[None, Depends(require_worker)]
 def binding(db: Session, run: ExecutionRun) -> WorkspaceBinding:
     workspace = db.get(TaskWorkspace, run.workspace_id)
     if not workspace or workspace.status != "ready" or any((
+        run.contract_version != 2,
+        workspace.version < 1,
         workspace.task_id != run.task_id,
         workspace.repository_id != run.repository_id,
         workspace.base_commit != run.base_commit,
         workspace.opencode_path != run.workspace_path,
         workspace.initial_tree != run.workspace_tree,
         workspace.preflight_digest != run.workspace_preflight_digest,
+        not isinstance(workspace.preflight_digest, str) or HEX64.fullmatch(workspace.preflight_digest) is None,
+        not isinstance(workspace.initial_tree, str) or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", workspace.initial_tree) is None,
+        not isinstance(workspace.base_commit, str) or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", workspace.base_commit) is None,
+        not isinstance(workspace.tracked_entries, int) or workspace.tracked_entries < 0,
+        workspace.opencode_path != workspace_path_for(workspace.id),
         run.workspace_preflight_completed_at is None,
     )):
         raise WorkspacePreflightError("workspace_database_binding_mismatch")
@@ -172,8 +179,6 @@ def claim(db: Db, _: Worker):
     queued.lease_owner = "codex-worker"
     queued.lease_expires_at = now + timedelta(seconds=120)
     queued.heartbeat_at = now
-    queued.workspace_runtime_preflight_digest = workspace.preflight_digest
-    queued.workspace_runtime_verified_at = now
     queued.status = "running"
     queued.stage = "architect_running"
     queued.updated_at = now
@@ -201,10 +206,11 @@ def heartbeat(run_id: str, body: LeaseRequest, db: Db, _: Worker):
 
 
 class PhaseResult(LeaseRequest):
+    model_config = ConfigDict(extra="forbid")
     role: str
     outcome: str
     model: str = Field(max_length=120)
-    final_text: str = Field(max_length=20000)
+    final_text: str = Field(max_length=524288)
     final_sha256: str
     events_sha256: str
     artifact_path: str = Field(max_length=512)
@@ -225,6 +231,14 @@ def phase(run_id: str, body: PhaseResult, db: Db, _: Worker):
         raise HTTPException(409, "Immutable base mismatch")
     if body.workspace_preflight_digest != run.workspace_preflight_digest:
         raise HTTPException(409, "Workspace attestation mismatch")
+    try:
+        workspace = binding(db, run)
+    except WorkspacePreflightError:
+        raise HTTPException(409, "Workspace binding changed") from None
+    if body.workspace_preflight_digest != workspace.preflight_digest:
+        raise HTTPException(409, "Workspace attestation mismatch")
+    if len(body.final_text.encode("utf-8")) > 1048576:
+        raise HTTPException(422, "Final report too large")
     if not all(HEX64.fullmatch(value) for value in (body.final_sha256, body.events_sha256)):
         raise HTTPException(422, "Invalid evidence checksum")
     if body.outcome == "completed" and (not body.final_text.strip() or not body.model.strip()):
@@ -237,6 +251,9 @@ def phase(run_id: str, body: PhaseResult, db: Db, _: Worker):
         terminal(db, run, "repository_trust_revoked", now)
         db.commit()
         return {"status": "failed"}
+    if body.outcome == "completed":
+        run.workspace_runtime_preflight_digest = body.workspace_preflight_digest
+        run.workspace_runtime_verified_at = now
     child = ExecutionChildRun(
         execution_id=run.id, source="codex-subscription",
         source_run_id=f"{run.id}:{body.role}", role=body.role,

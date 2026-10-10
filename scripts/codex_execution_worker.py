@@ -120,7 +120,7 @@ def run_phase(broker: Broker, claim: dict, role: str, output: Path, codex: str) 
     except Exception:
         outcome = "read_only_violation"
     final_text = final.read_text(encoding="utf-8") if final.is_file() else ""
-    if len(final_text) > 20000:
+    if len(final_text) > 524288 or len(final_text.encode("utf-8")) > 1048576:
         outcome = "incomplete_result"
         final_text = ""
     # Missing final still gets an exact checksum for an empty artifact.

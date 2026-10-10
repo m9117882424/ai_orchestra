@@ -89,7 +89,23 @@ def test_claim_is_single_use_and_fenced(broker_client):
     assert first.json()["generation"] == 1
     assert client.post("/api/codex-worker/claim", headers=headers).json() is None
     with SessionLocal() as db:
-        assert db.get(ExecutionRun, run_id).stage == "architect_running"
+        run = db.get(ExecutionRun, run_id)
+        assert run.stage == "architect_running"
+        assert run.workspace_runtime_verified_at is None
+
+
+def test_control_plane_claim_and_phase_never_touch_git_or_workspace(broker_client, monkeypatch):
+    client, headers, _ = broker_client
+    run_id = seed()
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Control Plane accessed the workspace or Git")
+    monkeypatch.setattr("control_plane.app.workspace_protocol.verify_runtime_workspace", forbidden)
+    monkeypatch.setattr("subprocess.run", forbidden)
+    assert client.post("/api/codex-worker/claim", headers=headers).json()["execution_id"] == run_id
+    assert client.post(f"/api/codex-worker/{run_id}/phase", headers=headers,
+                       json=result()).json()["stage"] == "qa_running"
+    with SessionLocal() as db:
+        assert db.get(ExecutionRun, run_id).workspace_runtime_preflight_digest == "c" * 64
 
 
 def test_opencode_worker_never_claims_subscription(broker_client):
@@ -102,7 +118,7 @@ def test_opencode_worker_never_claims_subscription(broker_client):
 def test_stale_generation_rejected(broker_client):
     client, headers, _ = broker_client
     run_id = seed(status="running")
-    response = client.post(f"/api/codex-worker/{run_id}/heartbeat", headers=headers, json={"generation": 0})
+    response = client.post(f"/api/codex-worker/{run_id}/heartbeat", headers=headers, json={"generation": 2})
     assert response.status_code == 409
 
 
@@ -188,12 +204,42 @@ def test_workspace_attestation_mismatch_rejected(broker_client):
     assert response.status_code == 409
 
 
+def test_phase_rejects_extra_digest_alias_and_changed_database_binding(broker_client):
+    client, headers, _ = broker_client
+    run_id = seed(status="running")
+    url = f"/api/codex-worker/{run_id}/phase"
+    payload = result()
+    missing = result()
+    del missing["workspace_preflight_digest"]
+    assert client.post(url, headers=headers, json=missing).status_code == 422
+    payload["preflight_digest"] = "f" * 64
+    assert client.post(url, headers=headers, json=payload).status_code == 422
+    with SessionLocal() as db:
+        run = db.get(ExecutionRun, run_id)
+        db.get(TaskWorkspace, run.workspace_id).preflight_digest = "f" * 64
+        db.commit()
+    assert client.post(url, headers=headers, json=result()).status_code == 409
+    with SessionLocal() as db:
+        assert db.query(ExecutionChildRun).filter_by(execution_id=run_id).count() == 0
+
+
+def test_long_unicode_report_and_duplicate_role(broker_client):
+    client, headers, _ = broker_client
+    run_id = seed(status="running")
+    url = f"/api/codex-worker/{run_id}/phase"
+    response = client.post(url, headers=headers, json=result(text="Ж" * 25000))
+    assert response.status_code == 200 and response.json()["stage"] == "qa_running"
+    assert client.post(url, headers=headers, json=result()).status_code == 409
+
+
 def test_repository_revocation_blocks_claim(broker_client):
     client, headers, _ = broker_client
     run_id = seed()
     with SessionLocal() as db:
         run = db.get(ExecutionRun, run_id)
-        db.get(Repository, run.repository_id).enabled = False
+        repository = db.get(Repository, run.repository_id)
+        repository.status = "unavailable"
+        repository.enabled = False
         db.commit()
     assert client.post("/api/codex-worker/claim", headers=headers).json() is None
     with SessionLocal() as db:

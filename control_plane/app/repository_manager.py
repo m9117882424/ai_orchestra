@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterator
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from sqlalchemy import or_, select
@@ -101,7 +102,28 @@ class GitCredential:
     password: str
 
 
-def load_auth_profiles(raw: str | None = None) -> dict[str, GitCredential]:
+@dataclass(frozen=True)
+class GitSSHCredential:
+    """A trusted GitHub SSH deploy key, with no private key material in the registry."""
+
+    host: str
+    identity_file: str
+    known_hosts_file: str
+
+
+GitAuthCredential = GitCredential | GitSSHCredential
+SSH_SECRET_PATH = re.compile(r"/run/secrets/[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+
+
+def _validate_ssh_secret_path(value: object) -> str:
+    if not isinstance(value, str) or not SSH_SECRET_PATH.fullmatch(value):
+        raise RuntimeError("SSH credential files must be direct /run/secrets/ mounts")
+    if Path(value).name in {".", ".."}:
+        raise RuntimeError("SSH credential path invalid")
+    return value
+
+
+def load_auth_profiles(raw: str | None = None) -> dict[str, GitAuthCredential]:
     payload = raw if raw is not None else os.getenv("REPO_MANAGER_AUTH_PROFILES_JSON", "{}")
     if len(payload) > 65536:
         raise RuntimeError("REPO_MANAGER_AUTH_PROFILES_JSON is too large")
@@ -112,7 +134,7 @@ def load_auth_profiles(raw: str | None = None) -> dict[str, GitCredential]:
     if not isinstance(decoded, dict):
         raise RuntimeError("REPO_MANAGER_AUTH_PROFILES_JSON must be a JSON object")
 
-    profiles: dict[str, GitCredential] = {}
+    profiles: dict[str, GitAuthCredential] = {}
     for raw_name, raw_profile in decoded.items():
         if not isinstance(raw_name, str):
             raise RuntimeError("Repository auth profile names must be strings")
@@ -122,6 +144,22 @@ def load_auth_profiles(raw: str | None = None) -> dict[str, GitCredential]:
             raise RuntimeError("Repository auth profile name is invalid") from exc
         if name != raw_name:
             raise RuntimeError("Repository auth profile names must already be canonical")
+        if isinstance(raw_profile, dict) and raw_profile.get("transport") == "ssh":
+            if set(raw_profile) != {"host", "transport", "identity_file", "known_hosts_file"}:
+                raise RuntimeError("SSH auth profile has invalid fields")
+            host_value = raw_profile["host"]
+            try:
+                host = normalize_repository_host(host_value)
+            except (RepositoryPolicyError, TypeError) as exc:
+                raise RuntimeError("SSH auth profile host is invalid") from exc
+            if host != "github.com" or host != host_value:
+                raise RuntimeError("SSH auth currently supports only canonical github.com")
+            identity_file = _validate_ssh_secret_path(raw_profile["identity_file"])
+            known_hosts_file = _validate_ssh_secret_path(raw_profile["known_hosts_file"])
+            if identity_file == known_hosts_file:
+                raise RuntimeError("SSH key and known_hosts must be different files")
+            profiles[name] = GitSSHCredential(host, identity_file, known_hosts_file)
+            continue
         if not isinstance(raw_profile, dict) or set(raw_profile) != {
             "host",
             "username",
@@ -582,9 +620,10 @@ class GitRepositorySynchronizer:
         self.runner = runner or GitCommandRunner()
         self.liveness_callback = liveness_callback or (lambda: None)
         self.askpass_path = Path(__file__).with_name("repo_manager_askpass.py")
+        self.ssh_wrapper_path = Path(__file__).with_name("repo_manager_ssh.py")
         self.git_wrapper_path = Path(__file__).with_name("repo_manager_git_wrapper.sh")
 
-    def _credential_for(self, lease: RepositorySyncLease) -> GitCredential | None:
+    def _credential_for(self, lease: RepositorySyncLease) -> GitAuthCredential | None:
         if lease.auth_profile_ref is None:
             return None
         credential = self.auth_profiles.get(lease.auth_profile_ref)
@@ -596,9 +635,10 @@ class GitRepositorySynchronizer:
 
     def _environment(
         self,
-        credential: GitCredential | None,
+        credential: GitAuthCredential | None,
         *,
         max_file_bytes: int,
+        pinned_address: str | None = None,
     ) -> dict[str, str]:
         environment = {
             "PATH": "/usr/local/bin:/usr/bin:/bin",
@@ -614,13 +654,22 @@ class GitRepositorySynchronizer:
                 max(2048, max_file_bytes // 512)
             ),
         }
-        if credential is not None:
+        if isinstance(credential, GitCredential):
             environment["REPO_MANAGER_GIT_HOST"] = credential.host
             environment["REPO_MANAGER_GIT_USERNAME"] = credential.username
             environment["REPO_MANAGER_GIT_PASSWORD"] = credential.password
+        elif isinstance(credential, GitSSHCredential):
+            if not pinned_address:
+                raise RepositorySyncError("ssh_address_not_pinned", terminal=True)
+            environment["GIT_ALLOW_PROTOCOL"] = "ssh"
+            environment["GIT_SSH"] = str(self.ssh_wrapper_path)
+            environment["REPO_MANAGER_SSH_HOST"] = credential.host
+            environment["REPO_MANAGER_SSH_PINNED_IP"] = pinned_address
+            environment["REPO_MANAGER_SSH_KEY_FILE"] = credential.identity_file
+            environment["REPO_MANAGER_SSH_KNOWN_HOSTS_FILE"] = credential.known_hosts_file
         return {key: value for key, value in environment.items() if key not in PROXY_ENV_NAMES}
 
-    def _git_prefix(self, host: str, addresses: tuple[str, ...]) -> list[str]:
+    def _git_prefix(self, host: str, addresses: tuple[str, ...], *, ssh: bool = False) -> list[str]:
         arguments = [
             str(self.git_wrapper_path),
             "-c",
@@ -648,8 +697,6 @@ class GitRepositorySynchronizer:
             "-c",
             "protocol.allow=never",
             "-c",
-            "protocol.https.allow=always",
-            "-c",
             "fetch.fsckObjects=true",
             "-c",
             "transfer.fsckObjects=true",
@@ -660,12 +707,16 @@ class GitRepositorySynchronizer:
             "-c",
             "core.hooksPath=/dev/null",
         ]
-        pinned_addresses = ",".join(
-            f"[{address}]" if ":" in address else address for address in addresses
-        )
-        arguments.extend(
-            ["-c", f"http.curloptResolve={host}:443:{pinned_addresses}"]
-        )
+        if ssh:
+            arguments.extend(["-c", "protocol.ssh.allow=always"])
+        else:
+            pinned_addresses = ",".join(
+                f"[{address}]" if ":" in address else address for address in addresses
+            )
+            arguments.extend([
+                "-c", "protocol.https.allow=always",
+                "-c", f"http.curloptResolve={host}:443:{pinned_addresses}",
+            ])
         return arguments
 
     def _run(
@@ -880,16 +931,25 @@ class GitRepositorySynchronizer:
             self._verify_directory_size(mirror_path, heartbeat)
             self._cleanup_stale_git_locks(mirror_path)
         max_file_bytes = self._max_file_bytes_for_current_capacity()
+        is_ssh = isinstance(credential, GitSSHCredential)
         network_environment = self._environment(
             credential,
             max_file_bytes=max_file_bytes,
+            pinned_address=addresses[0] if is_ssh else None,
         )
         local_environment = self._environment(None, max_file_bytes=max_file_bytes)
-        prefix = self._git_prefix(lease.remote_host, addresses)
+        prefix = self._git_prefix(lease.remote_host, addresses, ssh=is_ssh)
+        # Registry and bare-mirror origin retain the canonical HTTPS identity.
+        # Only the two network operations use an SSH transport when configured.
+        remote_path = urlsplit(lease.remote_url).path
+        network_remote = (
+            f"git@{lease.remote_host}:{remote_path.lstrip('/')}" if is_ssh
+            else lease.remote_url
+        )
         remote_head = self._parse_remote_head(
             self._run(
                 prefix,
-                ["ls-remote", "--symref", lease.remote_url, "HEAD"],
+                ["ls-remote", "--symref", network_remote, "HEAD"],
                 network_environment,
                 heartbeat,
                 failure_code="git_remote_unavailable",
@@ -943,7 +1003,7 @@ class GitRepositorySynchronizer:
                 "--force",
                 "--prune",
                 "--no-tags",
-                "origin",
+                network_remote if is_ssh else "origin",
                 "+refs/heads/*:refs/remotes/origin/*",
             ]
             self._run(

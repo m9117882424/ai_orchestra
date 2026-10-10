@@ -1,0 +1,13 @@
+# Install as /opt/ai_orchestra/docker-compose.override.yml after reviewing paths.
+# Only Repo Manager can see the deploy key. This file contains NO key bytes.
+services:
+  repo-manager:
+    volumes:
+      - type: bind
+        source: /etc/ai-orchestra/repo-keys/corporate_taxi_ed25519
+        target: /run/secrets/taxi-deploy-key
+        read_only: true
+      - type: bind
+        source: /etc/ai-orchestra/repo-keys/github_known_hosts
+        target: /run/secrets/github-known-hosts
+        read_only: true

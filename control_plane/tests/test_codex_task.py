@@ -89,7 +89,7 @@ def test_codex_task_rejects_api_key_login_mode(tmp_path):
 def test_codex_login_status_timeout_is_bounded(tmp_path):
     module = _load_runner()
     fake = tmp_path / "codex"
-    fake.write_text("#!/usr/bin/env python3\nimport time\ntime.sleep(60)\n")
+    fake.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(60)\n")
     fake.chmod(0o755)
     import pytest
     with pytest.raises(RuntimeError, match="timed out"):

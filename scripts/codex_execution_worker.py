@@ -19,6 +19,7 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 

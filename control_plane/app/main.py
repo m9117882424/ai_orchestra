@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
+from pydantic import BaseModel, ConfigDict
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
@@ -12,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .auth import require_control_request, require_manager
+from .codex_broker import router as codex_worker_router
 from .db import get_db
 from .models import (
     Approval,
@@ -107,6 +109,7 @@ app = FastAPI(
     redoc_url=None,
     lifespan=lifespan,
 )
+app.include_router(codex_worker_router)
 
 base_dir = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(base_dir / "templates"))
@@ -1226,14 +1229,25 @@ def request_workspace_cleanup(
     return workspace
 
 
+class ExecutionStartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    backend: str = "codex-subscription"
+
+
 @app.post("/api/tasks/{task_id}/execute", response_model=ExecutionRead, status_code=status.HTTP_201_CREATED)
 def start_execution(
     task_id: str,
     db: DbSession,
     manager: Manager,
     _: Mutation,
+    payload: ExecutionStartRequest | None = None,
 ) -> ExecutionRun:
     """Persist a repository-bound intent; no inference occurs before preflight."""
+    payload = payload or ExecutionStartRequest()
+    if payload.backend not in {"codex-subscription", "opencode"}:
+        raise HTTPException(status_code=422, detail="Unsupported execution backend")
+    if payload.backend == "opencode" and not get_settings().allow_paid_opencode_execution:
+        raise HTTPException(status_code=403, detail="Paid OpenCode backend is disabled by administrator")
     task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
     if task is None:
         raise HTTPException(status_code=404, detail="Задача не найдена")
@@ -1320,9 +1334,13 @@ def start_execution(
         base_commit=base_commit,
         workspace_path=workspace_path,
         status="preparing",
+        backend=payload.backend,
         stage="workspace_pending",
         opencode_session_id=None,
-        assigned_roles=["department-lead"],
+        assigned_roles=(
+            ["architect", "qa", "reviewer"]
+            if payload.backend == "codex-subscription" else ["department-lead"]
+        ),
         deadline_at=now + timedelta(seconds=get_settings().execution_timeout_seconds),
         created_at=now,
         updated_at=now,
@@ -1359,6 +1377,7 @@ def start_execution(
             "workspace_id": workspace.id,
             "base_commit": base_commit,
             "contract_version": 2,
+            "backend": payload.backend,
         },
     )
     db.commit()
@@ -1755,7 +1774,7 @@ def execution_progress(
             "error": run.error,
             "items": durable["items"],
         }
-    if not run.opencode_session_id:
+    if run.backend == "codex-subscription" or not run.opencode_session_id:
         return {
             "execution_id": run.id,
             "status": run.status,

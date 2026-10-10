@@ -380,6 +380,7 @@ class CapabilityGuard(Base):
 class ExecutionRun(Base):
     __tablename__ = "execution_runs"
     __table_args__ = (
+        CheckConstraint("backend IN ('opencode', 'codex-subscription')", name="ck_execution_runs_backend"),
         CheckConstraint(
             "contract_version IN (1, 2)",
             name="ck_execution_runs_contract_version",
@@ -441,6 +442,7 @@ class ExecutionRun(Base):
         DateTime(timezone=True), nullable=True
     )
     status: Mapped[str] = mapped_column(String(24), default="running")
+    backend: Mapped[str] = mapped_column(String(32), default="opencode")
     stage: Mapped[str] = mapped_column(String(40), default="department_lead")
     # A queued execution is committed before any OpenCode side effect. The worker
     # fills this after creating or reconciling the external session.

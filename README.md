@@ -53,11 +53,24 @@ python3 scripts/codex_task.py \
 подтверждены. Роли чтения выбираются по умолчанию; запись требует явных
 `--role developer --allow-write`.
 
-Этот маршрут пока запускается оператором и **не регистрирует выполнение в
-`execution_runs`**: его события не являются Result Package control plane.
-Для работы с автоматическим назначением ролей, QA и approval gates потребуется
-отдельная интеграция Codex с lifecycle execution worker. Не запускайте его на
-worktree из `worktrees/managed`, которым владеет OpenCode execution worker.
+Этот операторский маршрут остаётся отдельным от Control Plane. Для новых
+development execution теперь есть штатный backend `codex-subscription`:
+`POST /api/tasks/{task_id}/execute` без тела выбирает его по умолчанию. В
+состоянии `preparing` G2 Workspace Manager создаёт verified workspace; затем
+отдельный `scripts/codex_execution_worker.py` через scoped token claim получает
+`queued` run и последовательно выполняет `architect → qa → reviewer` только на
+чтение. Результаты каждой роли, SHA-256 evidence, lease generation и статус
+подписочной стоимости `unknown` видны в execution timeline/result package.
+Worker не получает manager Basic, DB credentials, OpenCode или Model Gateway
+credentials. Пока token file не настроен, lane выключен и не перейдёт на
+OpenCode автоматически. Платный OpenCode backend требует одновременно тела
+`{"backend":"opencode"}` и защищённого серверного флага
+`CONTROL_PLANE_ALLOW_PAID_OPENCODE_EXECUTION=true`.
+
+Этот этап поддерживает только read-only роли. Для записи кода используйте
+отдельный явно авторизованный операторский маршрут выше; он не считается
+выполненным run в CP. Порядок запуска и rollback описаны в
+[`docs/CODEX_SUBSCRIPTION_LANE.md`](docs/CODEX_SUBSCRIPTION_LANE.md).
 
 Операторский runbook, rollback и критические условия интеграции с Control Plane:
 [`docs/CODEX_SUBSCRIPTION_LANE.md`](docs/CODEX_SUBSCRIPTION_LANE.md).

@@ -1,101 +1,37 @@
-# Codex ChatGPT subscription lane: operator slice for issue #49
+# Codex subscription lane — stage 2 runbook
 
-## Scope and state
+## Supported contract
 
-This is an operator-managed host lane, not a Control Plane execution worker.
-`scripts/codex_task.py` creates a new Git worktree at an exact base commit and
-invokes Codex CLI using the operator's ChatGPT login. It has no Model Gateway,
-OpenCode, AITUNNEL, provider API key, Control Plane DB credential, Docker socket,
-deployment credential, or automatic paid fallback. No production rollout is part
-of this change. The default Control Plane development execution path remains the
-existing one until the critical integration items below are implemented and
-reviewed. Do not claim this slice completes `execution_runs` or G4 Result Package.
+`POST /api/tasks/{task_id}/execute` defaults to `{"backend":"codex-subscription"}` for development tasks. The request also accepts `{"backend":"opencode"}` only when the server has `CONTROL_PLANE_ALLOW_PAID_OPENCODE_EXECUTION=true`; without both conditions it returns 403. Unknown backends return 422. There is no fallback between providers. Existing rows migrate to `backend=opencode` and keep their existing owner. Old failed runs are not replayed.
 
-The OS account is the security boundary for the writable role. Run only as the
-unprivileged `codex-worker`; keep its `HOME` and `CODEX_HOME` separate from every
-other service account. Codex receives an allowlisted environment. The operator
-must not give the account privileged groups, production mounts, secrets, or a
-production worktree. `--role developer --allow-write` explicitly permits edits
-only in the new task worktree; architect, QA and reviewer run with Codex
-`read-only` sandbox and a post-run workspace mutation check. The CLI may execute
-commands inside its sandbox; do not run it as root or grant this account admin
-rights. Human review remains required before any commit, push, PR, or deploy.
+The Codex path preserves repository readiness, manager Basic + mutation header, task lock, workspace-manager G2 preflight, immutable base commit/tree, and the existing approval and CapabilityGuard boundaries. `preparing` becomes `queued` only after G2 prepares the managed workspace. The broker claims only queued subscription rows. The OpenCode worker claims only OpenCode rows.
 
-## Reproducible operator command
+Worker API uses `Authorization: Bearer <private token>` and only `POST /api/codex-worker/claim`, `POST /api/codex-worker/{run_id}/heartbeat` with `generation`, and `POST /api/codex-worker/{run_id}/phase` with `generation`, `role`, `outcome`, `model`, `final_text`, `final_sha256`, `events_sha256`, `artifact_path`, `base_commit`, `base_tree`, and `workspace_preflight_digest`. It exposes no arbitrary command field. `role` is architect, qa or reviewer in that order; outcome is completed, execution_failed, local_timeout, incomplete_result, read_only_violation, auth_failed or workspace_failed.
 
-From a trusted checkout, prepare a scoped prompt file outside source control.
-Confirm the repository's exact base SHA and that it is clean. Use a unique task
-ID and output directory; do not point to the G2 managed workspace volume.
+The worker performs `architect → qa → reviewer`, each as a separate read-only Codex invocation and separate `execution_child_runs`/`execution_evidence` row. The CP verifies the G2 database binding and repository trust at claim and result acceptance. The trusted worker verifies the G2 manifest, commit, tree, branch and clean status before and after each role, and submits the preflight digest. A role requires process success, `turn.completed`, nonempty final report and unchanged workspace. On failure the run fails; the task is never marked done. Successful review leaves the task in `qa` for the existing human process. Terminal runs request G2 inspection, so the Result Package is provisional until that inspection completes. Subscription usage and cost are `unknown`, including the G4 cost summary, not zero rubles. Artifacts are private files on the worker host; the CP stores their path, checksums, bounded final report and immutable base identifiers. CP cannot independently read its private events file or repeat the filesystem check. Preserve worker evidence directories for inspection.
 
-```bash
-sudo -u codex-worker -H env CODEX_HOME=/var/lib/ai-orchestra/codex-worker/.codex \
-  python3 scripts/codex_task.py \
-  --repository /path/to/trusted/repository \
-  --base <reviewed-exact-commit-sha> \
-  --task-id issue49-001 \
-  --role developer --allow-write \
-  --prompt-file /path/to/operator-scoped-prompt.txt \
-  --worktrees /var/lib/ai-orchestra/codex-worker/worktrees \
-  --output /var/lib/ai-orchestra/codex-worker/results \
-  --timeout 600
-```
+## Isolated staging setup
 
-Use `--role architect`, `qa`, or `reviewer` without `--allow-write` for read-only
-work. Default models are pinned in the script by role; an explicit `--model`
-override is recorded in `run.json`. A missing or limited model ends in a failed
-run; the operator must review it before starting a new task ID. No retry or paid
-provider substitution occurs. The installed `orchestra-task` wrapper supplies
-its own model, bounds and subscription guard; this repository does not change
-that installed wrapper.
+1. Apply additive Alembic revision `20261010_0012` to a **test** database only. Deploying to production requires a separate release decision. Generate a random 32+ character token outside the repository and store it as a regular file mode `0600`, readable by CP and `codex-worker` via separate read-only mount or controlled copy. Set `CONTROL_PLANE_CODEX_WORKER_TOKEN_FILE` to the CP-local path. Do not put the token in `.env`, Git, DB, prompt or logs.
+2. Run the worker as an unprivileged dedicated `codex-worker` account with its own `HOME` and `CODEX_HOME` containing ChatGPT CLI login. No API key, DB credential, manager Basic credential, Docker socket, production mount or `/var/lib/corporate_taxi` is allowed. Mount **only** the G2 managed workspace root read-only at its canonical `/workspace/worktrees/managed` path in a separate mount namespace. G2 owns the volume as UID 10001 with mode 0700: provision the worker's namespace with a reviewed UID mapping that can read this volume. Do not relax G2 permissions or share the raw writable volume. The account must have access to an isolated private result directory. Do not give it privileged groups. Network access should be limited to loopback CP broker and the Codex service; no arbitrary egress or external writes.
+3. Start from this repository root with the project Python dependencies and official Codex CLI installed. Verify `codex login status` says ChatGPT. Launch:
 
-Inspect `results/<task-id>/run.json`, `events.jsonl`, `final.txt`, and
-`stderr.log`. `run.json` records the base commit/tree, prompt SHA-256, final
-workspace HEAD/status, event/final/stderr hashes, outcome, exit code, timestamps,
-and paths. An initial `running` checkpoint is written before inference; a stale
-checkpoint means unknown outcome, never success. `final_received` plus a
-`turn.completed` event and zero process exit are required for `completed`.
-Read-only workspace mutation forces failure. `usage` and `api_cost` are
-`unknown`; do not record subscription usage as zero API cost. Logs are local
-operator evidence, not yet durable CP audit or G4 evidence objects. Preserve
-them for manual review; their contents are untrusted agent output.
+   ```bash
+   python3 -m scripts.codex_execution_worker \
+     --broker http://127.0.0.1:8000 \
+     --token-file /private/codex-worker.token \
+     --output /private/codex-results --once
+   ```
 
-## Rollout and rollback
+   Omit `--once` to poll continuously. The broker is token-only; the worker never uses the manager Basic API. Keep the token file and output directory private and outside web or container mounts.
+4. Create a development task assigned to a ready repository, then call execute with manager auth and `X-Control-Request: ai-orchestra`. Inspect `/api/executions/{id}`, `/timeline`, `/result-package`, and the private `events.jsonl`, `final.txt`, `stderr.log`, `summary.json` per role. Confirm three role artifacts and no OpenCode session. Run test DB API and worker smoke before any release.
 
-This slice requires no migration, feature flag, service restart, or production
-configuration change. Test it on synthetic repositories first. To stop using
-the lane, stop submitting new operator commands and retain all result directories
-and worktrees for audit. Do not automatically replay old failed executions.
-An interrupted run with `outcome=running` needs manual inspection; reusing its
-task ID is rejected. Reversing this code change does not alter CP rows.
+## Lease and rollback
 
-## Critical integration TODO before making this the Control Plane default
+Claims increment `lease_generation`; heartbeat renews a 120 second lease. Expired running leases become failed and are **never reclaimed** because an old inference process may still exist. A stale generation cannot submit a result. The worker stops its process group when a heartbeat is rejected or its run deadline elapses. Operator intervention is required for retry with a new run. No automatic model or backend retry occurs.
 
-1. Add an explicit `codex` lane and durable request/lease/fencing generation in
-   `execution_runs` (or a related table), with a reviewed additive migration and
-   rollback. Exclude Codex runs from the OpenCode worker query. Preserve old
-   failed runs without replay. Set the default only after staging acceptance.
-2. Bind each request server-side to the verified G2 repository/workspace identity,
-   preflight digest and exact commit. Recheck repository trust and workspace
-   readiness immediately before the host side effect. A separate host checkout
-   needs an independently verified source tree; never mount the G2 managed
-   volume or Control Plane credentials into the Codex account.
-3. Design a narrow, authenticated, fail-closed result transport between CP and
-   the host worker. The host must not receive manager Basic auth, DB passwords,
-   `auth.json`, API keys, or production credentials. A human-mediated export and
-   import is acceptable for initial acceptance, but must have single-use
-   admission and exact request/evidence hashes. Reject duplicate/stale lease
-   generations and partial results. Do not expose arbitrary shell, environment,
-   path, or model-provider fields to task authors.
-4. Record terminal outcome, bounded evidence and actual usage status in CP;
-   validate `events.jsonl`, `final.txt`, `run.json`, exact commit/tree and
-   workspace status before marking execution complete. Keep subscription cost
-   unknown unless an authoritative accounting source supplies it. Retain
-   approval, capability guard, G2 preflight/fencing and G3 runner boundaries.
-5. Exercise crash recovery, duplicate claims, trust revocation, role constraints,
-   auth isolation, model limit failure and rollback in staging. Do not call the
-   operator evidence a CP Result Package before these checks pass.
+To switch off, stop the worker and remove `CONTROL_PLANE_CODEX_WORKER_TOKEN_FILE` from CP configuration. New subscription tasks remain queued; they cannot silently switch to paid execution. Expired leases and deadlines are marked failed when a worker next calls claim. Retain artifacts and database history. Migration downgrade refuses while subscription rows exist, so rollback of the application should use a compatible build or be postponed until history is archived under an approved retention process. Do not delete production rows to force it.
 
-The main residual risks in this slice are that local evidence is mutable by the
-operator account, the prompt is operator supplied rather than CP scoped, and
-`execution_runs` does not track these jobs. It is therefore unsuitable as an
-automatic Control Plane default today.
+## Limits of this slice
+
+The CP-integrated path is intentionally read-only and accepts only `general-standard` repositories; higher assurance tiers require their existing provenance and runner controls. The stage-1 operator `scripts/codex_task.py` still supports an explicitly authorized developer worktree with `--role developer --allow-write`, but it does not attach that run to CP. No CP-integrated code-editing role, deploy, external write or secrets access is granted. Evidence file contents are trusted worker output and need host-level retention and audit controls. This repository does not install or start a host service, provision credentials, change production Compose mounts, or run a live migration.

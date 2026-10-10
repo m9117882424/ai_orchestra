@@ -223,6 +223,7 @@ def capture_opencode_evidence(
 
 
 def execution_cost_summary(db: Session, execution_id: str) -> dict:
+    run = db.get(ExecutionRun, execution_id)
     row = db.execute(
         select(
             func.coalesce(func.sum(UsageEvent.input_tokens), 0),
@@ -239,7 +240,10 @@ def execution_cost_summary(db: Session, execution_id: str) -> dict:
             (UsageEvent.input_tokens > 0) | (UsageEvent.output_tokens > 0),
         )
     ) or 0
-    if unknown_automatic_cost_rows:
+    if run is not None and run.backend == "codex-subscription":
+        cost_status = "unknown"
+        actual_cost = None
+    elif unknown_automatic_cost_rows:
         cost_status = "partial" if known_cost > 0 else "unknown"
         actual_cost = None
     else:
@@ -613,6 +617,11 @@ def build_result_package_payload(db: Session, execution_id: str) -> dict:
             if event.kind == "review"
         ],
         "generated_artifacts": trusted_artifacts,
+        "subscription_artifacts": [
+            {"role": event.role, "status": event.status,
+             "details": event.details, "occurred_at": _iso(event.occurred_at)}
+            for event in evidence if event.source == "codex-subscription"
+        ],
         "execution": {
             "status": run.status,
             "stage": run.stage,

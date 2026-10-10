@@ -279,6 +279,7 @@ class ExecutionLeaseManager:
             db.scalars(
                 select(ExecutionRun)
                 .where(
+                    ExecutionRun.backend == "opencode",
                     ExecutionRun.status.in_(ACTIVE_EXECUTION_STATUSES),
                     or_(
                         ExecutionRun.lease_expires_at.is_(None),

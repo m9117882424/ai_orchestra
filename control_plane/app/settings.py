@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     opencode_username: str = "opencode"
     opencode_password: str = ""
     execution_timeout_seconds: int = Field(default=7200, ge=60, le=604800)
+    allow_paid_opencode_execution: bool = False
+    codex_worker_token_file: str | None = None
     default_monthly_budget: float = 25000.0
 
     model_config = SettingsConfigDict(

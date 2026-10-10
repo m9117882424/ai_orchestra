@@ -41,7 +41,7 @@ jobs:
               assert isinstance(data, dict) and isinstance(data.get('model_list'), list) and data['model_list'], path
           print('[OK] router YAML parsed')
           PY
-          python3 -m compileall -q control_plane/app control_plane/migrations control_plane/tests runner scripts/model_router_smoke.py scripts/static_security_check.py scripts/verify_dependency_locks.py scripts/temporal_durable_poc.py scripts/workspace_restore_verifier.py
+          python3 -m compileall -q control_plane/app control_plane/migrations control_plane/tests runner scripts/codex_task.py scripts/codex_execution_worker.py scripts/model_router_smoke.py scripts/static_security_check.py scripts/verify_dependency_locks.py scripts/temporal_durable_poc.py scripts/workspace_restore_verifier.py
           node --check control_plane/app/static/app.js
 
       - name: Проверить shell-скрипты

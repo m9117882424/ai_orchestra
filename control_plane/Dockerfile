@@ -35,10 +35,15 @@ RUN apt-get update \
 
 FROM git-runtime AS repo-manager
 
-RUN install -d -o orchestra -g orchestra -m 0700 /var/lib/ai-orchestra/repositories \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssh-client \
+    && rm -rf /var/lib/apt/lists/* \
+    && install -d -o orchestra -g orchestra -m 0700 /var/lib/ai-orchestra/repositories \
+    && install -d -o root -g root -m 0555 /run/secrets \
     && chmod 0555 \
         /app/app/repo_manager_askpass.py \
-        /app/app/repo_manager_git_wrapper.sh
+        /app/app/repo_manager_git_wrapper.sh \
+        /app/app/repo_manager_ssh.py
 
 USER orchestra
 

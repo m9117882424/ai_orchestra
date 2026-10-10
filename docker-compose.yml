@@ -148,7 +148,7 @@ services:
     build:
       context: ./control_plane
       target: repo-manager
-    image: ai-development-department/repo-manager:0.9.0
+    image: ai-development-department/repo-manager:0.9.1
     restart: unless-stopped
     init: true
     read_only: true

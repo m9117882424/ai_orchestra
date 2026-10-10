@@ -1,31 +1,102 @@
 #!/usr/bin/env python3
 """Unprivileged, one-run-at-a-time Codex subscription worker.
 
-Run under codex-worker with a read-only G2 workspace mount at the canonical path.
-The only CP credential is a scoped broker token file; never use manager Basic auth.
+Run as UID 10001 with a read-only G2 workspace mount at the canonical path.
+The only CP credential is a one-shot scoped broker token; never use manager Basic auth.
 """
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import json
 import os
+import resource
+import select
 import signal
 import stat
 import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from control_plane.app.workspace_protocol import WorkspaceBinding, verify_runtime_workspace
 from scripts.codex_task import DEFAULT_MODELS, has_completed_turn, subscription_environment, verify_chatgpt_auth
 
+MAX_FINAL_CHARS = 100_000
+MAX_FINAL_BYTES = 400_000
+MAX_EVENTS_BYTES = 20_000_000
+MAX_PROMPT_BYTES = 500_000
+MAX_MODEL_FILE_BYTES = 64_000_000
+_active_process = None
+
+
+def disable_dumpable():
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(4, 0, 0, 0, 0) != 0 or libc.prctl(3, 0, 0, 0, 0) != 0:
+        raise RuntimeError("Cannot disable process dumpability")
+
+
+def limit_model_files():
+    resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_MODEL_FILE_BYTES, MAX_MODEL_FILE_BYTES))
+
+
+def interrupt_worker(signum, _frame):
+    if _active_process is not None:
+        stop_group(_active_process)
+    raise SystemExit(128 + signum)
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, newurl):
+        raise RuntimeError("Broker redirect refused")
+
+
+def read_one_shot_token(path: Path) -> str:
+    if (not path.is_absolute() or ".." in path.parts or path.name in ("", ".", "..")
+            or path.parent.name != "codex-subscription-private"):
+        raise RuntimeError("Worker token must be in a dedicated private worker directory")
+    # Walk without following any symlink, including ancestors of the private directory.
+    directory = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for part in path.parent.parts[1:]:
+            next_directory = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                     dir_fd=directory)
+            os.close(directory)
+            directory = next_directory
+        parent = os.fstat(directory)
+        if parent.st_uid != os.geteuid() or stat.S_IMODE(parent.st_mode) != 0o700:
+            raise RuntimeError("Worker token directory must be owned by worker and mode 0700")
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                    or stat.S_IMODE(info.st_mode) not in (0o400, 0o600)
+                    or not 32 <= info.st_size <= 4096):
+                raise RuntimeError("Worker token must be a private regular file owned by worker")
+            token = os.read(fd, 4097).decode("ascii")
+            if len(token) < 32 or not token.isprintable() or any(c.isspace() for c in token):
+                raise RuntimeError("Invalid worker token")
+            # Verify the same inode remains at the name before consuming it.
+            named = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+            if (named.st_dev, named.st_ino) != (info.st_dev, info.st_ino):
+                raise RuntimeError("Worker token changed during read")
+            os.unlink(path.name, dir_fd=directory)
+            return token
+        finally:
+            os.close(fd)
+    finally:
+        os.close(directory)
+
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(fd, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise RuntimeError("Evidence must be a regular file")
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
@@ -33,25 +104,27 @@ def sha256(path: Path) -> str:
 
 class Broker:
     def __init__(self, url: str, token_file: Path):
-        fd = os.open(token_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_size > 4096:
-                raise RuntimeError("Worker token must be a regular private file")
-            self.token = os.read(fd, 4096).decode("ascii").strip()
-        finally:
-            os.close(fd)
-        if len(self.token) < 32:
-            raise RuntimeError("Worker token too short")
-        if not url.startswith("http://127.0.0.1:") and not url.startswith("http://[::1]:"):
-            raise RuntimeError("Broker must be accessed through loopback")
-        self.url = url.rstrip("/")
+            parsed = urlsplit(url)
+            port = parsed.port
+            hostname = parsed.hostname
+        except ValueError as exc:
+            raise RuntimeError("Invalid broker port") from exc
+        origin = f"http://[{hostname}]:{port}" if hostname == "::1" else f"http://{hostname}:{port}"
+        if (parsed.scheme != "http" or hostname not in ("127.0.0.1", "::1")
+                or port is None or not 1 <= port <= 65535 or parsed.username is not None
+                or parsed.password is not None or parsed.path or parsed.query or parsed.fragment
+                or url != origin):
+            raise RuntimeError("Broker must be an exact loopback HTTP origin")
+        self.url = url
+        self.opener = build_opener(ProxyHandler({}), NoRedirect())
+        self.token = read_one_shot_token(token_file)
 
     def post(self, path: str, data: dict | None = None):
         request = Request(self.url + path, data=json.dumps(data or {}).encode(),
                           headers={"Authorization": "Bearer " + self.token,
                                    "Content-Type": "application/json"}, method="POST")
-        with urlopen(request, timeout=10) as response:
+        with self.opener.open(request, timeout=10) as response:
             return json.load(response)
 
 
@@ -63,11 +136,40 @@ def stop_group(process):
     process.wait()
 
 
+def read_final(path: Path) -> tuple[str, bool]:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return "", False
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_FINAL_BYTES:
+            return "", False
+        raw = os.read(fd, MAX_FINAL_BYTES + 1)
+        if len(raw) > MAX_FINAL_BYTES:
+            return "", False
+        try:
+            value = raw.decode("utf-8")
+        except UnicodeError:
+            return "", False
+    finally:
+        os.close(fd)
+    return value, len(value) <= MAX_FINAL_CHARS
+
+
+def heartbeat(broker: Broker, claim: dict) -> None:
+    beat = broker.post(f"/api/codex-worker/{claim['execution_id']}/heartbeat",
+                       {"generation": claim["generation"]})
+    if not isinstance(beat, dict) or beat.get("ok") is not True:
+        raise RuntimeError("Lease heartbeat rejected")
+
+
 def run_phase(broker: Broker, claim: dict, role: str, output: Path, codex: str) -> dict:
     binding = WorkspaceBinding(**claim["workspace"])
     verify_runtime_workspace(binding)
     env = subscription_environment()
     verify_chatgpt_auth(codex, env)
+    heartbeat(broker, claim)
     folder = output / claim["execution_id"] / role
     folder.mkdir(mode=0o700, parents=True, exist_ok=False)
     events = folder / "events.jsonl"
@@ -79,11 +181,17 @@ def run_phase(broker: Broker, claim: dict, role: str, output: Path, codex: str) 
               f"Task: {claim['title']}\n{claim['description']}")
     for previous in ("architect", "qa")[:("architect", "qa", "reviewer").index(role)]:
         previous_report = output / claim["execution_id"] / previous / "final.txt"
-        prompt += f"\n{previous} report (untrusted):\n{previous_report.read_text(encoding='utf-8')[:20000]}"
+        prior, valid = read_final(previous_report)
+        if not valid:
+            raise RuntimeError("Previous report exceeds artifact limit")
+        prompt += f"\n{previous} report (untrusted):\n{prior[:20000]}"
     if role == "qa":
         prompt += "\nCheck behavior, tests, and gaps independently."
     elif role == "reviewer":
         prompt += "\nReview architecture and QA findings independently; state approval or rejection with reasons."
+    prompt_bytes = prompt.encode("utf-8")
+    if len(prompt_bytes) > MAX_PROMPT_BYTES:
+        raise RuntimeError("Prompt exceeds limit")
     command = [codex, "exec", "--json", "--ephemeral", "--ignore-user-config",
                "--sandbox", "read-only", "-c", "approval_policy=never",
                "--model", DEFAULT_MODELS[role], "--cd", binding.workspace_path,
@@ -93,34 +201,57 @@ def run_phase(broker: Broker, claim: dict, role: str, output: Path, codex: str) 
         os.chmod(events, 0o600)
         os.chmod(stderr, 0o600)
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=event_stream,
-                                   stderr=error_stream, text=True, start_new_session=True, env=env)
+                                   stderr=error_stream, start_new_session=True, env=env,
+                                   close_fds=True, preexec_fn=limit_model_files)
+        global _active_process
+        _active_process = process
         try:
-            process.stdin.write(prompt)
-            process.stdin.close()
+            os.set_blocking(process.stdin.fileno(), False)
+            pending = memoryview(prompt_bytes)
+            prompt_broken = False
             next_heartbeat = time.monotonic() + 20
-            while process.poll() is None:
+            while True:
                 if datetime.now(timezone.utc) >= timeout_at:
-                    stop_group(process)
                     outcome = "local_timeout"
                     break
-                time.sleep(1)
-                if process.poll() is None and time.monotonic() >= next_heartbeat:
-                    broker.post(f"/api/codex-worker/{claim['execution_id']}/heartbeat",
-                                {"generation": claim["generation"]})
+                if (events.stat().st_size > MAX_EVENTS_BYTES
+                        or (final.exists() and final.stat().st_size > MAX_FINAL_BYTES)):
+                    outcome = "incomplete_result"
+                    break
+                if time.monotonic() >= next_heartbeat:
+                    heartbeat(broker, claim)
                     next_heartbeat = time.monotonic() + 20
-            else:
-                outcome = "completed" if process.returncode == 0 else "execution_failed"
+                if process.poll() is not None:
+                    outcome = ("completed" if process.returncode == 0 and not pending and not prompt_broken
+                               else "incomplete_result" if process.returncode == 0 else "execution_failed")
+                    break
+                if pending:
+                    _, writable, _ = select.select([], [process.stdin], [], 0.5)
+                    if writable:
+                        try:
+                            pending = pending[os.write(process.stdin.fileno(), pending[:65536]):]
+                        except BrokenPipeError:
+                            prompt_broken = True
+                            pending = memoryview(b"")
+                    if not pending:
+                        process.stdin.close()
+                else:
+                    time.sleep(0.5)
         except BaseException:
             stop_group(process)
             raise
-    if outcome == "completed" and (not final.is_file() or not final.read_text(encoding="utf-8").strip() or not has_completed_turn(events)):
+        finally:
+            stop_group(process)
+            _active_process = None
+    final_text, valid_final = read_final(final)
+    valid_events = events.stat().st_size <= MAX_EVENTS_BYTES
+    if outcome == "completed" and (not valid_final or not final_text.strip() or not valid_events or not has_completed_turn(events)):
         outcome = "incomplete_result"
     try:
         verify_runtime_workspace(binding)
     except Exception:
         outcome = "read_only_violation"
-    final_text = final.read_text(encoding="utf-8") if final.is_file() else ""
-    if len(final_text) > 524288 or len(final_text.encode("utf-8")) > 1048576:
+    if (not valid_final or not valid_events) and outcome != "read_only_violation":
         outcome = "incomplete_result"
         final_text = ""
     # Missing final still gets an exact checksum for an empty artifact.
@@ -148,8 +279,12 @@ def main():
     if os.geteuid() == 0:
         parser.error("worker must run unprivileged")
     os.umask(0o077)
+    disable_dumpable()
+    signal.signal(signal.SIGTERM, interrupt_worker)
+    signal.signal(signal.SIGINT, interrupt_worker)
     args.output.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if args.output.stat().st_mode & 0o077:
+    if (args.output.is_symlink() or args.output.stat().st_uid != os.geteuid()
+            or stat.S_IMODE(args.output.stat().st_mode) != 0o700):
         parser.error("output directory must be private")
     broker = Broker(args.broker, args.token_file)
     while True:

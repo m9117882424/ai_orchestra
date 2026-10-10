@@ -46,12 +46,30 @@ def git(repo: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def verify_chatgpt_auth(codex: str, env: dict[str, str]) -> None:
+def verify_chatgpt_auth(codex: str, env: dict[str, str], *, timeout: float = 15) -> None:
     # Avoid silently billing an API account if the operator's environment
     # overrides a stored ChatGPT login.
-    result = subprocess.run([codex, "login", "status"], capture_output=True, text=True, env=env)
-    status = (result.stdout + "\n" + result.stderr).lower()
-    if result.returncode != 0 or "chatgpt" not in status or "api key" in status:
+    process = subprocess.Popen([codex, "login", "status"], stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, env=env,
+                               close_fds=True, start_new_session=True)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate()
+        raise RuntimeError("Codex ChatGPT login status timed out") from None
+    except BaseException:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate()
+        raise
+    status = (stdout + "\n" + stderr).lower()
+    if process.returncode != 0 or "chatgpt" not in status or "api key" in status:
         raise RuntimeError("Codex must be signed in with ChatGPT (run codex login --device-auth)")
 
 

@@ -81,6 +81,17 @@ def test_token_permissions_fail_closed(broker_client):
     assert client.post("/api/codex-worker/claim", headers=headers).status_code == 503
 
 
+def test_invalid_token_content_and_symlink_fail_closed(broker_client, tmp_path):
+    client, headers, token = broker_client
+    token.write_text("short")
+    assert client.post("/api/codex-worker/claim", headers=headers).status_code == 503
+    token.write_text("x" * 48)
+    other = tmp_path / "other.token"
+    token.rename(other)
+    token.symlink_to(other)
+    assert client.post("/api/codex-worker/claim", headers=headers).status_code == 503
+
+
 def test_claim_is_single_use_and_fenced(broker_client):
     client, headers, _ = broker_client
     run_id = seed()
@@ -227,9 +238,17 @@ def test_long_unicode_report_and_duplicate_role(broker_client):
     client, headers, _ = broker_client
     run_id = seed(status="running")
     url = f"/api/codex-worker/{run_id}/phase"
-    response = client.post(url, headers=headers, json=result(text="Ж" * 25000))
+    response = client.post(url, headers=headers, json=result(text="Ж" * 60000))
     assert response.status_code == 200 and response.json()["stage"] == "qa_running"
     assert client.post(url, headers=headers, json=result()).status_code == 409
+
+
+def test_oversize_report_rejected_without_advancing_role(broker_client):
+    client, headers, _ = broker_client
+    run_id = seed(status="running")
+    url = f"/api/codex-worker/{run_id}/phase"
+    assert client.post(url, headers=headers, json=result(text="x" * 100001)).status_code == 422
+    assert client.post(url, headers=headers, json=result(text="💡" * 100000)).status_code == 200
 
 
 def test_repository_revocation_blocks_claim(broker_client):

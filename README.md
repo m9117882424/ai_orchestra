@@ -62,8 +62,11 @@ development execution теперь есть штатный backend `codex-subscr
 чтение. Результаты каждой роли, SHA-256 evidence, lease generation и статус
 подписочной стоимости `unknown` видны в execution timeline/result package.
 Worker не получает manager Basic, DB credentials, OpenCode или Model Gateway
-credentials. Пока token file не настроен, lane выключен и не перейдёт на
-OpenCode автоматически. Платный OpenCode backend требует одновременно тела
+credentials. Пока настройка master token file отсутствует, новый запуск
+`codex-subscription` вернёт 503 до создания run и не перейдёт на OpenCode
+автоматически. Worker принимает только одноразовую копию токена в отдельном
+закрытом каталоге, удаляет её до запуска Codex; staging требует контейнер
+UID 10001 и отдельный разрешённый вход ChatGPT. Платный OpenCode backend требует одновременно тела
 `{"backend":"opencode"}` и защищённого серверного флага
 `CONTROL_PLANE_ALLOW_PAID_OPENCODE_EXECUTION=true`.
 

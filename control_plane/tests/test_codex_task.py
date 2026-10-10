@@ -86,6 +86,16 @@ def test_codex_task_rejects_api_key_login_mode(tmp_path):
     assert not (tmp_path / "worktrees" / "taxi-001").exists()
 
 
+def test_codex_login_status_timeout_is_bounded(tmp_path):
+    module = _load_runner()
+    fake = tmp_path / "codex"
+    fake.write_text("#!/usr/bin/env python3\nimport time\ntime.sleep(60)\n")
+    fake.chmod(0o755)
+    import pytest
+    with pytest.raises(RuntimeError, match="timed out"):
+        module.verify_chatgpt_auth(str(fake), {}, timeout=0.1)
+
+
 def test_codex_task_rejects_api_endpoint_override(tmp_path):
     _, command, env = _setup(tmp_path)
     env["OPENAI_BASE_URL"] = "https://synthetic-paid-provider.invalid"

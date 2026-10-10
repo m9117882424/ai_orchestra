@@ -321,6 +321,19 @@ def test_paid_backend_requires_explicit_admin_enable(auth, mutation_headers):
         assert db.query(ExecutionRun).filter_by(task_id=task_id).count() == 0
 
 
+def test_subscription_missing_token_setting_fails_before_queue(auth, mutation_headers, monkeypatch):
+    from control_plane.app import main
+    settings = main.get_settings().model_copy(update={"codex_worker_token_file": None})
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    with TestClient(app) as client:
+        task_id = _create_development_task(client, auth, mutation_headers)
+        response = client.post(f"/api/tasks/{task_id}/execute", auth=auth,
+                               headers=mutation_headers)
+    assert response.status_code == 503
+    with SessionLocal() as db:
+        assert db.query(ExecutionRun).filter_by(task_id=task_id).count() == 0
+
+
 def test_unknown_backend_rejected_without_fallback(auth, mutation_headers):
     with TestClient(app) as client:
         task_id = _create_development_task(client, auth, mutation_headers)

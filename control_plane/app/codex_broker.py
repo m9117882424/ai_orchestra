@@ -28,6 +28,8 @@ from .workspace_protocol import WorkspaceBinding, WorkspacePreflightError, works
 
 router = APIRouter(prefix="/api/codex-worker", tags=["codex-worker"])
 ROLES = ("architect", "qa", "reviewer")
+MAX_FINAL_CHARS = 100_000
+MAX_FINAL_BYTES = 400_000
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 Db = Annotated[Session, Depends(get_db)]
 
@@ -210,7 +212,7 @@ class PhaseResult(LeaseRequest):
     role: str
     outcome: str
     model: str = Field(max_length=120)
-    final_text: str = Field(max_length=524288)
+    final_text: str = Field(max_length=MAX_FINAL_CHARS)
     final_sha256: str
     events_sha256: str
     artifact_path: str = Field(max_length=512)
@@ -237,7 +239,7 @@ def phase(run_id: str, body: PhaseResult, db: Db, _: Worker):
         raise HTTPException(409, "Workspace binding changed") from None
     if body.workspace_preflight_digest != workspace.preflight_digest:
         raise HTTPException(409, "Workspace attestation mismatch")
-    if len(body.final_text.encode("utf-8")) > 1048576:
+    if len(body.final_text.encode("utf-8")) > MAX_FINAL_BYTES:
         raise HTTPException(422, "Final report too large")
     if not all(HEX64.fullmatch(value) for value in (body.final_sha256, body.events_sha256)):
         raise HTTPException(422, "Invalid evidence checksum")

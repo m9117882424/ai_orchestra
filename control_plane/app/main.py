@@ -1248,6 +1248,8 @@ def start_execution(
         raise HTTPException(status_code=422, detail="Unsupported execution backend")
     if payload.backend == "opencode" and not get_settings().allow_paid_opencode_execution:
         raise HTTPException(status_code=403, detail="Paid OpenCode backend is disabled by administrator")
+    if payload.backend == "codex-subscription" and not get_settings().codex_worker_token_file:
+        raise HTTPException(status_code=503, detail="Codex subscription worker is not configured")
     task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
     if task is None:
         raise HTTPException(status_code=404, detail="Задача не найдена")

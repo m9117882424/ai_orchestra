@@ -223,6 +223,8 @@ Evidence/Observability и не заявляется как завершённа�
 
 # G5 — Controlled Git & External Actions
 
+Статус: **G5.1 implementation in progress**. Первый инкремент строит content-addressed authorization/replay/reconciliation substrate без реального Git/external-write executor и без включения capability guards. Контракт: [`G5_CONTROLLED_ACTIONS.md`](G5_CONTROLLED_ACTIONS.md).
+
 Approval связан с точным действием:
 - task/repository;
 - action;

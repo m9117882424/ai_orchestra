@@ -297,6 +297,163 @@ class Approval(Base):
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class ControlledAction(Base):
+    __tablename__ = "controlled_actions"
+    __table_args__ = (
+        CheckConstraint(
+            "action_type IN ('git_push', 'pull_request', 'merge', 'deploy', 'external_write')",
+            name="ck_controlled_actions_type",
+        ),
+        CheckConstraint(
+            "status IN ('proposed', 'pending_approval', 'approved', 'approval_rejected', "
+            "'claimed', 'succeeded', 'failed', 'uncertain', 'reconciled')",
+            name="ck_controlled_actions_status",
+        ),
+        CheckConstraint(
+            "length(source_sha) IN (40, 64) AND length(head_sha) IN (40, 64)",
+            name="ck_controlled_actions_sha_length",
+        ),
+        CheckConstraint(
+            "result_package_digest IS NULL OR length(result_package_digest) = 64",
+            name="ck_controlled_actions_result_package_digest",
+        ),
+        CheckConstraint(
+            "length(action_digest) = 64",
+            name="ck_controlled_actions_digest",
+        ),
+        CheckConstraint("version >= 1", name="ck_controlled_actions_version"),
+        Index("ux_controlled_actions_digest", "action_digest", unique=True),
+        Index("ix_controlled_actions_repository_status", "repository_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    task_id: Mapped[str | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    repository_id: Mapped[str] = mapped_column(
+        ForeignKey("repositories.id", ondelete="RESTRICT"), nullable=False
+    )
+    action_type: Mapped[str] = mapped_column(String(32))
+    source_sha: Mapped[str] = mapped_column(String(64))
+    head_sha: Mapped[str] = mapped_column(String(64))
+    destination: Mapped[str] = mapped_column(String(512))
+    result_package_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    action_digest: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32), default="proposed")
+    created_by: Mapped[str] = mapped_column(String(100))
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class ControlledActionAuthorization(Base):
+    __tablename__ = "controlled_action_authorizations"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'rejected', 'expired', 'consumed')",
+            name="ck_controlled_action_authorizations_status",
+        ),
+        CheckConstraint(
+            "length(action_digest) = 64",
+            name="ck_controlled_action_authorizations_digest",
+        ),
+        CheckConstraint(
+            "((status IN ('approved', 'rejected', 'consumed') AND decided_at IS NOT NULL "
+            "AND decided_by IS NOT NULL) OR status IN ('pending', 'expired'))",
+            name="ck_controlled_action_authorizations_decision",
+        ),
+        CheckConstraint(
+            "((status = 'consumed' AND consumed_at IS NOT NULL AND consumed_by IS NOT NULL "
+            "AND operation_key IS NOT NULL) OR (status <> 'consumed' AND consumed_at IS NULL "
+            "AND consumed_by IS NULL AND operation_key IS NULL))",
+            name="ck_controlled_action_authorizations_consumption",
+        ),
+        Index(
+            "ix_controlled_action_authorizations_action_status",
+            "action_id", "status", "created_at",
+        ),
+        Index(
+            "ux_controlled_action_authorizations_operation_key",
+            "operation_key",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    action_id: Mapped[str] = mapped_column(
+        ForeignKey("controlled_actions.id", ondelete="CASCADE"), nullable=False
+    )
+    action_digest: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    requested_by: Mapped[str] = mapped_column(String(100))
+    reason: Mapped[str] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    decided_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    decision_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    consumed_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    operation_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class ControlledActionEffect(Base):
+    __tablename__ = "controlled_action_effects"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('reserved', 'succeeded', 'failed', 'uncertain', 'reconciled')",
+            name="ck_controlled_action_effects_status",
+        ),
+        CheckConstraint(
+            "length(action_digest) = 64",
+            name="ck_controlled_action_effects_digest",
+        ),
+        CheckConstraint(
+            "observed_before_digest IS NULL OR length(observed_before_digest) IN (40, 64)",
+            name="ck_controlled_action_effects_before_digest",
+        ),
+        CheckConstraint(
+            "result_digest IS NULL OR length(result_digest) IN (40, 64)",
+            name="ck_controlled_action_effects_result_digest",
+        ),
+        Index("ux_controlled_action_effects_action", "action_id", unique=True),
+        Index("ux_controlled_action_effects_operation_key", "operation_key", unique=True),
+        Index("ix_controlled_action_effects_status", "status", "updated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    action_id: Mapped[str] = mapped_column(
+        ForeignKey("controlled_actions.id", ondelete="CASCADE"), nullable=False
+    )
+    authorization_id: Mapped[str] = mapped_column(
+        ForeignKey("controlled_action_authorizations.id", ondelete="RESTRICT"), nullable=False
+    )
+    action_digest: Mapped[str] = mapped_column(String(64))
+    operation_key: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(16), default="reserved")
+    claimed_by: Mapped[str] = mapped_column(String(100))
+    external_ref: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    observed_before_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    result_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    details: Mapped[dict] = mapped_column(JSON, default=dict)
+    claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    preflight_reconciled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
 class Budget(Base):
     __tablename__ = "budgets"
 

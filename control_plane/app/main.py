@@ -66,6 +66,7 @@ from .schemas import (
     UsageRead,
     WorkspaceCleanupRequest,
 )
+from .controlled_actions_api import router as controlled_actions_router
 from .evidence import HIGH_ASSURANCE_TIERS, execution_cost_summary
 from .services import current_month_cost_summary, seed_defaults, write_audit
 from .opencode_client import OpenCodeClient, OpenCodeError
@@ -111,6 +112,7 @@ app = FastAPI(
 base_dir = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(base_dir / "templates"))
 app.mount("/static", StaticFiles(directory=str(base_dir / "static")), name="static")
+app.include_router(controlled_actions_router)
 
 DbSession = Annotated[Session, Depends(get_db)]
 Manager = Annotated[str, Depends(require_manager)]

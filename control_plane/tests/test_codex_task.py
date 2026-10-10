@@ -38,7 +38,8 @@ def _setup(tmp_path: Path):
     fake.chmod(0o755)
     command = [sys.executable, str(SCRIPT), "--repository", str(repo), "--task-id", "taxi-001",
                "--prompt-file", str(prompt), "--worktrees", str(tmp_path / "worktrees"),
-               "--output", str(tmp_path / "output"), "--codex", str(fake)]
+               "--output", str(tmp_path / "output"), "--codex", str(fake),
+               "--role", "developer", "--allow-write"]
     env = {k: v for k, v in os.environ.items() if k not in {"OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"}}
     return repo, command, env
 
@@ -52,6 +53,13 @@ def test_codex_task_creates_isolated_worktree_and_evidence(tmp_path):
     assert payload["branch"] == "codex/taxi-001"
     assert summary["exit_code"] == 0
     assert summary["model"] == "gpt-6-sol"
+    assert summary["base_commit"] == subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    assert summary["prompt_sha256"]
+    assert summary["workspace_head"] == summary["base_commit"]
+    assert summary["workspace_status"] == ""
+    assert summary["api_cost"] == "unknown"
+    assert len(summary["events_sha256"]) == 64
+    assert len(summary["final_sha256"]) == 64
     assert (tmp_path / "output" / "taxi-001" / "events.jsonl").read_text().strip() == '{"type": "turn.completed"}'
     assert (tmp_path / "output" / "taxi-001" / "final.txt").read_text() == "Done"
     assert (tmp_path / "worktrees" / "taxi-001" / "README.md").read_text() == "base\n"
@@ -66,6 +74,99 @@ def test_codex_task_rejects_api_key_without_creating_worktree(tmp_path):
     assert result.returncode == 2
     assert "Unset OPENAI_API_KEY" in result.stderr
     assert not (tmp_path / "worktrees" / "taxi-001").exists()
+
+
+def test_codex_task_rejects_api_key_login_mode(tmp_path):
+    _, command, env = _setup(tmp_path)
+    fake = Path(command[command.index("--codex") + 1])
+    fake.write_text(fake.read_text().replace("Logged in using ChatGPT", "Logged in using API key"))
+    result = subprocess.run(command, text=True, capture_output=True, env=env)
+    assert result.returncode == 2
+    assert "signed in with ChatGPT" in result.stderr
+    assert not (tmp_path / "worktrees" / "taxi-001").exists()
+
+
+def test_codex_task_rejects_api_endpoint_override(tmp_path):
+    _, command, env = _setup(tmp_path)
+    env["OPENAI_BASE_URL"] = "https://synthetic-paid-provider.invalid"
+    result = subprocess.run(command, text=True, capture_output=True, env=env)
+    assert result.returncode == 2
+    assert "OPENAI_BASE_URL" in result.stderr
+    assert not (tmp_path / "worktrees" / "taxi-001").exists()
+
+
+def test_codex_task_does_not_pass_unrelated_credentials_to_cli(tmp_path):
+    _, command, env = _setup(tmp_path)
+    fake = Path(command[command.index("--codex") + 1])
+    fake.write_text(fake.read_text().replace(
+        "    pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1]).write_text('Done')",
+        "    assert 'PRODUCTION_DB_PASSWORD' not in __import__('os').environ\n"
+        "    pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1]).write_text('Done')"))
+    env["PRODUCTION_DB_PASSWORD"] = "synthetic-secret"
+    result = subprocess.run(command, text=True, capture_output=True, env=env)
+    assert result.returncode == 0, result.stderr
+
+
+def test_codex_task_write_requires_explicit_developer_role(tmp_path):
+    _, command, env = _setup(tmp_path)
+    no_policy = [arg for arg in command if arg != "--allow-write"]
+    assert subprocess.run(no_policy, capture_output=True, env=env).returncode == 2
+    read_only = command.copy()
+    read_only[read_only.index("developer")] = "reviewer"
+    assert subprocess.run(read_only, capture_output=True, env=env).returncode == 2
+    assert not (tmp_path / "worktrees" / "taxi-001").exists()
+
+
+def test_codex_read_only_role_detects_workspace_mutation(tmp_path):
+    _, command, env = _setup(tmp_path)
+    command = [arg for arg in command if arg != "--allow-write"]
+    command[command.index("developer")] = "qa"
+    fake = Path(command[command.index("--codex") + 1])
+    fake.write_text(fake.read_text().replace(
+        "    pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1]).write_text('Done')",
+        "    pathlib.Path(sys.argv[sys.argv.index('--cd') + 1], 'README.md').write_text('changed')\n"
+        "    pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1]).write_text('Done')"))
+    result = subprocess.run(command, text=True, capture_output=True, env=env)
+    assert result.returncode == 66
+    summary = json.loads((tmp_path / "output/taxi-001/run.json").read_text())
+    assert summary["outcome"] == "read_only_violation"
+    assert summary["workspace_status"]
+    assert (tmp_path / "output/taxi-001/events.jsonl").exists()
+
+
+def test_codex_developer_changes_are_recorded_without_changing_base(tmp_path):
+    repo, command, env = _setup(tmp_path)
+    fake = Path(command[command.index("--codex") + 1])
+    fake.write_text(fake.read_text().replace(
+        "    pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1]).write_text('Done')",
+        "    pathlib.Path(sys.argv[sys.argv.index('--cd') + 1], 'README.md').write_text('changed')\n"
+        "    pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1]).write_text('Done')"))
+    result = subprocess.run(command, text=True, capture_output=True, env=env)
+    assert result.returncode == 0
+    summary = json.loads((tmp_path / "output/taxi-001/run.json").read_text())
+    assert summary["outcome"] == "completed"
+    assert "README.md" in summary["workspace_status"]
+    assert summary["workspace_head"] == summary["base_commit"]
+    assert (repo / "README.md").read_text() == "base\n"
+
+
+def test_codex_model_failure_records_evidence_without_retry(tmp_path):
+    _, command, env = _setup(tmp_path)
+    fake = Path(command[command.index("--codex") + 1])
+    fake.write_text(fake.read_text().replace(
+        "    pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1]).write_text('Done')",
+        "    print(json.dumps({'type': 'turn.failed', 'error': 'model unavailable'}))\n"
+        "    print('model unavailable', file=sys.stderr)\n"
+        "    sys.exit(1)\n"
+        "    pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1]).write_text('Done')"))
+    result = subprocess.run(command, text=True, capture_output=True, env=env)
+    assert result.returncode == 1
+    summary = json.loads((tmp_path / "output/taxi-001/run.json").read_text())
+    assert summary["outcome"] == "execution_failed"
+    assert summary["final_received"] is False
+    assert "model unavailable" in summary["error"]
+    assert (tmp_path / "output/taxi-001/events.jsonl").exists()
+    assert subprocess.run(command, capture_output=True, env=env).returncode == 2
 
 
 def test_codex_task_rejects_dirty_repository(tmp_path):
@@ -114,7 +215,7 @@ def test_codex_completed_events_fail_closed(tmp_path):
     module = _load_runner()
     events = tmp_path / "events.jsonl"
     events.write_text('[]\ninvalid-json\n{"type":"turn.completed"}\n')
-    assert module.has_completed_turn(events)
+    assert not module.has_completed_turn(events)
     events.write_text('{"type":"turn.completed"}\n{"type":"turn.failed"}\n')
     assert not module.has_completed_turn(events)
     events.write_text('{"type":"error"}\n{"type":"turn.completed"}\n')

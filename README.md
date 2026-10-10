@@ -33,6 +33,7 @@ python3 scripts/codex_task.py \
   --repository /opt/corporate_taxi \
   --task-id taxi-001 \
   --role developer \
+  --allow-write \
   --prompt-file data/codex-prompts/taxi-001.txt
 ```
 
@@ -45,11 +46,21 @@ python3 scripts/codex_task.py \
 Лимиты подписки действуют; истечение лимита завершит задачу с ошибкой и не
 переключит её на платный API.
 
+Операторский запуск выполняйте от непривилегированного `codex-worker` с отдельным
+`CODEX_HOME` внутри его home. Скрипт передает Codex только ограниченный набор
+переменных окружения, фиксирует исходный commit/tree, хеш prompt и evidence,
+конечный HEAD/status и оставляет стоимость и usage `unknown`, когда они не
+подтверждены. Роли чтения выбираются по умолчанию; запись требует явных
+`--role developer --allow-write`.
+
 Этот маршрут пока запускается оператором и **не регистрирует выполнение в
 `execution_runs`**: его события не являются Result Package control plane.
 Для работы с автоматическим назначением ролей, QA и approval gates потребуется
 отдельная интеграция Codex с lifecycle execution worker. Не запускайте его на
 worktree из `worktrees/managed`, которым владеет OpenCode execution worker.
+
+Операторский runbook, rollback и критические условия интеграции с Control Plane:
+[`docs/CODEX_SUBSCRIPTION_LANE.md`](docs/CODEX_SUBSCRIPTION_LANE.md).
 
 **AI Orchestra не является частью Trading Platform.** Trading Platform, Arvento, Wialon, Fuel Monitor, BI и другие системы — отдельные продукты, которые отдел может разрабатывать.
 

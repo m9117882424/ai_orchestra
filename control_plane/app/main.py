@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .auth import require_control_request, require_manager
-from .codex_broker import router as codex_worker_router
+from .codex_broker import router as codex_worker_router, terminal as finish_codex_run
 from .db import get_db
 from .models import (
     Approval,
@@ -1598,6 +1598,37 @@ def abort_execution(
             entity_id=run.id,
             details={"task_id": run.task_id, "previous_status": "preparing"},
         )
+        db.commit()
+        db.refresh(run)
+        return run
+
+    if run.backend == "codex-subscription":
+        run.cancel_requested_at = now
+        if run.status == "queued":
+            # An unstarted/only preflighting worker cannot perform inference:
+            # fencing and a durable terminal package are safe immediately.
+            finish_codex_run(db, run, "codex_cancelled", now, status="cancelled")
+            write_audit(db, actor=manager, action="execution.cancel_requested",
+                        entity_type="execution", entity_id=run.id,
+                        details={"task_id": run.task_id, "status": "queued"})
+        else:
+            # Keep a running inference non-terminal until its fenced worker has
+            # had a chance to terminate the process group. The broker sweeper
+            # settles it to cancelled after the bounded lease expires. A dead
+            # worker leaves a visible pending cancel, never a false "stopped".
+            run.stage = "cancel_requested"
+            run.error = ""
+            if not run.lease_owner or run.lease_expires_at is None:
+                raise HTTPException(status_code=409, detail="Subscription worker lease missing")
+            run.lease_generation = int(run.lease_generation or 0) + 1
+            expiration = (run.lease_expires_at.replace(tzinfo=timezone.utc)
+                          if run.lease_expires_at.tzinfo is None else run.lease_expires_at)
+            run.lease_expires_at = min(expiration, now + timedelta(seconds=30))
+            run.updated_at = now
+            write_audit(db, actor=manager, action="execution.cancel_requested",
+                        entity_type="execution", entity_id=run.id,
+                        details={"task_id": run.task_id, "status": "running",
+                                 "shutdown_pending": True})
         db.commit()
         db.refresh(run)
         return run

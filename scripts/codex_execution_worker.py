@@ -41,6 +41,9 @@ def disable_dumpable():
 
 
 def limit_model_files():
+    # Popen is launched while the supervisor temporarily masks termination
+    # signals; the model child must not inherit that blocked mask.
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM, signal.SIGINT})
     resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_MODEL_FILE_BYTES, MAX_MODEL_FILE_BYTES))
 
 
@@ -212,11 +215,19 @@ def run_phase(broker: Broker, claim: dict, role: str, output: Path, codex: str) 
     with events.open("x", encoding="utf-8") as event_stream, stderr.open("x", encoding="utf-8") as error_stream:
         os.chmod(events, 0o600)
         os.chmod(stderr, 0o600)
-        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=event_stream,
-                                   stderr=error_stream, start_new_session=True, env=env,
-                                   close_fds=True, preexec_fn=limit_model_files)
+        # Prevent SIGTERM/SIGINT between Popen and registration of its process
+        # group. A pending termination is delivered only after the worker can
+        # tear down the child. SIGKILL is still the cgroup supervisor's duty.
         global _active_process
-        _active_process = process
+        previous_mask = signal.pthread_sigmask(
+            signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGINT})
+        try:
+            process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=event_stream,
+                                       stderr=error_stream, start_new_session=True, env=env,
+                                       close_fds=True, preexec_fn=limit_model_files)
+            _active_process = process
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
         try:
             os.set_blocking(process.stdin.fileno(), False)
             pending = memoryview(prompt_bytes)

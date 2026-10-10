@@ -69,6 +69,90 @@ def preflight_result(generation=1):
             "base_tree": "b" * 40, "workspace_preflight_digest": "c" * 64}
 
 
+
+def test_manager_abort_unclaimed_subscription_is_terminal_and_idempotent(
+        broker_client, auth, mutation_headers):
+    client, worker_headers, _ = broker_client
+    run_id = seed()
+    first = client.post(f"/api/executions/{run_id}/abort",
+                        auth=auth, headers=mutation_headers)
+    assert first.status_code == 200
+    assert first.json()["status"] == "cancelled"
+    assert first.json()["stage"] == "codex_cancelled"
+    assert first.json()["cancel_requested_at"] is not None
+    second = client.post(f"/api/executions/{run_id}/abort",
+                         auth=auth, headers=mutation_headers)
+    assert second.status_code == 200
+    assert second.json()["lease_generation"] == first.json()["lease_generation"]
+    assert client.post("/api/codex-worker/claim", headers=worker_headers).json() is None
+    with SessionLocal() as db:
+        run = db.get(ExecutionRun, run_id)
+        assert run.status == "cancelled"
+        assert db.query(ExecutionResultPackage).filter_by(execution_id=run_id).count() == 1
+
+
+def test_manager_abort_preflight_pending_fences_without_model(
+        broker_client, auth, mutation_headers):
+    client, headers, _ = broker_client
+    run_id = seed()
+    claimed = client.post("/api/codex-worker/claim", headers=headers).json()
+    assert claimed["execution_id"] == run_id
+    aborted = client.post(f"/api/executions/{run_id}/abort",
+                          auth=auth, headers=mutation_headers)
+    assert aborted.status_code == 200
+    assert aborted.json()["status"] == "cancelled"
+    assert client.post(f"/api/codex-worker/{run_id}/preflight",
+                       headers=headers, json=preflight_result()).status_code == 409
+    assert client.post("/api/codex-worker/claim", headers=headers).json() is None
+
+
+def test_manager_abort_running_requires_bounded_reconciliation(
+        broker_client, auth, mutation_headers):
+    client, headers, _ = broker_client
+    run_id = seed(status="running")
+    first = client.post(f"/api/executions/{run_id}/abort",
+                        auth=auth, headers=mutation_headers)
+    assert first.status_code == 200
+    assert first.json()["status"] == "running"
+    assert first.json()["stage"] == "cancel_requested"
+    assert first.json()["lease_generation"] == 2
+    with SessionLocal() as db:
+        assert db.get(ExecutionRun, run_id).lease_owner == "codex-worker"
+    assert first.json()["cancel_requested_at"] is not None
+    again = client.post(f"/api/executions/{run_id}/abort",
+                        auth=auth, headers=mutation_headers)
+    assert again.status_code == 200
+    assert again.json()["lease_generation"] == 2
+    assert client.post(f"/api/codex-worker/{run_id}/heartbeat",
+                       headers=headers, json={"generation": 1}).status_code == 409
+    with SessionLocal() as db:
+        run = db.get(ExecutionRun, run_id)
+        assert run.status == "running"
+        assert run.lease_expires_at is not None
+        run.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        db.commit()
+    assert client.post("/api/codex-worker/claim", headers=headers).json() is None
+    with SessionLocal() as db:
+        run = db.get(ExecutionRun, run_id)
+        assert run.status == "cancelled"
+        assert run.stage == "codex_cancelled"
+        assert db.query(ExecutionResultPackage).filter_by(execution_id=run_id).count() == 1
+
+
+
+
+def test_subscription_execution_never_masquerades_as_zero_monthly_cost(
+        broker_client):
+    from control_plane.app.services import current_month_cost_summary
+    run_id = seed()
+    with SessionLocal() as db:
+        summary = current_month_cost_summary(db)
+        assert summary["cost_status"] == "unknown"
+        assert summary["known_cost"] == 0
+        assert summary["unknown_subscription_executions"] == 1
+        assert summary["unknown_automatic_cost_rows"] >= 1
+        assert db.get(ExecutionRun, run_id).backend == "codex-subscription"
+
 def test_claim_requires_scoped_token(broker_client):
     client, headers, _ = broker_client
     assert client.post("/api/codex-worker/claim").status_code == 401

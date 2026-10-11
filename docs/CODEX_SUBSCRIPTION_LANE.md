@@ -1,5 +1,124 @@
 # Codex subscription lane — stage 4 runbook
 
+## Issue 49 container staging profile (opt in)
+
+The container files are `deploy/codex-worker/Dockerfile` and
+`deploy/docker-compose.codex-subscription.yml`. The base Compose file is unchanged.
+The overlay must be named explicitly with `-f`; its worker also requires
+`--profile codex-subscription`. No service was started or credential provisioned
+by this repository change. Use this only against an isolated staging CP and test
+database; this is not a production release instruction. Always name the target
+service in `up`/`create`: a bare Compose `up` includes the existing base services.
+
+**Trust boundary:** The subscription worker reaches the broker at exactly
+`http://control-plane:8080` on a dedicated internal `codex-control` Docker bridge.
+This is enabled only by the explicit `--isolated-control-network` option; without
+it the worker accepts only the exact loopback origin. The code rejects every
+other host, port, path, userinfo, redirect and proxy. No sidecar TCP relay sees
+the bearer token. Control Plane independently validates every bearer request.
+Only the trusted worker and Control Plane may join the internal bridge. Docker
+host operators can still inspect bridge traffic and mounted files; securing the
+host is a prerequisite. The separately attached `codex-egress` bridge allows
+ChatGPT authorization and inference, but has no outbound IP allowlist, so high-
+assurance deployments require a reviewed egress policy before production.
+
+The worker image uses Python 3.12, Git, the `control_plane/requirements.lock`
+with pip hash checking, and official `@openai/codex@0.156.1` from npm. It runs as
+`10001:10001` with a read-only root, no capabilities, no new privileges, 128
+processes and 4 GiB memory maximum. Compose mounts the existing named G2 volume
+read-only at `/workspace/worktrees/managed`, an independent writable HOME volume,
+a separate results volume, and a writable one-shot token directory. It has no DB,
+manager credential, Docker socket, model router network, provider token or paid
+API environment variable. The worker attaches directly to the dedicated
+`codex-control` bridge shared with CP and the separate `codex-egress` bridge.
+The CP image remains Git-free.
+
+### Exact staging setup
+
+1. Work from the repository root in a staging Compose project with synthetic or
+   staging `.env`, `.env.providers`, and `.env.repositories` outside Git. Prepare
+   a **test** database at the stage 4 migration. Do not reuse production paths
+   or credentials. Set `CODEX_CP_TOKEN_FILE` to an absolute external regular
+   file and `CODEX_WORKER_TOKEN_DIR` to an absolute external directory. Use a
+   32+ character random printable token without newline. Provision the CP file
+   mode `0400`, owner UID 10001; provision a separate file with the same value
+   at `$CODEX_WORKER_TOKEN_DIR/one-shot.token`, mode `0400`, owner UID 10001.
+   The worker directory must be `0700`, owner UID 10001, with no symlink in its
+   path. An operator controls both external locations; never put token bytes in
+   Compose environment, Git, logs, prompts, or a Docker image. Reprovision the
+   one-shot copy for **every** worker start because startup unlinks it.
+2. Set `CODEX_PREFLIGHT_WORKSPACE_ID` to an already prepared G2 UUID. Build with:
+
+   ```bash
+   docker compose -f docker-compose.yml -f deploy/docker-compose.codex-subscription.yml --profile codex-subscription build codex-subscription-worker
+   ```
+
+   The first build needs network access to fetch pinned packages. The Dockerfile
+   specific ignore file restricts the worker build context to the lock and worker
+   source files. The base file alone does not build or start the profile.
+3. Authorize **this** UID 10001 HOME volume using `codex login --device-auth`
+   in a one-off container built from the worker image. For the default project
+   name:
+
+   ```bash
+   docker volume create ai-orchestra-codex-subscription-home
+   docker volume create ai-orchestra-codex-subscription-results
+   docker run --rm -it --user 10001:10001 --entrypoint codex -e HOME=/home/orchestra -e CODEX_HOME=/home/orchestra/.codex -v ai-orchestra-codex-subscription-home:/home/orchestra ai-development-department/codex-subscription-worker:0.156.1 login --device-auth
+   docker run --rm --user 10001:10001 --entrypoint codex -e HOME=/home/orchestra -e CODEX_HOME=/home/orchestra/.codex -v ai-orchestra-codex-subscription-home:/home/orchestra ai-development-department/codex-subscription-worker:0.156.1 login status
+   ```
+
+   Confirm ChatGPT
+   authorization. Use device authorization directly; **never copy any
+   `auth.json`** from a host or another identity. Keep this volume private.
+4. On staging only, recreate CP with the overlay so it receives the read-only
+   token mount and `CONTROL_PLANE_CODEX_WORKER_TOKEN_FILE` setting. Create
+   the worker without starting it:
+
+   ```bash
+   docker compose -f docker-compose.yml -f deploy/docker-compose.codex-subscription.yml --profile codex-subscription up -d --no-deps --force-recreate control-plane
+   docker compose -f docker-compose.yml -f deploy/docker-compose.codex-subscription.yml --profile codex-subscription create --no-deps codex-subscription-worker
+   ```
+
+   Prepare a **second** G2 workspace after container creation, verify its
+   permissions and clean status through a one-off UID 10001 container using the
+   same read-only G2 volume, then update `CODEX_PREFLIGHT_WORKSPACE_ID` to that
+   new UUID and recreate the stopped worker container. This confirms that volume
+   visibility is not limited to workspaces present when the container was made.
+   The startup preflight itself checks the selected workspace before claiming.
+   Run `docker compose ... start codex-subscription-worker` only after both
+   checks pass and an authorized operator accepts this staging bridge trust boundary.
+
+The startup preflight checks UID/GID 10001, read-only root and G2 mount via
+`statvfs`, G2 owner/modes `0700` and manifest `0400`, readable manifest, clean
+Git status including ignored files, separate HOME mount, private `0700` HOME,
+CODEX_HOME, results and token directories, `0400`/`0600` one-shot token file,
+missing Docker socket and forbidden token environment variables. It confirms
+`codex login status` reports ChatGPT before the broker can claim. The operator
+must additionally verify that the HOME volume was separately device-authorized;
+filesystem checks cannot prove a credential was never copied. A failed preflight
+exits without consuming the token or claiming work. The worker's own G2 binding
+verification still runs before and after each role. Inspect the generated model
+prompt/evidence in staging to confirm the token pathname is absent from model
+context; the worker's subprocess environment allowlist omits token variables.
+
+### CI, failure, and rollback
+
+`scripts/codex_compose_synthetic_check.py` renders the overlay with synthetic
+paths and checks mounts, identity, limits, networks, profile and absence of
+worker secrets. CI runs it after creating synthetic configuration files. It
+does not need a Docker daemon or build/pull an image. Build, device login,
+read-only volume behavior, and broker execution require a staging runtime and
+were not exercised by this change.
+
+If the token directory is read-only, the token cannot be unlinked and the worker
+fails before a claim. If login, G2 permissions, or any preflight fails, it exits.
+After a claim, lease and cancellation behavior remains as documented below;
+there is no automatic paid API or OpenCode fallback. Preserve results and DB
+history for inspection. To roll back in staging, stop the worker,
+recreate CP from the base Compose file without the overlay to remove the token
+mount/setting, and retain volumes and evidence. Do not remove database rows to
+force a migration downgrade.
+
 ## Supported contract
 
 `POST /api/tasks/{task_id}/execute` defaults to `{"backend":"codex-subscription"}` for development tasks. The request also accepts `{"backend":"opencode"}` only when the server has `CONTROL_PLANE_ALLOW_PAID_OPENCODE_EXECUTION=true`; without both conditions it returns 403. Unknown backends return 422. There is no fallback between providers. Existing rows migrate to `backend=opencode` and keep their existing owner. Old failed runs are not replayed.

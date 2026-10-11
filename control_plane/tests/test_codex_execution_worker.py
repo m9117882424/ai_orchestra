@@ -35,6 +35,33 @@ def test_bad_broker_url_does_not_consume_token(tmp_path, url):
     assert token.exists()
 
 
+
+def test_docker_internal_control_plane_requires_explicit_trusted_flag(tmp_path):
+    token = token_file(tmp_path)
+    with pytest.raises(RuntimeError):
+        worker.Broker("http://control-plane:8080", token)
+    assert token.exists()
+    broker = worker.Broker("http://control-plane:8080", token,
+                           isolated_control_network=True)
+    assert broker.url == "http://control-plane:8080"
+    assert not token.exists()
+
+
+@pytest.mark.parametrize("url", [
+    "http://control-plane:8000", "https://control-plane:8080",
+    "http://evil.invalid:8080", "http://127.0.0.1:8080",
+    "http://control-plane:8080@evil.invalid",
+    "http://control-plane:8080/api",
+    "http://control-plane:8080?next=evil.invalid",
+    "http://CONTROL-PLANE:8080",
+    "http://user@control-plane:8080",
+])
+def test_private_bridge_rejects_other_origins_before_reading_token(tmp_path, url):
+    token = token_file(tmp_path)
+    with pytest.raises(RuntimeError):
+        worker.Broker(url, token, isolated_control_network=True)
+    assert token.exists()
+
 def test_one_shot_token_rejects_symlink_and_wrong_parent_mode(tmp_path):
     token = token_file(tmp_path)
     link = token.parent / "link"
@@ -155,7 +182,7 @@ def test_worker_never_starts_inference_before_preflight_ack(tmp_path, monkeypatc
     calls = []
 
     class FakeBroker:
-        def __init__(self, *_args):
+        def __init__(self, *_args, **_kwargs):
             pass
 
         def post(self, path, data=None):

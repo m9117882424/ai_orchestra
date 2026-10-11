@@ -83,6 +83,7 @@ jobs:
         run: |
           docker compose config --quiet
           python3 scripts/static_security_check.py
+          python3 scripts/codex_compose_synthetic_check.py
 
       - name: Установить зависимости кабинета из dev lock
         run: python3 -m pip install --require-hashes --requirement control_plane/requirements-dev.lock

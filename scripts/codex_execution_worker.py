@@ -107,7 +107,7 @@ def sha256(path: Path) -> str:
 
 
 class Broker:
-    def __init__(self, url: str, token_file: Path):
+    def __init__(self, url: str, token_file: Path, *, isolated_control_network: bool = False):
         try:
             parsed = urlsplit(url)
             port = parsed.port
@@ -115,11 +115,17 @@ class Broker:
         except ValueError as exc:
             raise RuntimeError("Invalid broker port") from exc
         origin = f"http://[{hostname}]:{port}" if hostname == "::1" else f"http://{hostname}:{port}"
-        if (parsed.scheme != "http" or hostname not in ("127.0.0.1", "::1")
-                or port is None or not 1 <= port <= 65535 or parsed.username is not None
+        if isolated_control_network:
+            # Docker's private, internal codex-control network is an explicit
+            # operator-selected trust domain. Do not accept a configurable DNS
+            # name, IP or port, and never send the Bearer secret to a relay.
+            allowed = hostname == "control-plane" and port == 8080
+        else:
+            allowed = hostname in ("127.0.0.1", "::1") and port is not None and 1 <= port <= 65535
+        if (parsed.scheme != "http" or not allowed or parsed.username is not None
                 or parsed.password is not None or parsed.path or parsed.query or parsed.fragment
                 or url != origin):
-            raise RuntimeError("Broker must be an exact loopback HTTP origin")
+            raise RuntimeError("Broker must be an explicitly allowed control-plane origin")
         self.url = url
         self.opener = build_opener(ProxyHandler({}), NoRedirect())
         self.token = read_one_shot_token(token_file)
@@ -294,6 +300,8 @@ def run_phase(broker: Broker, claim: dict, role: str, output: Path, codex: str) 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--broker", required=True)
+    parser.add_argument("--isolated-control-network", action="store_true",
+                        help="Allow only http://control-plane:8080 on a dedicated private Docker bridge")
     parser.add_argument("--token-file", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--codex", default="codex")
@@ -309,7 +317,8 @@ def main():
     if (args.output.is_symlink() or args.output.stat().st_uid != os.geteuid()
             or stat.S_IMODE(args.output.stat().st_mode) != 0o700):
         parser.error("output directory must be private")
-    broker = Broker(args.broker, args.token_file)
+    broker = Broker(args.broker, args.token_file,
+                    isolated_control_network=args.isolated_control_network)
     while True:
         claim = broker.post("/api/codex-worker/claim")
         if claim:

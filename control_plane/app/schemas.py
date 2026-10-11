@@ -298,6 +298,7 @@ class ExecutionRead(BaseModel):
     workspace_runtime_preflight_digest: str | None
     workspace_runtime_verified_at: datetime | None
     status: ExecutionStatus
+    backend: str
     stage: str
     opencode_session_id: str | None
     lead_role: str

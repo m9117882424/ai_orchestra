@@ -85,6 +85,14 @@ wait_postgres() {
 echo "[INFO] Creating exact historical 0001 PostgreSQL source database"
 docker compose up -d postgres >/dev/null
 wait_postgres
+# Match the actual schema head, not the head predating this feature.
+expected_head_revision="$(docker compose run --rm -T --no-deps \
+  -e CONTROL_PLANE_ENVIRONMENT=test \
+  control-plane python -c 'from app.schema import head_revision; print(head_revision())' | tail -n 1)"
+if [[ ! "$expected_head_revision" =~ ^[0-9]{8}_[0-9]{4}$ ]]; then
+  echo "[FAIL] Could not determine Alembic HEAD" >&2
+  exit 1
+fi
 
 # Generate the historical revision through Alembic itself, but in offline SQL mode.
 # Applying that SQL with psql inside the PostgreSQL container keeps this fixture
@@ -140,7 +148,7 @@ echo "[INFO] Executing clean restore + historical adoption drill"
 bash ./scripts/restore-drill.sh "$archive"
 evidence="$(find "$BACKUP_ROOT/drills" -maxdepth 1 -type f -name 'restore-drill-*.json' -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)"
 
-python3 - "$archive" "$evidence" <<'PY'
+python3 - "$archive" "$evidence" "$expected_head_revision" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -153,7 +161,7 @@ sha = hashlib.sha256(archive.read_bytes()).hexdigest()
 assert payload["result"] == "success"
 assert payload["source_backup_sha256"] == sha
 assert payload["pre_migration_revision"] == "unversioned"
-assert payload["post_migration_revision"] == "20260917_0011"
+assert payload["post_migration_revision"] == sys.argv[3]
 assert payload["restored_table_counts"].get("audit_events", 0) >= 1
 assert payload["restored_table_counts"].get("alembic_version", 0) == 1
 assert payload["restored_table_counts"].get("repositories") == 0
@@ -169,7 +177,7 @@ assert payload["task_workspace_restore"] == {
 assert payload["runner_job_restore"] == {"bindings_verified": 0, "checkpoint_bindings_verified": 0, "database_rows": 0}
 assert payload["observed_restore_rto_seconds"] >= 0
 assert payload["observed_backup_age_seconds"] >= 0
-print("[OK] Historical 0001 backup was restored, adopted to 0011 and retained the seeded audit marker")
+print(f"[OK] Historical 0001 backup was restored, adopted to {sys.argv[3]} and retained the seeded audit marker")
 PY
 
 echo "[INFO] Creating current-head backup with durable runner-job evidence"
@@ -266,11 +274,11 @@ bash ./scripts/backup.sh
 archive="$(find "$BACKUP_ROOT" -maxdepth 1 -type f -name 'ai-orchestra-*.tar.gz' -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)"
 bash ./scripts/restore-drill.sh "$archive"
 evidence="$(find "$BACKUP_ROOT/drills" -maxdepth 1 -type f -name 'restore-drill-*.json' -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)"
-python3 - "$evidence" <<'PYCHECK'
+python3 - "$evidence" "$expected_head_revision" <<'PYCHECK'
 import json, pathlib, sys
 payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-assert payload["pre_migration_revision"] == "20260917_0011"
-assert payload["post_migration_revision"] == "20260917_0011"
+assert payload["pre_migration_revision"] == sys.argv[2]
+assert payload["post_migration_revision"] == sys.argv[2]
 assert payload["restored_table_counts"].get("runner_jobs") == 1
 assert payload["runner_job_restore"] == {"bindings_verified": 1, "checkpoint_bindings_verified": 1, "database_rows": 1}
 assert payload["restored_table_counts"].get("task_workspaces") == 1

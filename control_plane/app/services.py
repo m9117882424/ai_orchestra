@@ -4,7 +4,7 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .models import AuditEvent, Budget, CapabilityGuard, UsageEvent
+from .models import AuditEvent, Budget, CapabilityGuard, ExecutionRun, UsageEvent
 from .settings import get_settings
 
 
@@ -73,11 +73,21 @@ def current_month_cost_summary(db: Session) -> dict:
             (UsageEvent.input_tokens > 0) | (UsageEvent.output_tokens > 0),
         )
     ) or 0
+    # ChatGPT subscription usage has no measurable per-call API charge in
+    # UsageEvent. The absence of a UsageEvent is not evidence of zero cost.
+    unknown_subscription_executions = db.scalar(
+        select(func.count(ExecutionRun.id)).where(
+            ExecutionRun.created_at >= start,
+            ExecutionRun.backend == "codex-subscription",
+        )
+    ) or 0
+    unknown_total = int(unknown_rows) + int(unknown_subscription_executions)
     status = "known"
-    if unknown_rows:
+    if unknown_total:
         status = "partial" if known_cost > 0 else "unknown"
     return {
         "known_cost": known_cost,
         "cost_status": status,
-        "unknown_automatic_cost_rows": int(unknown_rows),
+        "unknown_automatic_cost_rows": unknown_total,
+        "unknown_subscription_executions": int(unknown_subscription_executions),
     }

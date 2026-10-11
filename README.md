@@ -33,6 +33,7 @@ python3 scripts/codex_task.py \
   --repository /opt/corporate_taxi \
   --task-id taxi-001 \
   --role developer \
+  --allow-write \
   --prompt-file data/codex-prompts/taxi-001.txt
 ```
 
@@ -45,11 +46,37 @@ python3 scripts/codex_task.py \
 Лимиты подписки действуют; истечение лимита завершит задачу с ошибкой и не
 переключит её на платный API.
 
-Этот маршрут пока запускается оператором и **не регистрирует выполнение в
-`execution_runs`**: его события не являются Result Package control plane.
-Для работы с автоматическим назначением ролей, QA и approval gates потребуется
-отдельная интеграция Codex с lifecycle execution worker. Не запускайте его на
-worktree из `worktrees/managed`, которым владеет OpenCode execution worker.
+Операторский запуск выполняйте от непривилегированного `codex-worker` с отдельным
+`CODEX_HOME` внутри его home. Скрипт передает Codex только ограниченный набор
+переменных окружения, фиксирует исходный commit/tree, хеш prompt и evidence,
+конечный HEAD/status и оставляет стоимость и usage `unknown`, когда они не
+подтверждены. Роли чтения выбираются по умолчанию; запись требует явных
+`--role developer --allow-write`.
+
+Этот операторский маршрут остаётся отдельным от Control Plane. Для новых
+development execution теперь есть штатный backend `codex-subscription`:
+`POST /api/tasks/{task_id}/execute` без тела выбирает его по умолчанию. В
+состоянии `preparing` G2 Workspace Manager создаёт verified workspace; затем
+отдельный `scripts/codex_execution_worker.py` через scoped token claim получает
+`queued` run и последовательно выполняет `architect → qa → reviewer` только на
+чтение. Результаты каждой роли, SHA-256 evidence, lease generation и статус
+подписочной стоимости `unknown` видны в execution timeline/result package.
+Worker не получает manager Basic, DB credentials, OpenCode или Model Gateway
+credentials. Пока настройка master token file отсутствует, новый запуск
+`codex-subscription` вернёт 503 до создания run и не перейдёт на OpenCode
+автоматически. Worker принимает только одноразовую копию токена в отдельном
+закрытом каталоге, удаляет её до запуска Codex; staging требует контейнер
+UID 10001 и отдельный разрешённый вход ChatGPT. Платный OpenCode backend требует одновременно тела
+`{"backend":"opencode"}` и защищённого серверного флага
+`CONTROL_PLANE_ALLOW_PAID_OPENCODE_EXECUTION=true`.
+
+Этот этап поддерживает только read-only роли. Для записи кода используйте
+отдельный явно авторизованный операторский маршрут выше; он не считается
+выполненным run в CP. Порядок запуска и rollback описаны в
+[`docs/CODEX_SUBSCRIPTION_LANE.md`](docs/CODEX_SUBSCRIPTION_LANE.md).
+
+Операторский runbook, rollback и критические условия интеграции с Control Plane:
+[`docs/CODEX_SUBSCRIPTION_LANE.md`](docs/CODEX_SUBSCRIPTION_LANE.md).
 
 **AI Orchestra не является частью Trading Platform.** Trading Platform, Arvento, Wialon, Fuel Monitor, BI и другие системы — отдельные продукты, которые отдел может разрабатывать.
 

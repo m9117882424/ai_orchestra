@@ -1,0 +1,66 @@
+# Explicit staging overlay. Use with -f docker-compose.yml; never included by default.
+services:
+  control-plane:
+    environment:
+      CONTROL_PLANE_CODEX_WORKER_TOKEN_FILE: /run/secrets/codex-worker-token
+    volumes:
+      - type: bind
+        source: ${CODEX_CP_TOKEN_FILE:?set an absolute external CP token file path}
+        target: /run/secrets/codex-worker-token
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      - codex-control
+
+  codex-subscription-worker:
+    profiles: [codex-subscription]
+    build:
+      context: .
+      dockerfile: deploy/codex-worker/Dockerfile
+    image: ai-development-department/codex-subscription-worker:0.156.1
+    init: true
+    user: "10001:10001"
+    read_only: true
+    restart: "no"
+    networks:
+      - codex-control
+      - codex-egress
+    environment:
+      HOME: /home/orchestra
+      CODEX_HOME: /home/orchestra/.codex
+      CODEX_PREFLIGHT_WORKSPACE_ID: ${CODEX_PREFLIGHT_WORKSPACE_ID:?set a prepared G2 workspace ID}
+    volumes:
+      - task-workspaces:/workspace/worktrees/managed:ro
+      - codex-worker-home:/home/orchestra
+      - codex-worker-results:/private/codex-results
+      - type: bind
+        source: ${CODEX_WORKER_TOKEN_DIR:?set an absolute external one-shot directory path}
+        target: /run/codex-subscription-private
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    pids_limit: 128
+    mem_limit: 4g
+    cpus: 2.0
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  codex-control:
+    internal: true
+  codex-egress: {}
+
+volumes:
+  codex-worker-home:
+    external: true
+    name: ai-orchestra-codex-subscription-home
+  codex-worker-results:
+    external: true
+    name: ai-orchestra-codex-subscription-results

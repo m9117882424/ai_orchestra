@@ -14,10 +14,13 @@ from . import models as _models  # noqa: F401
 
 CONTROL_PLANE_ROOT = Path(__file__).resolve().parents[1]
 LEGACY_BASELINE_REVISION = "20260904_0001"
+PREVIOUS_HEAD_REVISION = "20260917_0011"
 
 _REVISION_EXCLUDED_COLUMNS = {
+    PREVIOUS_HEAD_REVISION: frozenset({("execution_runs", "backend")}),
     LEGACY_BASELINE_REVISION: frozenset(
         {
+            ("execution_runs", "backend"),
             ("execution_runs", "lease_owner"),
             ("execution_runs", "lease_generation"),
             ("execution_runs", "heartbeat_at"),
@@ -55,6 +58,7 @@ _REVISION_ABSENT_TABLES = {
     ),
 }
 _REVISION_EXCLUDED_INDEXES = {
+    PREVIOUS_HEAD_REVISION: frozenset(),
     LEGACY_BASELINE_REVISION: frozenset(
         {
             ("execution_runs", ("lease_expires_at",), False),
@@ -69,8 +73,10 @@ _REVISION_EXCLUDED_INDEXES = {
     )
 }
 _REVISION_EXCLUDED_CHECKS = {
+    PREVIOUS_HEAD_REVISION: frozenset({("execution_runs", "ck_execution_runs_backend")}),
     LEGACY_BASELINE_REVISION: frozenset(
         {
+            ("execution_runs", "ck_execution_runs_backend"),
             ("execution_runs", "ck_execution_runs_contract_version"),
             ("execution_runs", "ck_execution_runs_workspace_binding"),
             ("execution_runs", "ck_execution_runs_workspace_preflight"),

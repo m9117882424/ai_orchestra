@@ -8,6 +8,7 @@ os.environ["CONTROL_PLANE_ENVIRONMENT"] = "test"
 os.environ["CONTROL_PLANE_SERVER_USERNAME"] = "manager"
 os.environ["CONTROL_PLANE_SERVER_PASSWORD"] = "test-password"
 os.environ["CONTROL_PLANE_DEFAULT_MONTHLY_BUDGET"] = "12000"
+os.environ["CONTROL_PLANE_CODEX_WORKER_TOKEN_FILE"] = "/tmp/test-only-codex-worker-token"
 
 from control_plane.app.db import Base, SessionLocal, engine  # noqa: E402
 from control_plane.app.services import seed_defaults  # noqa: E402

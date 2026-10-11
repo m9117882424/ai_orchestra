@@ -1,0 +1,13 @@
+*
+!control_plane/
+!control_plane/requirements.lock
+!control_plane/app/
+!control_plane/app/__init__.py
+!control_plane/app/workspace_protocol.py
+!scripts/
+!scripts/codex_task.py
+!scripts/codex_execution_worker.py
+!deploy/
+!deploy/codex-worker/
+!deploy/codex-worker/preflight.py
+!deploy/codex-worker/start.sh

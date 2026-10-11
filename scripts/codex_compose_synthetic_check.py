@@ -10,6 +10,7 @@ env.update({
     "CODEX_CP_TOKEN_FILE": "/tmp/synthetic-cp-token",
     "CODEX_WORKER_TOKEN_DIR": "/tmp/synthetic-worker-token-dir",
     "CODEX_PREFLIGHT_WORKSPACE_ID": "00000000-0000-0000-0000-000000000000",
+    "CODEX_SANDBOX_SECCOMP_PROFILE": str(root / "deploy/codex-worker/security/codex-bwrap-seccomp.json"),
 })
 result = subprocess.run(
     ["docker", "compose", "-f", "docker-compose.yml", "-f",
@@ -31,6 +32,9 @@ assert worker["read_only"]
 assert worker["pids_limit"] == 128 and int(worker["mem_limit"]) == 4294967296
 assert "ALL" in worker["cap_drop"]
 assert "no-new-privileges:true" in worker["security_opt"]
+assert "apparmor=ai-orchestra-codex-worker" in worker["security_opt"]
+assert any(option.startswith("seccomp=") for option in worker["security_opt"])
+assert not any("unconfined" in option for option in worker["security_opt"])
 assert worker["restart"] == "no"
 assert worker["profiles"] == ["codex-subscription"]
 assert set(worker["environment"]) == {"HOME", "CODEX_HOME", "CODEX_PREFLIGHT_WORKSPACE_ID"}

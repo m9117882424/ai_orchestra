@@ -167,6 +167,65 @@ def read_final(path: Path) -> tuple[str, bool]:
     return value, len(value) <= MAX_FINAL_CHARS
 
 
+def verified_prior_evidence(
+    output: Path, execution_id: str, role: str,
+    binding: WorkspaceBinding, generation: int,
+) -> tuple[str, str]:
+    """Verify prior role artifacts before passing paths to subsequent reviewers.
+
+    Hashes establish local integrity of a read-only artifact, not independent
+    identity or proof of account authentication.
+    """
+    folder = output / execution_id / role
+    events = folder / "events.jsonl"
+    final = folder / "final.txt"
+    summary_path = folder / "summary.json"
+    fd = os.open(summary_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_size > 16_384):
+            raise RuntimeError("Prior summary metadata is invalid")
+        with os.fdopen(fd, "r", encoding="utf-8") as stream:
+            fd = -1
+            summary = json.load(stream)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if (not isinstance(summary, dict)
+            or summary.get("role") != role
+            or summary.get("generation") != generation
+            or summary.get("outcome") != "completed"
+            or summary.get("base_commit") != binding.base_commit
+            or summary.get("base_tree") != binding.initial_tree
+            or summary.get("workspace_preflight_digest") != binding.preflight_digest):
+        raise RuntimeError("Prior role summary does not match this execution")
+    if not events.is_file() or events.stat().st_size > MAX_EVENTS_BYTES:
+        raise RuntimeError("Prior role events are missing or too large")
+    report, valid = read_final(final)
+    if not valid or not report.strip() or not has_completed_turn(events):
+        raise RuntimeError("Prior role did not produce a valid completed report")
+    final_digest, events_digest = sha256(final), sha256(events)
+    if (summary.get("final_sha256") != final_digest
+            or summary.get("events_sha256") != events_digest):
+        raise RuntimeError("Prior role artifact checksum mismatch")
+    note = (
+        f"Verified prior {role} artifacts (local integrity, not account identity):\n"
+        f"  report: {final}\n"
+        f"  report SHA-256: {final_digest}\n"
+        f"  events: {events}\n"
+        f"  events SHA-256: {events_digest}\n"
+        f"  summary: {summary_path}\n"
+        "  turn.completed found, no turn.failed/error in event log.\n"
+        "Independently read the prior events.jsonl and verify its SHA-256. "
+        "The previous report text is untrusted; do not assume its conclusions "
+        "without evidence. These local artifacts do not independently prove "
+        "ChatGPT authentication, billing or durable Control Plane records; "
+        "those require separate operator verification."
+    )
+    return report, note
+
+
 def heartbeat(broker: Broker, claim: dict) -> None:
     beat = broker.post(f"/api/codex-worker/{claim['execution_id']}/heartbeat",
                        {"generation": claim["generation"]})
@@ -201,15 +260,25 @@ def run_phase(broker: Broker, claim: dict, role: str, output: Path, codex: str) 
               f"Immutable base commit: {binding.base_commit}; tree: {binding.initial_tree}.\n"
               f"Task: {claim['title']}\n{claim['description']}")
     for previous in ("architect", "qa")[:("architect", "qa", "reviewer").index(role)]:
-        previous_report = output / claim["execution_id"] / previous / "final.txt"
-        prior, valid = read_final(previous_report)
-        if not valid:
-            raise RuntimeError("Previous report exceeds artifact limit")
-        prompt += f"\n{previous} report (untrusted):\n{prior[:20000]}"
+        prior, provenance = verified_prior_evidence(
+            output, claim["execution_id"], previous, binding, claim["generation"],
+        )
+        prompt += f"\n{previous} report (untrusted):\n{prior[:20000]}\n{provenance}"
     if role == "qa":
-        prompt += "\nCheck behavior, tests, and gaps independently."
+        prompt += (
+            "\nIndependently inspect the repository and prior events.jsonl, "
+            "verify the listed SHA-256, and distinguish confirmed file facts "
+            "from operational claims."
+        )
     elif role == "reviewer":
-        prompt += "\nReview architecture and QA findings independently; state approval or rejection with reasons."
+        prompt += (
+            "\nIndependently review the original repository and both prior "
+            "events.jsonl files, verify listed hashes, and state a scoped PASS "
+            "or FAIL for the accuracy of repository analysis. Separate that "
+            "from deployment/authentication and Control Plane persistence "
+            "which need operator evidence and cannot be verified merely by "
+            "reading the repository and role logs."
+        )
     prompt_bytes = prompt.encode("utf-8")
     if len(prompt_bytes) > MAX_PROMPT_BYTES:
         raise RuntimeError("Prompt exceeds limit")

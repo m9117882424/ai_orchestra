@@ -41,7 +41,10 @@ services:
           create_host_path: false
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
-    security_opt: ["no-new-privileges:true"]
+    security_opt:
+      - "no-new-privileges:true"
+      - "apparmor=ai-orchestra-codex-worker"
+      - "seccomp=${CODEX_SANDBOX_SECCOMP_PROFILE:?set absolute reviewed profile path}"
     cap_drop: [ALL]
     pids_limit: 128
     mem_limit: 4g

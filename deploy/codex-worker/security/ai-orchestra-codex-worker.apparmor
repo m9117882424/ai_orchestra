@@ -1,0 +1,28 @@
+# AI Orchestra Codex read-only runner: dedicated container AppArmor policy.
+# Must be combined with Docker rootfs=read_only, cap_drop=ALL, no-new-privileges,
+# private UID 10001, G2 read-only volume, strict default-based seccomp, no Docker socket.
+# Allow nested unprivileged user-namespace bubblewrap mount operations only under
+# Linux kernel namespace capability rules. Do NOT attach to production taxi services.
+#include <tunables/global>
+
+profile ai-orchestra-codex-worker flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+
+  file,
+  network,
+  capability,
+  ptrace (read) peer=ai-orchestra-codex-worker,
+  signal (receive, send) peer=ai-orchestra-codex-worker,
+
+  mount,
+  umount,
+  pivot_root,
+
+  deny /proc/sys/** w,
+  deny /sys/** w,
+  deny /dev/mem rw,
+  deny /dev/kmem rw,
+  deny /var/run/docker.sock rwklx,
+  deny /run/docker.sock rwklx,
+  deny /var/lib/docker/** rwklx,
+}

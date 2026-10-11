@@ -119,6 +119,12 @@ recreate CP from the base Compose file without the overlay to remove the token
 mount/setting, and retain volumes and evidence. Do not remove database rows to
 force a migration downgrade.
 
+## Verifiable evidence handoff between roles
+
+Before QA or Reviewer begins, the trusted worker rechecks each previous role's private summary.json, SHA-256 of final.txt and events.jsonl, immutable Git base commit/tree, lease generation, and the turn.completed event. Inconsistency fails closed. The next agent receives the read-only artifact paths and verified checksums, and is instructed to inspect the original JSONL events rather than rely on previous agents' prose alone.
+
+These local checksums establish file integrity; they do **not** independently attest ChatGPT login, API cost, or persistence in Control Plane. The operator must verify those separately using the recorded child runs, audit trail, and final Result Package. Execution status completed denotes the end of the three inference phases, not a Reviewer PASS verdict. Human acceptance remains in task status qa.
+
 ## Supported contract
 
 `POST /api/tasks/{task_id}/execute` defaults to `{"backend":"codex-subscription"}` for development tasks. The request also accepts `{"backend":"opencode"}` only when the server has `CONTROL_PLANE_ALLOW_PAID_OPENCODE_EXECUTION=true`; without both conditions it returns 403. Unknown backends return 422. There is no fallback between providers. Existing rows migrate to `backend=opencode` and keep their existing owner. Old failed runs are not replayed.

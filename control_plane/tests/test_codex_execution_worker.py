@@ -4,6 +4,7 @@ import os
 import signal
 import sys
 import time
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -216,3 +217,123 @@ def test_worker_never_starts_inference_before_preflight_ack(tmp_path, monkeypatc
                                          "/api/codex-worker/run-1/preflight"]
     assert calls[-1][1] == {"generation": 1, "base_commit": "a" * 40,
                             "base_tree": "b" * 40, "workspace_preflight_digest": "c" * 64}
+
+
+def prior_fixture(tmp_path):
+    import hashlib
+    root = tmp_path / "result"
+    evidence = root / "execution-1" / "architect"
+    evidence.mkdir(parents=True)
+    (evidence / "final.txt").write_text("Verified independent repository report")
+    (evidence / "events.jsonl").write_text(
+        json.dumps({"type": "item.completed", "item": {"type": "command_execution"}}) + "\n"
+        + json.dumps({"type": "turn.completed"}) + "\n"
+    )
+    binding = SimpleNamespace(
+        base_commit="a" * 40,
+        initial_tree="b" * 40,
+        preflight_digest="c" * 64,
+    )
+    summary = {
+        "role": "architect",
+        "generation": 1,
+        "outcome": "completed",
+        "base_commit": binding.base_commit,
+        "base_tree": binding.initial_tree,
+        "workspace_preflight_digest": binding.preflight_digest,
+        "final_sha256": hashlib.sha256((evidence / "final.txt").read_bytes()).hexdigest(),
+        "events_sha256": hashlib.sha256((evidence / "events.jsonl").read_bytes()).hexdigest(),
+    }
+    (evidence / "summary.json").write_text(json.dumps(summary))
+    return root, evidence, binding
+
+
+def test_prior_evidence_is_verified_and_exposes_readonly_audit_paths(tmp_path):
+    root, evidence, binding = prior_fixture(tmp_path)
+    report, note = worker.verified_prior_evidence(
+        root, "execution-1", "architect", binding, 1,
+    )
+    assert report == "Verified independent repository report"
+    assert str(evidence / "events.jsonl") in note
+    assert str(evidence / "summary.json") in note
+    assert worker.sha256(evidence / "events.jsonl") in note
+    assert "do not independently prove" in note
+
+
+@pytest.mark.parametrize("changed", [
+    "report",
+    "events",
+    "base_commit",
+    "generation",
+    "role",
+    "outcome",
+    "missing_summary",
+    "symlink_summary",
+    "failed_turn",
+])
+def test_prior_evidence_refuses_missing_mismatched_or_corrupt_history(tmp_path, changed):
+    root, evidence, binding = prior_fixture(tmp_path)
+    summary_file = evidence / "summary.json"
+    summary = json.loads(summary_file.read_text())
+    if changed == "report":
+        (evidence / "final.txt").write_text("Modified after architect completed")
+    elif changed == "events":
+        (evidence / "events.jsonl").write_text('{"type":"turn.completed"}\n{"type":"x"}')
+    elif changed == "failed_turn":
+        import hashlib
+        events = evidence / "events.jsonl"
+        events.write_text('{"type":"turn.failed"}\n{"type":"turn.completed"}\n')
+        summary["events_sha256"] = hashlib.sha256(events.read_bytes()).hexdigest()
+    elif changed == "missing_summary":
+        summary_file.unlink()
+    elif changed == "symlink_summary":
+        backup = tmp_path / "backup.json"
+        backup.write_text(summary_file.read_text())
+        summary_file.unlink()
+        summary_file.symlink_to(backup)
+    else:
+        summary[changed] = "other" if changed != "generation" else 2
+    if changed not in ("missing_summary", "symlink_summary"):
+        summary_file.write_text(json.dumps(summary))
+    with pytest.raises((RuntimeError, OSError)):
+        worker.verified_prior_evidence(root, "execution-1", "architect", binding, 1)
+
+
+def test_qa_prompt_hands_off_verified_raw_events(tmp_path, monkeypatch):
+    root, evidence, _ = prior_fixture(tmp_path)
+    monkeypatch.setattr(worker, "verify_runtime_workspace", lambda *_: None)
+    monkeypatch.setattr(worker, "verify_chatgpt_auth", lambda *_: None)
+    class Broker:
+        def post(self, *_args, **_kwargs):
+            return {"ok": True}
+
+    captured = tmp_path / "prompt.txt"
+    fake = tmp_path / "fake-codex"
+    fake.write_text(
+        "#!" + sys.executable + "\n"
+        "import json, pathlib, sys\n"
+        "pathlib.Path(" + repr(str(captured)) + ").write_text(sys.stdin.read())\n"
+        "pathlib.Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text('QA audited previous events')\n"
+        "print(json.dumps({'type':'turn.completed'}))\n"
+    )
+    fake.chmod(0o755)
+    binding = dict(
+        execution_id="execution-1", task_id="task-1",
+        repository_id="repo-1", workspace_id="workspace-1",
+        base_commit="a"*40, branch_name="main",
+        workspace_path=str(tmp_path), initial_tree="b"*40,
+        tracked_entries=1, preflight_digest="c"*64,
+    )
+    claim = {
+        "workspace": binding, "execution_id": "execution-1",
+        "generation": 1, "title": "Read-only test",
+        "description": "Audit the repository", "deadline_at":
+        (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat(),
+    }
+    result = worker.run_phase(Broker(), claim, "qa", root, str(fake))
+    assert result["outcome"] == "completed"
+    prompt = captured.read_text()
+    assert "Verified independent repository report" in prompt
+    assert str(evidence / "events.jsonl") in prompt
+    assert worker.sha256(evidence / "events.jsonl") in prompt
+    assert "Independently inspect" in prompt

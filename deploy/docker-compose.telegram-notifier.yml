@@ -1,0 +1,64 @@
+# Opt-in overlay. Never load this file from normal production compose commands.
+# Bring up only after reviewed CI, isolated staging, and a read-only DB role.
+services:
+  telegram-notifier:
+    profiles: [telegram-notifications]
+    build:
+      context: .
+      dockerfile: notifications/Dockerfile
+    image: ai-development-department/telegram-notifier:0.1.0
+    init: true
+    restart: unless-stopped
+    user: "0:0"
+    read_only: true
+    environment:
+      ORCHESTRA_NOTIFY_DB_DSN_FILE: /run/secrets/telegram-notifier-dsn
+      ORCHESTRA_NOTIFY_TELEGRAM_TOKEN_FILE: /run/secrets/assistant-notifications.telegram-token
+      ORCHESTRA_NOTIFY_TELEGRAM_CHAT_ID_FILE: /run/secrets/assistant-notifications.chat-id
+      ORCHESTRA_NOTIFY_STATE_PATH: /var/lib/orchestra-notifier/state.sqlite3
+      ORCHESTRA_NOTIFY_SEND_ENABLED: ${ORCHESTRA_TELEGRAM_SEND_ENABLED:-no}
+    volumes:
+      - telegram-notifier-state:/var/lib/orchestra-notifier
+      - type: bind
+        source: ${ORCHESTRA_TELEGRAM_DB_DSN_FILE:?provide an absolute root-only read-only PostgreSQL DSN file}
+        target: /run/secrets/telegram-notifier-dsn
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${ORCHESTRA_TELEGRAM_TOKEN_FILE:?provide an absolute root-only bot token file}
+        target: /run/secrets/assistant-notifications.telegram-token
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${ORCHESTRA_TELEGRAM_CHAT_ID_FILE:?provide an absolute root-only chat ID file}
+        target: /run/secrets/assistant-notifications.chat-id
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      - control-db
+      - telegram-egress
+    depends_on:
+      postgres:
+        condition: service_healthy
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    pids_limit: 32
+    mem_limit: 128m
+    cpus: 0.25
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  telegram-egress: {}
+
+volumes:
+  telegram-notifier-state: {}

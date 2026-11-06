@@ -1,0 +1,47 @@
+name: Telegram notifier checks
+
+on:
+  push:
+    paths:
+      - "notifications/**"
+      - "deploy/docker-compose.telegram-notifier.yml"
+      - "deploy/sql/telegram_notify_index.sql"
+      - "docs/G5_TELEGRAM_NOTIFICATIONS.md"
+      - ".github/workflows/telegram-notifications.yml"
+  pull_request:
+    paths:
+      - "notifications/**"
+      - "deploy/docker-compose.telegram-notifier.yml"
+      - "deploy/sql/telegram_notify_index.sql"
+      - "docs/G5_TELEGRAM_NOTIFICATIONS.md"
+      - ".github/workflows/telegram-notifications.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Compile and run isolated notifier tests
+        run: |
+          python3 -m compileall -q notifications
+          python3 -m unittest discover -v -s notifications/tests
+
+  build-and-compose:
+    runs-on: ubuntu-24.04
+    env:
+      ORCHESTRA_TELEGRAM_DB_DSN_FILE: /tmp/ci-notifier-dsn
+      ORCHESTRA_TELEGRAM_TOKEN_FILE: /tmp/ci-notifier-token
+      ORCHESTRA_TELEGRAM_CHAT_ID_FILE: /tmp/ci-notifier-chat-id
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Validate optional compose overlay
+        run: |
+          cp .env.example .env
+          cp .env.providers.example .env.providers
+          cp .env.repositories.example .env.repositories
+          docker compose -f docker-compose.yml -f deploy/docker-compose.telegram-notifier.yml config --quiet
+      - name: Build isolated notifier image
+        run: docker build --file notifications/Dockerfile --tag orchestra-telegram-notifier:ci .

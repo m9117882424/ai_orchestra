@@ -1,5 +1,7 @@
 # AI Orchestra — Execution Platform V2.1 Roadmap
 
+Текущие версии, подтверждённые выкладки и открытые работы ведутся в [сводке состояния](PROJECT_STATUS.md). Статусы у G1–G4 ниже фиксируют приёмку соответствующих вех.
+
 ## Цель
 
 Построить полноценный виртуальный отдел разработки, способный надёжно вести проекты разного масштаба — от обычных внутренних сервисов до дорогих business-critical систем — без привязки к конкретному репозиторию, стеку или отрасли.
@@ -185,7 +187,7 @@ Evidence/Observability и не заявляется как завершённа�
 
 # G4 — Evidence, Result Package & Observability
 
-Статус: **G4.3 engineering complete, production 2026-09-23** (`b5f6179`, schema `20260917_0011`). G4.1-G4.3 прошли engineering CI, post-merge CI и production smoke. Единственное внешнее ограничение acceptance: свежий полный provider-backed end-to-end QA не подтверждён из-за недоступного provider balance; платные provider-вызовы в engineering closure не выполнялись. Контракт: [`G4_EVIDENCE_OBSERVABILITY.md`](G4_EVIDENCE_OBSERVABILITY.md).
+Статус: **G4.3 engineering complete, production 2026-09-23** (`b5f6179`, schema `20260917_0011`). G4.1-G4.3 прошли engineering CI, post-merge CI и production smoke. Свежий сквозной тест платного маршрута OpenCode оставался вне этой приёмки. Позднее маршрут Codex по подписке проверен отдельно на стенде. Контракт: [`G4_EVIDENCE_OBSERVABILITY.md`](G4_EVIDENCE_OBSERVABILITY.md).
 
 ### Live progress
 - stage/role;
@@ -222,6 +224,8 @@ Evidence/Observability и не заявляется как завершённа�
 ---
 
 # G5 — Controlled Git & External Actions
+
+G5.1 подготовлен в PR №46. Перед слиянием требуется согласовать миграцию с текущим head. [Открытые работы](PROJECT_STATUS.md#открытые-работы-и-условия-приёмки)
 
 Approval связан с точным действием:
 - task/repository;
@@ -292,21 +296,7 @@ Research/modeling физически и политически отделён о
 
 # Ближайший порядок реализации
 
-1. Закрыть Execution Progress V1.1.
-2. Alembic baseline + migration preflight.
-3. Dependency/build reproducibility hardening.
-4. OpenCode toolchain (`ripgrep` и smoke).
-5. Backup/restore drill.
-6. Temporal durable-workflow PoC.
-7. Idempotency/fencing/reconciliation foundation.
-8. Repository Registry.
-9. Repo Manager.
-10. Task worktrees + workspace preflight.
-11. Isolated execution runner.
-12. Real multi-agent child executions.
-13. Result package/evidence.
-14. Scoped Git push/PR approvals.
-15. FinOps + notifications + operational hardening.
+Операционный приоритет — принять постоянное выполнение из кабинета, затем проверить восстановление уже начатой роли и цикл задачи с корректировкой требований. После этого — контролируемые действия Git и дальнейшие этапы G5–G6. Критерии приёмки и блокеры ведутся в [одной сводке](PROJECT_STATUS.md#открытые-работы-и-условия-приёмки).
 
 ## Definition of Done для базового «виртуального отдела разработки»
 

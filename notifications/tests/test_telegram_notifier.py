@@ -158,6 +158,10 @@ class NotifierTests(unittest.TestCase):
         limiter.wait_turn()
         self.assertEqual(waits, [60.0])
 
+    def test_second_worker_cannot_share_active_state(self):
+        with self.assertRaisesRegex(RuntimeError, "active state owner"):
+            StateStore(self.state_path)
+
 
 if __name__ == "__main__":
     unittest.main()

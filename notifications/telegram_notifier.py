@@ -319,9 +319,13 @@ class AuditReader:
                 "AND idx.indisvalid AND idx.indisready AND idx.indpred IS NULL "
                 "AND idx.indexprs IS NULL AND idx.indnkeyatts >= 2 "
                 "AND idx.indoption[0]=0 AND idx.indoption[1]=0 "
-                "AND idx.indcollation[0]=0 AND idx.indcollation[1]=0 "
+                "AND idx.indcollation[0]=created.attcollation "
+                "AND idx.indcollation[1]=event_id.attcollation "
                 "AND op0.opcdefault AND op1.opcdefault "
-                "AND op0.opcintype=created.atttypid AND op1.opcintype=event_id.atttypid "
+                "AND op0.opcintype=created.atttypid "
+                "AND (op1.opcintype=event_id.atttypid OR "
+                "(event_id.atttypid='pg_catalog.varchar'::regtype AND "
+                "op1.opcintype='pg_catalog.text'::regtype)) "
                 "AND idx.indkey[0]=created.attnum AND idx.indkey[1]=event_id.attnum)"
             ).fetchone()[0]
             if not index_ready:

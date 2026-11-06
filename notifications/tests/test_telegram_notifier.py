@@ -406,7 +406,9 @@ class NotifierTests(unittest.TestCase):
             self.assertTrue(any("statement_timeout" in sql for sql, _ in pg.sql))
             self.assertTrue(any("lock_timeout" in sql for sql, _ in pg.sql))
             self.assertTrue(any("am.amname='btree'" in sql and "opcdefault" in sql
-                                and "idx.indoption[0]=0" in sql for sql, _ in pg.sql))
+                                and "idx.indoption[0]=0" in sql and "idx.indcollation[1]=event_id.attcollation" in sql
+                                and "'pg_catalog.varchar'::regtype" in sql
+                                for sql, _ in pg.sql))
             pg.extra_grants = True
             with self.assertRaises(PermissionError):
                 reader.current_time()

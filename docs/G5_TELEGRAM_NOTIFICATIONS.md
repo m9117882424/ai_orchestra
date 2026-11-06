@@ -61,7 +61,8 @@ Issue: [#54](https://github.com/m9117882424/ai_orchestra/issues/54). Control Pla
    `deploy/sql/telegram_notify_index.sql` (`CREATE INDEX CONCURRENTLY`);
    readiness check проверяет B-tree, типы, порядок/направление и стандартные
    классы операторов; отказывается запускаться без действующего индекса
-   `(created_at,id)`.
+   `(created_at,id)`. В текущей схеме `audit_events.id` — `varchar(36)`, поэтому
+   для него штатно используется `text_ops` и collation столбца (не UUID/нулевая collation).
 5. Проверено, что бот и chat ID указаны в корректных root-only файлах,
    Telegram доступен из выделенной egress-сети, а state volume сохраняется
    после рестарта контейнера. Код отклоняет симлинки, не-root владельца,

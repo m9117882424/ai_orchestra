@@ -11,6 +11,7 @@ import argparse
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import fcntl
 import json
 import logging
 import os
@@ -130,6 +131,15 @@ def format_notice(event: AuditNotice) -> str:
 class StateStore:
     def __init__(self, path: Path):
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.lock_file = path.with_name(path.name + ".lock").open("a+b")
+        os.chmod(self.lock_file.name, 0o600)
+        # Multiple workers with the same state volume must never deliver a
+        # single event concurrently. flock is released on process death.
+        try:
+            fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            self.lock_file.close()
+            raise RuntimeError("Notifier already has an active state owner") from None
         self.db = sqlite3.connect(path)
         os.chmod(path, 0o600)
         self.db.execute("PRAGMA busy_timeout = 5000")
@@ -168,6 +178,8 @@ class StateStore:
 
     def close(self) -> None:
         self.db.close()
+        fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_UN)
+        self.lock_file.close()
 
 
 class AuditReader:

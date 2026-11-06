@@ -21,7 +21,7 @@ import ssl
 import time
 from urllib import error, request
 from uuid import UUID
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 LOG = logging.getLogger("ai_orchestra.telegram_notifier")
@@ -48,7 +48,11 @@ ENTITY_NAMES = {
     "execution_run": "Запуск",
     "runner_job": "Задание",
 }
-TIMEZONE = ZoneInfo("Europe/Istanbul")
+try:
+    TIMEZONE = ZoneInfo("Europe/Istanbul")
+except ZoneInfoNotFoundError:
+    # Slim images may not ship zoneinfo files; Turkey uses UTC+03:00 in 2026.
+    TIMEZONE = timezone(timedelta(hours=3))
 TOKEN_PATTERN = re.compile(r"^[0-9]{6,12}:[A-Za-z0-9_-]{20,}$")
 CHAT_PATTERN = re.compile(r"^-?[0-9]{4,20}$")
 

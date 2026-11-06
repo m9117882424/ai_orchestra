@@ -1,6 +1,6 @@
 # G4 — Evidence, Result Package & Observability
 
-Status: **G4.3 engineering complete and deployed to production on 2026-09-23** at merge `b5f6179` with schema `20260917_0011`. G4.1-G4.3 engineering, CI and production smoke gates are complete. One external acceptance limitation remains: a fresh provider-backed full end-to-end QA run has not been re-confirmed because provider balance is unavailable; no paid provider call is required to establish the engineering state below. G4 does not grant Git write, merge, deploy, secret or external-write authority.
+G4.3 was deployed on 2026-09-23 at merge `b5f6179` with schema `20260917_0011`. G4.1–G4.3 engineering, CI and production smoke gates passed. A fresh paid OpenCode end-to-end QA run was outside that acceptance. The capability guard retained its deny defaults for Git write, merge, deployment, secrets and external writes. See [project status](PROJECT_STATUS.md) for the deployed version and later Codex pilot.
 
 ## Objective
 
@@ -47,7 +47,7 @@ G4.2 originally left full changed-file names/diff and generated artifact provena
 - terminal Result Package ordering guarantees trusted workspace inspection/audit evidence is flushed before final package materialization;
 - no schema migration was required beyond `20260917_0011`, and no new Git/deploy/external-write authority was introduced.
 
-G4.3 engineering acceptance is supported by full CI, post-merge CI, backup verification and read-only production smoke. The only outstanding acceptance item is a fresh provider-backed full end-to-end QA confirmation once provider balance is available.
+G4.3 engineering acceptance is supported by full CI, post-merge CI, backup verification and read-only production smoke.
 
 ## Acceptance gates
 
@@ -55,4 +55,4 @@ G4.1 required migration/restore compatibility, schema-shape checks, idempotent e
 
 G4.2 additionally requires exact child-session/task-call correlation tests, idempotent automatic usage snapshots, redacted structured verdict tests, conservative retry-lineage tests, `0010 -> 0011` migration/restore coverage, full suite and the same review/merge/production change-control separation.
 
-G4.3 additionally passed changed-file/artifact provenance regression coverage, symlink/deletion/race-safe inspection hardening, operator timeline and observability API tests, high-assurance completeness/alert tests, Docker buildability, disposable-runner isolation, durable Runner Manager, Temporal PoC, backup/restore disaster recovery and PostgreSQL migration semantics. Production rollout used a verified backup and read-only health/schema/observability smoke. Provider-backed full E2E remains deliberately outside this engineering gate until balance is available.
+G4.3 additionally passed changed-file/artifact provenance regression coverage, symlink/deletion/race-safe inspection hardening, operator timeline and observability API tests, high-assurance completeness/alert tests, Docker buildability, disposable-runner isolation, durable Runner Manager, Temporal PoC, backup/restore disaster recovery and PostgreSQL migration semantics. Production rollout used a verified backup and read-only health/schema/observability smoke. The subscription worker has its own [acceptance criteria](CODEX_SUBSCRIPTION_LANE.md).

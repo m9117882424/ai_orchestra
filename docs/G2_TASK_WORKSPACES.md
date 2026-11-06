@@ -2,16 +2,15 @@
 
 ## Статус и назначение
 
-G2.3 — engineering candidate для правила **one task execution = one immutable
-repository binding = one isolated Git workspace**. До этого инкремента Repo
-Manager уже умел безопасно получить read-only mirror, но execution не был
-технически привязан к конкретному commit и отдельному каталогу.
+G2.3 принят как часть G2 и закрепляет правило **один запуск, одна привязка к коммиту и один изолированный Git-каталог**. История приёмки G2 приведена в [roadmap](ROADMAP_EXECUTION_PLATFORM_V2.md#g2--repository--workspace-platform).
 
 Инкремент не даёт AI права `push`, создавать PR, выполнять merge или deploy. Он
 также не является disposable execution sandbox: исполнение недоверенных build и
 dependency scripts остаётся задачей G3.
 
 ## Trust boundaries
+
+Таблица описывает маршрут G2 через OpenCode. Для подписочного воркера действуют отдельные [границы доступа](CODEX_SUBSCRIPTION_LANE.md#supported-contract).
 
 | Компонент | Mirror | Task workspace | Git credential | Model API |
 |---|---:|---:|---:|---:|
@@ -59,7 +58,7 @@ secrets ему по-прежнему недоступны. Execution Worker мо
    транзакция, удерживающая повторную блокировку Registry row, переводит workspace
    в `ready`, а execution — в `queued`. Поэтому отзыв repository trust во время
    checkout не может пересечь границу публикации очереди.
-6. Execution Worker сверяет DB binding и read-only filesystem evidence, затем
+6. В маршруте OpenCode Execution Worker сверяет DB binding и read-only filesystem evidence, затем
     повторяет проверку непосредственно перед единственным prompt, запускающим
     inference. На границе prompt он удерживает row lock Repository и требует
     `enabled + ready`: конкурентный отзыв trust либо завершается первым и

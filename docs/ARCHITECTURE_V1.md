@@ -8,6 +8,8 @@ AI Orchestra — самостоятельный виртуальный отде�
 
 ## 2. Поток моделей
 
+Эта схема описывает опциональный маршрут OpenCode через Model Router. Запуск Codex по подписке использует отдельного воркера и брокер Control Plane. [Контракт воркера](CODEX_SUBSCRIPTION_LANE.md#supported-contract) · [Рабочие версии](PROJECT_STATUS.md#подтверждённые-версии)
+
 ```text
 OpenCode / агенты
         |

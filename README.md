@@ -2,6 +2,14 @@
 
 AI Orchestra — самостоятельный AI-отдел, который принимает задачи владельца, декомпозирует их между профильными ролями, реализует изменения в изолированных Git worktree, проводит QA и независимое review и оставляет проверяемый audit trail.
 
+## С чего начать
+
+- [Состояние и версии](docs/PROJECT_STATUS.md) — рабочий контур, стенд, версии БД и открытые условия приёмки.
+- [Запуск Codex по подписке](docs/CODEX_SUBSCRIPTION_LANE.md) — запуск из кабинета на стенде, ограничения воркера и откат.
+- [Дорожная карта](docs/ROADMAP_EXECUTION_PLATFORM_V2.md) — вехи и целевые возможности отдела.
+
+Рабочий маршрут для текущих задач — операторский Codex CLI. Постоянный запуск из кабинета проходит отдельную приёмку.
+
 ## Разработка через ChatGPT Pro / Codex CLI
 
 Для запуска первой задачи без оплаты запросов AITunnel есть отдельный операторский
@@ -75,24 +83,11 @@ UID 10001 и отдельный разрешённый вход ChatGPT. Пла�
 выполненным run в CP. Порядок запуска и rollback описаны в
 [`docs/CODEX_SUBSCRIPTION_LANE.md`](docs/CODEX_SUBSCRIPTION_LANE.md).
 
-Операторский runbook, rollback и критические условия интеграции с Control Plane:
-[`docs/CODEX_SUBSCRIPTION_LANE.md`](docs/CODEX_SUBSCRIPTION_LANE.md).
-
 **AI Orchestra не является частью Trading Platform.** Trading Platform, Arvento, Wialon, Fuel Monitor, BI и другие системы — отдельные продукты, которые отдел может разрабатывать.
-
-> G1 принят для pilot 2026-09-07, G2 — в production 2026-09-15,
-> G3.1–G3.3 — в production 2026-09-17 на `8cea451`, schema `20260916_0009`.
-> Свидетельства: [`G3 production acceptance`](docs/G3_PRODUCTION_ACCEPTANCE_2026-09-17.md).
-> Финальный post-merge CI #400 для документации закрытия (`775019c`) — green.
-> Следующий этап — G4: Evidence, Result Package & Observability.
-> Перед ним см. [`чекап и подготовленные исправления`](docs/PRE_G4_CHECKUP_2026-09-17.md).
-> Приёмка G3 не означает автоматический rollout новых изменений: `git push`, merge, production deploy, доступ к
-> product secrets, запись во внешние production-системы и финансовое исполнение
-> технически не входят в разрешенный контур отдела.
 
 ## Ключевые свойства
 
-- OpenCode Web как рабочее место AI-руководителя и специалистов;
+- OpenCode Web для опционального маршрута через Model Gateway и Model Router;
 - кабинет руководителя на FastAPI;
 - PostgreSQL для задач, согласований, бюджетов и audit trail;
 - versioned Repository Registry без Git credentials;
@@ -117,6 +112,8 @@ UID 10001 и отдельный разрешённый вход ChatGPT. Пла�
 Подробные границы описаны в [`docs/ARCHITECTURE_V1.md`](docs/ARCHITECTURE_V1.md), а lifecycle выполнения — в [`docs/G1_EXECUTION_LIFECYCLE.md`](docs/G1_EXECUTION_LIFECYCLE.md).
 
 ## Архитектура
+
+Ниже показан опциональный маршрут OpenCode через Model Router. Запуск по подписке из кабинета использует отдельного Codex-воркера. [Контракт запуска](docs/CODEX_SUBSCRIPTION_LANE.md#supported-contract)
 
 ```text
                          Владелец
@@ -241,11 +238,12 @@ Model Router построен на LiteLLM Proxy, поэтому архитек�
 Для воспроизводимости версии закреплены:
 
 ```text
-OpenCode  1.18.27
-LiteLLM   1.98.0 stable
+Codex CLI  0.156.1
+OpenCode   1.18.27
+LiteLLM    1.98.0 stable
 ```
 
-`latest` в production build не используется. Обновление версии — отдельное изменение с build + smoke + review.
+Это версии инструментов в репозитории. Фактическую выкладку сверяйте по SHA исходников, ID образов и схеме БД. [Состояние и версии](docs/PROJECT_STATUS.md#подтверждённые-версии)
 
 ## Секреты
 
@@ -312,7 +310,9 @@ trusted Repo Manager. Для public repositories он остаётся пуст�
 
 На основном сервере Orchestra имеет отдельные лимиты и не должен вытеснять действующие production-сервисы.
 
-## Быстрый запуск
+## Лабораторный запуск OpenCode и AITunnel
+
+Этот сценарий поднимает стек OpenCode и выполняет запросы к провайдерам. Для поддержания рабочего контура используйте его принятый Compose-профиль и [инструкцию обновления](#обновление).
 
 ```bash
 cd /opt
@@ -360,7 +360,7 @@ make smoke
 5. PostgreSQL;
 6. Execution Worker, Repo Manager и Workspace Manager health.
 
-## Переход на прямые API
+## Переход OpenCode на прямые API
 
 Заполните в `.env.providers`:
 
@@ -436,7 +436,7 @@ qa
 done
 ```
 
-Для нетривиальной задачи стандартная цепочка:
+Для опционального маршрута OpenCode стандартная цепочка:
 
 ```text
 Owner
@@ -537,31 +537,7 @@ curl -u "opencode:ПАРОЛЬ" http://127.0.0.1:4096/global/health
 
 ## Обновление
 
-Для обновления, содержащего schema migration, нельзя запускать новый Control Plane
-до `make migrate`. Полный порядок и stop conditions описаны в
-[`docs/G1_SCHEMA_MIGRATION_RUNBOOK.md`](docs/G1_SCHEMA_MIGRATION_RUNBOOK.md).
-
-```bash
-make backup
-git pull --ff-only
-make init
-make preflight
-make build
-docker compose stop control-plane execution-worker repo-manager workspace-manager opencode
-# Для принятого G3, с настроенными RUNNERD_SOCKET_GID / RUNNERD_SOCKET_HOST_PATH:
-docker compose -f docker-compose.yml -f deploy/docker-compose.runner-manager.yml stop runner-manager
-docker compose up -d postgres
-make migrate
-make up
-docker compose -f docker-compose.yml -f deploy/docker-compose.runner-manager.yml up -d --no-deps runner-manager
-make schema-check
-make smoke
-```
-
-`make migrate` и `make schema-check` отключают Compose TTY и поэтому одинаково
-работают из интерактивного терминала, SSH heredoc и автоматизированного runner.
-Runner Manager собирается отдельно с его overlay; полная последовательность,
-включая проверку активных jobs и обновление runnerd/image, описана в runbook.
+[Инструкция миграции](docs/G1_SCHEMA_MIGRATION_RUNBOOK.md#deployment-sequence) описывает подготовку резервной копии, порядок смены схемы и проверку образов. Применяйте тот же Compose-проект и набор конфигураций, которые использует рабочий контур. Поднимайте сервисы по утверждённому списку. Проверки провайдеров через `make smoke` относятся к лабораторному маршруту OpenCode.
 
 ## Безопасная эксплуатация
 

@@ -2,15 +2,11 @@
 
 ## Scope
 
-This document defines the repository-side G1 lifecycle for development executions.
-It does not grant Git write, external-write, secret, financial, or production-deploy
-authority. Temporal remains an isolated durability PoC; the production execution
-lifecycle currently uses PostgreSQL state plus a dedicated `execution-worker`.
+This document describes the G1 PostgreSQL lifecycle for the optional OpenCode backend and its dedicated `execution-worker`. Temporal remains an isolated durability PoC. The subscription backend has its own [worker protocol](CODEX_SUBSCRIPTION_LANE.md). The [environment matrix](PROJECT_STATUS.md) records which services and routes are active.
 
 ## Durable state machine
 
-1. `POST /api/tasks/{task_id}/execute` commits an `ExecutionRun` in
-   `queued / dispatch_pending` before calling OpenCode.
+1. An explicitly enabled OpenCode run persists an `ExecutionRun` before dispatch. With the G2 contract, the run enters `preparing` and moves to `queued / dispatch_pending` after workspace preparation. [Workspace lifecycle](G2_TASK_WORKSPACES.md)
 2. `execution-worker` claims the row with a PostgreSQL lease and monotonically
    increasing `lease_generation`.
 3. Dispatch reconciles an OpenCode session by execution metadata and uses
@@ -18,7 +14,7 @@ lifecycle currently uses PostgreSQL state plus a dedicated `execution-worker`.
 4. The worker, not the browser, observes OpenCode and commits the result.
 5. A completed execution moves the task to `qa`.
 
-The browser only reads execution state and progress. The legacy production
+Polling in the browser reads execution state and progress. The legacy production
 compatibility wrapper rewrites cached `POST /refresh` requests to a read-only list
 request; the core API has no mutating refresh endpoint.
 
@@ -88,7 +84,7 @@ intent or generation.
 
 The worker updates `/tmp/ai-orchestra-execution-worker.heartbeat` from its main
 loop. Docker marks the service unhealthy if the file is absent or older than three
-minutes. Production smoke requires the container to be both running and healthy.
+minutes. When OpenCode is enabled, its smoke check requires the container to be running and healthy.
 
 Manager responses expose:
 
@@ -103,11 +99,7 @@ changing the durable lifecycle.
 
 ## Required deployment order
 
-The application image and database revision must move together. For an existing
-installation, follow [`G1_SCHEMA_MIGRATION_RUNBOOK.md`](G1_SCHEMA_MIGRATION_RUNBOOK.md):
-build the target image, stop the old Control Plane lifecycle writer, run the backed-up
-Alembic migration, then start `control-plane` and `execution-worker` and run smoke.
-Starting the new services before migration is a stop-condition violation.
+The application image and database revision must move together. Follow the [schema migration runbook](G1_SCHEMA_MIGRATION_RUNBOOK.md#deployment-sequence) and restore the approved service list after checking the migrated database.
 
 ## Verification
 

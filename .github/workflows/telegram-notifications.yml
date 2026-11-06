@@ -5,12 +5,14 @@ on:
     paths:
       - "notifications/**"
       - "deploy/docker-compose.telegram-notifier.yml"
+      - "deploy/sql/telegram_notify_index.sql"
       - "docs/G5_TELEGRAM_NOTIFICATIONS.md"
       - ".github/workflows/telegram-notifications.yml"
   pull_request:
     paths:
       - "notifications/**"
       - "deploy/docker-compose.telegram-notifier.yml"
+      - "deploy/sql/telegram_notify_index.sql"
       - "docs/G5_TELEGRAM_NOTIFICATIONS.md"
       - ".github/workflows/telegram-notifications.yml"
 

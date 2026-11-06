@@ -1,15 +1,26 @@
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
+import os
 from pathlib import Path
+import stat
+import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest import mock
+from urllib import error
 from uuid import uuid4
 
 from notifications.telegram_notifier import (
     ALLOWED_ACTIONS,
     AuditNotice,
+    AuditReader,
     MessageLimiter,
     Settings,
     StateStore,
+    TelegramRateLimited,
+    TelegramSender,
+    _read_secret,
     format_notice,
     poll_once,
 )
@@ -50,8 +61,13 @@ class FakeSender:
     def __init__(self):
         self.messages = []
         self.fail_next = False
+        self.rate_limit_next = 0
 
     def send(self, text):
+        if self.rate_limit_next:
+            wait = self.rate_limit_next
+            self.rate_limit_next = 0
+            raise TelegramRateLimited(wait)
         if self.fail_next:
             self.fail_next = False
             raise RuntimeError("network failure with potential secret")
@@ -161,6 +177,185 @@ class NotifierTests(unittest.TestCase):
     def test_second_worker_cannot_share_active_state(self):
         with self.assertRaisesRegex(RuntimeError, "active state owner"):
             StateStore(self.state_path)
+
+    def test_bootstrap_is_atomic_when_sqlite_aborts_between_cursor_keys(self):
+        self.state.db.execute(
+            "CREATE TRIGGER simulate_crash BEFORE INSERT ON meta "
+            "WHEN NEW.key='scan_through' BEGIN SELECT RAISE(ABORT,'simulated crash'); END"
+        )
+        with self.assertRaisesRegex(Exception, "simulated crash"):
+            self.state.bootstrap(self.now)
+        self.assertIsNone(self.state.get_time("started_at"))
+        self.assertIsNone(self.state.get_time("scan_through"))
+        self.state.db.execute("DROP TRIGGER simulate_crash")
+        self.assertTrue(self.state.bootstrap(self.now))
+        self.assertEqual(self.state.get_time("started_at"), self.now)
+        self.assertEqual(self.state.get_time("scan_through"), self.now)
+
+    def test_recover_old_started_at_with_missing_scan_cursor(self):
+        earlier = self.now - timedelta(hours=5)
+        self.state.set_time("started_at", earlier)
+        reader = FakeReader(self.now, [notice("task.created", earlier + timedelta(minutes=3))])
+        sender = FakeSender()
+        self.assertEqual(poll_once(self.cfg, self.state, reader, sender), 1)
+        self.assertEqual(self.state.get_time("started_at"), earlier)
+        self.assertEqual(len(sender.messages), 1)
+
+    def test_late_commit_older_than_overlap_is_found_by_reconciliation(self):
+        reader = FakeReader(self.now, [])
+        sender = FakeSender()
+        self.assertEqual(poll_once(self.cfg, self.state, reader, sender), 0)
+        reader.now = self.now + timedelta(minutes=12)
+        poll_once(self.cfg, self.state, reader, sender)
+        event = notice("task.created", self.now + timedelta(seconds=15))
+        reader.events = [event]  # committed > 120 s after its timestamp
+        reader.now = self.now + timedelta(minutes=72)
+        self.assertEqual(poll_once(self.cfg, self.state, reader, sender), 1)
+        self.assertTrue(self.state.was_delivered(event.id))
+        self.assertEqual(poll_once(self.cfg, self.state, reader, sender), 0)
+
+    def test_terminal_timeout_and_stalled_tool_events_are_delivered(self):
+        reader = FakeReader(self.now, [])
+        sender = FakeSender()
+        poll_once(self.cfg, self.state, reader, sender)
+        reader.events = [
+            notice("execution.timed_out", self.now + timedelta(seconds=1)),
+            notice("execution.stalled_tool", self.now + timedelta(seconds=2)),
+        ]
+        reader.now += timedelta(seconds=30)
+        self.assertEqual(poll_once(self.cfg, self.state, reader, sender), 2)
+        self.assertTrue(any("Превышено время" in m for m in sender.messages))
+        self.assertTrue(any("Зависание инструмента" in m for m in sender.messages))
+
+    def test_429_persisted_not_before_survives_restart(self):
+        reader = FakeReader(self.now, [])
+        sender = FakeSender()
+        poll_once(self.cfg, self.state, reader, sender)
+        event = notice("task.created", self.now + timedelta(seconds=10))
+        reader.events = [event]
+        reader.now += timedelta(seconds=25)
+        sender.rate_limit_next = 300
+        with self.assertRaises(TelegramRateLimited):
+            poll_once(self.cfg, self.state, reader, sender)
+        not_before = self.state.get_time("telegram_retry_not_before")
+        self.assertIsNotNone(not_before)
+        self.assertGreaterEqual(not_before, reader.now + timedelta(seconds=300))
+        self.state.close()
+        self.state = StateStore(self.state_path)
+        reader.now = not_before - timedelta(seconds=1)
+        self.assertEqual(poll_once(self.cfg, self.state, reader, sender), 0)
+        self.assertEqual(len(sender.messages), 0)
+        reader.now = not_before + timedelta(seconds=6)
+        self.assertEqual(poll_once(self.cfg, self.state, reader, sender), 1)
+        self.assertTrue(self.state.was_delivered(event.id))
+
+    def test_telegram_http_429_parses_retry_after_without_leaking_token(self):
+        sender = TelegramSender("123456:secret_token_testing_only", "42707740", MessageLimiter(10))
+        http_error = error.HTTPError(
+            "https://api.telegram.org/bot123456:secret_token_testing_only/sendMessage",
+            429,
+            "Too Many Requests",
+            None,
+            BytesIO(b'{"ok":false,"parameters":{"retry_after":73}}'),
+        )
+        with mock.patch("notifications.telegram_notifier.request.urlopen", side_effect=http_error):
+            with self.assertRaises(TelegramRateLimited) as raised:
+                sender.send("safe")
+        self.assertEqual(raised.exception.retry_after_seconds, 73)
+        self.assertNotIn("secret_token", str(raised.exception))
+
+    def test_read_secret_rejects_public_permissions_symlinks_and_non_root(self):
+        secret = Path(self.temp.name) / "private-secret"
+        secret.write_text("TEST_SECRET", encoding="utf-8")
+        os.chmod(secret, 0o644)
+        with mock.patch.dict(os.environ, {"TEST_SECRET_FILE": str(secret)}):
+            with self.assertRaisesRegex(ValueError, "private"):
+                _read_secret("TEST_SECRET_FILE")
+            os.chmod(secret, 0o600)
+            original_fstat = os.fstat
+
+            def nonroot_fstat(fd):
+                info = original_fstat(fd)
+                return SimpleNamespace(st_mode=info.st_mode, st_uid=1234, st_size=info.st_size)
+
+            with mock.patch("notifications.telegram_notifier.os.fstat", side_effect=nonroot_fstat):
+                with self.assertRaisesRegex(ValueError, "root-owned"):
+                    _read_secret("TEST_SECRET_FILE")
+            # Synthetic root owner lets this pass on both root and CI runners.
+            def root_fstat(fd):
+                info = original_fstat(fd)
+                return SimpleNamespace(st_mode=info.st_mode, st_uid=0, st_size=info.st_size)
+
+            with mock.patch("notifications.telegram_notifier.os.fstat", side_effect=root_fstat):
+                self.assertEqual(_read_secret("TEST_SECRET_FILE"), "TEST_SECRET")
+            symlink = Path(self.temp.name) / "symlink-secret"
+            symlink.symlink_to(secret)
+            os.environ["TEST_SECRET_FILE"] = str(symlink)
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                _read_secret("TEST_SECRET_FILE")
+            self.assertTrue(stat.S_ISLNK(symlink.lstat().st_mode))
+
+    def test_postgres_reader_forces_read_only_and_checks_all_privileges_and_index(self):
+        class FakeResult:
+            def __init__(self, value):
+                self.value = value
+
+            def fetchone(self):
+                return self.value
+
+            def fetchall(self):
+                return self.value
+
+        class FakePg:
+            def __init__(self):
+                self.sql = []
+                self.extra_grants = False
+                self.has_index = True
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def execute(self, sql, params=None):
+                self.sql.append((sql, params))
+                if sql.startswith("SET "):
+                    return FakeResult(None)
+                if sql.startswith("SELECT rolsuper"):
+                    return FakeResult((False,) * 5)
+                if sql.startswith("SELECT has_table_privilege(current_user,'public.audit_events'"):
+                    return FakeResult((True,))
+                if "relkind IN" in sql:
+                    return FakeResult((self.extra_grants,))
+                if "relkind='S'" in sql or "has_schema_privilege" in sql:
+                    return FakeResult((False,))
+                if "SELECT EXISTS" in sql:
+                    return FakeResult((self.has_index,))
+                if "clock_timestamp" in sql:
+                    return FakeResult((self_now,))
+                if sql.startswith("SELECT id,action,entity_type,entity_id,created_at"):
+                    return FakeResult([])
+                raise AssertionError(f"unexpected SQL: {sql[:100]}")
+
+        self_now = self.now
+        pg = FakePg()
+        with mock.patch.dict(sys.modules, {"psycopg": SimpleNamespace(connect=lambda *_a, **_kw: pg)}):
+            reader = AuditReader("redacted")
+            self.assertEqual(reader.current_time(), self.now)
+            self.assertEqual(reader.page(self.now, self.now, None, 3), [])
+            self.assertEqual([sql for sql, _ in pg.sql if sql.startswith("SET TRANSACTION")],
+                             ["SET TRANSACTION READ ONLY", "SET TRANSACTION READ ONLY"])
+            self.assertTrue(any("TRUNCATE" in sql and "REFERENCES" in sql for sql, _ in pg.sql))
+            self.assertTrue(any("statement_timeout" in sql for sql, _ in pg.sql))
+            self.assertTrue(any("lock_timeout" in sql for sql, _ in pg.sql))
+            pg.extra_grants = True
+            with self.assertRaises(PermissionError):
+                reader.current_time()
+            pg.extra_grants = False
+            pg.has_index = False
+            with self.assertRaisesRegex(RuntimeError, "index"):
+                reader.current_time()
 
 
 if __name__ == "__main__":

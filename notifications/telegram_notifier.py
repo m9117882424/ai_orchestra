@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import sqlite3
 import ssl
+import stat
 import time
 from urllib import error, request
 from uuid import UUID
@@ -39,6 +40,8 @@ ALLOWED_ACTIONS = {
     "execution.failed": ("🔴", "Запуск завершился ошибкой"),
     "execution.cancelled": ("⏹", "Запуск отменён"),
     "execution.opencode_error": ("🔴", "Ошибка запуска"),
+    "execution.timed_out": ("🔴", "Превышено время выполнения"),
+    "execution.stalled_tool": ("🔴", "Зависание инструмента исполнителя"),
     "execution.runner_gate_failed": ("🔴", "Не пройдена проверка запуска"),
     "runner_job.failed": ("🔴", "Ошибка задания исполнителя"),
 }
@@ -78,14 +81,37 @@ class Settings:
     overlap_seconds: int = 120
     settle_seconds: int = 5
     max_messages_per_minute: int = 10
+    reconciliation_interval_seconds: int = 3600
+    reconciliation_window_days: int = 7
 
 
 def _read_secret(env_name: str) -> str:
     path = os.environ.get(env_name, "")
     if not path.startswith("/"):
         raise ValueError(f"{env_name} must reference an absolute secret file")
-    # Avoid printing secret content or resolving paths in error messages.
-    result = Path(path).read_text(encoding="utf-8").strip()
+    secret_path = Path(path)
+    if ".." in secret_path.parts:
+        raise ValueError(f"{env_name} contains an unsafe path segment")
+    # O_NOFOLLOW guards the final target; lstat guards intermediate symlinks.
+    for component in (secret_path, *secret_path.parents):
+        if component == Path("/"):
+            break
+        if stat.S_ISLNK(os.lstat(component).st_mode):
+            raise ValueError(f"{env_name} must not traverse symlinks")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != 0
+            or info.st_mode & 0o077
+            or info.st_size > 8192
+        ):
+            raise ValueError(f"{env_name} must be root-owned, private and regular")
+        # Avoid printing secret content or token-bearing paths in errors.
+        result = os.read(fd, 8192).decode("utf-8").strip()
+    finally:
+        os.close(fd)
     if not result:
         raise ValueError(f"{env_name} file is empty")
     return result
@@ -160,6 +186,28 @@ class StateStore:
         )
         self.db.commit()
 
+    def bootstrap(self, server_now: datetime) -> bool:
+        """Create/recover cursors atomically; never reset an older starting point.
+
+        Returns True only when this is a genuinely fresh installation.
+        """
+        existing_start = self.get_time("started_at")
+        with self.db:
+            self.db.execute(
+                "INSERT OR IGNORE INTO meta(key,value) VALUES (?,?)",
+                ("started_at", _utc(server_now).isoformat()),
+            )
+            self.db.execute(
+                "INSERT OR IGNORE INTO meta(key,value) VALUES (?,?)",
+                ("scan_through", _utc(existing_start or server_now).isoformat()),
+            )
+            if existing_start is None:
+                self.db.execute(
+                    "INSERT OR IGNORE INTO meta(key,value) VALUES (?,?)",
+                    ("last_reconciled_at", _utc(server_now).isoformat()),
+                )
+        return existing_start is None
+
     def was_delivered(self, event_id: str) -> bool:
         row = self.db.execute("SELECT 1 FROM delivered WHERE event_id = ?", (event_id,)).fetchone()
         return row is not None
@@ -186,23 +234,74 @@ class AuditReader:
     def __init__(self, dsn: str):
         self.dsn = dsn
 
+    @staticmethod
+    def _read_only_transaction(conn) -> None:
+        # Defense in depth: an accidentally overprivileged connection must
+        # never be able to mutate orchestration state through this client.
+        conn.execute("SET TRANSACTION READ ONLY")
+        conn.execute("SET LOCAL statement_timeout = '2000ms'")
+        conn.execute("SET LOCAL lock_timeout = '500ms'")
+
     def current_time(self) -> datetime:
         import psycopg  # Imported only by runtime, not pure unit tests.
 
         with psycopg.connect(self.dsn, connect_timeout=7) as conn:
-            # Connectivity alone is insufficient: this must be a role that can
-            # read audit_events (and is granted no additional tables).
-            conn.execute("SELECT id FROM public.audit_events LIMIT 0")
-            grants = conn.execute(
-                "SELECT "
-                "has_table_privilege(current_user,'public.audit_events','SELECT'),"
-                "has_table_privilege(current_user,'public.audit_events','INSERT'),"
-                "has_table_privilege(current_user,'public.audit_events','UPDATE'),"
-                "has_table_privilege(current_user,'public.audit_events','DELETE'),"
-                "has_table_privilege(current_user,'public.tasks','SELECT')"
+            self._read_only_transaction(conn)
+            # Must be a non-admin, audit-only reader. Enumerate the effective
+            # privileges of *all* application relations, including TRUNCATE,
+            # rather than checking only the tasks table.
+            role = conn.execute(
+                "SELECT rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls "
+                "FROM pg_roles WHERE rolname = current_user"
             ).fetchone()
-            if grants != (True, False, False, False, False):
+            if role is None or any(role):
+                raise PermissionError("Notifier role has administrative privileges")
+            if not conn.execute(
+                "SELECT has_table_privilege(current_user,'public.audit_events','SELECT')"
+            ).fetchone()[0]:
+                raise PermissionError("Notifier cannot read the audit log")
+            elevated = conn.execute(
+                "SELECT COALESCE(bool_or(" 
+                "has_table_privilege(current_user,c.oid,'INSERT') OR "
+                "has_table_privilege(current_user,c.oid,'UPDATE') OR "
+                "has_table_privilege(current_user,c.oid,'DELETE') OR "
+                "has_table_privilege(current_user,c.oid,'TRUNCATE') OR "
+                "has_table_privilege(current_user,c.oid,'REFERENCES') OR "
+                "has_table_privilege(current_user,c.oid,'TRIGGER') OR "
+                "(c.oid <> 'public.audit_events'::regclass AND "
+                "has_table_privilege(current_user,c.oid,'SELECT'))), FALSE) "
+                "FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+                "WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','f')"
+            ).fetchone()[0]
+            sequences = conn.execute(
+                "SELECT COALESCE(bool_or(" 
+                "has_sequence_privilege(current_user,c.oid,'USAGE') OR "
+                "has_sequence_privilege(current_user,c.oid,'SELECT') OR "
+                "has_sequence_privilege(current_user,c.oid,'UPDATE')), FALSE) "
+                "FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+                "WHERE n.nspname='public' AND c.relkind='S'"
+            ).fetchone()[0]
+            can_create = conn.execute(
+                "SELECT has_schema_privilege(current_user,'public','CREATE') OR "
+                "has_database_privilege(current_user,current_database(),'CREATE')"
+            ).fetchone()[0]
+            if elevated or sequences or can_create:
                 raise PermissionError("Notifier requires a narrow, audit-only database role")
+            index_ready = conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM pg_index idx "
+                "JOIN pg_class i ON i.oid=idx.indexrelid "
+                "JOIN pg_class t ON t.oid=idx.indrelid "
+                "JOIN pg_namespace n ON n.oid=t.relnamespace "
+                "JOIN pg_attribute created ON created.attrelid=t.oid AND created.attname='created_at' "
+                "JOIN pg_attribute event_id ON event_id.attrelid=t.oid AND event_id.attname='id' "
+                "WHERE n.nspname='public' AND t.relname='audit_events' "
+                "AND i.relname='ix_ai_orchestra_audit_events_created_id' "
+                "AND idx.indisvalid AND idx.indisready AND idx.indpred IS NULL "
+                "AND idx.indexprs IS NULL AND idx.indnkeyatts >= 2 "
+                "AND idx.indkey[0]=created.attnum AND idx.indkey[1]=event_id.attnum)"
+            ).fetchone()[0]
+            if not index_ready:
+                raise RuntimeError("Notifier requires the audit (created_at,id) index")
             return conn.execute("SELECT clock_timestamp()").fetchone()[0]
 
     def page(
@@ -225,6 +324,7 @@ class AuditReader:
         sql += " ORDER BY created_at ASC,id ASC LIMIT %s"
         params.append(size)
         with psycopg.connect(self.dsn, connect_timeout=7) as conn:
+            self._read_only_transaction(conn)
             rows = conn.execute(sql, params).fetchall()
         return [AuditNotice(*row) for row in rows]
 
@@ -248,6 +348,12 @@ class MessageLimiter:
             while self.sent and now - self.sent[0] >= 60:
                 self.sent.popleft()
         self.sent.append(now)
+
+
+class TelegramRateLimited(RuntimeError):
+    def __init__(self, retry_after_seconds: int):
+        self.retry_after_seconds = max(1, min(3600, retry_after_seconds))
+        super().__init__("Telegram rate limited delivery")
 
 
 class TelegramSender:
@@ -275,6 +381,16 @@ class TelegramSender:
                     raise RuntimeError("Telegram API did not confirm delivery")
         except error.HTTPError as exc:
             # Never log exception strings: urllib errors can include token-bearing URL.
+            if exc.code == 429:
+                retry_after = 60
+                try:
+                    body = json.loads(exc.read(4096).decode("utf-8"))
+                    candidate = body.get("parameters", {}).get("retry_after")
+                    if isinstance(candidate, int) and not isinstance(candidate, bool):
+                        retry_after = candidate
+                except (ValueError, UnicodeError, AttributeError, TypeError):
+                    pass
+                raise TelegramRateLimited(retry_after) from None
             raise RuntimeError(f"Telegram HTTP {exc.code}") from None
         except error.URLError:
             raise RuntimeError("Telegram transport unavailable") from None
@@ -282,11 +398,13 @@ class TelegramSender:
 
 def poll_once(settings: Settings, state: StateStore, reader: AuditReader, sender: TelegramSender) -> int:
     server_now = _utc(reader.current_time())
-    if state.get_time("started_at") is None:
-        # First start only: do not send any historical events.
-        state.set_time("started_at", server_now)
-        state.set_time("scan_through", server_now)
+    if state.bootstrap(server_now):
+        # Both cursor keys committed in one SQLite transaction.
         LOG.info("Initial cursor set; no historical audit events will be replayed")
+        return 0
+
+    backoff_until = state.get_time("telegram_retry_not_before")
+    if backoff_until is not None and server_now < _utc(backoff_until):
         return 0
 
     until = server_now - timedelta(seconds=settings.settle_seconds)
@@ -295,7 +413,17 @@ def poll_once(settings: Settings, state: StateStore, reader: AuditReader, sender
     assert started_at is not None and scanned_at is not None
     if until <= scanned_at:
         return 0
-    since = max(started_at, scanned_at - timedelta(seconds=settings.overlap_seconds))
+    last_reconciled = state.get_time("last_reconciled_at")
+    needs_reconciliation = (
+        last_reconciled is None
+        or server_now - _utc(last_reconciled) >= timedelta(seconds=settings.reconciliation_interval_seconds)
+    )
+    if needs_reconciliation:
+        # Periodically rescan the bounded late-commit window. A timestamp
+        # assigned before commit is not a durable commit-order cursor.
+        since = max(started_at, until - timedelta(days=settings.reconciliation_window_days))
+    else:
+        since = max(started_at, scanned_at - timedelta(seconds=settings.overlap_seconds))
     after: tuple[datetime, str] | None = None
     delivered = 0
     while True:
@@ -305,7 +433,14 @@ def poll_once(settings: Settings, state: StateStore, reader: AuditReader, sender
                 continue
             if state.was_delivered(event.id):
                 continue
-            sender.send(format_notice(event))
+            try:
+                sender.send(format_notice(event))
+            except TelegramRateLimited as exc:
+                state.set_time(
+                    "telegram_retry_not_before",
+                    max(server_now, datetime.now(timezone.utc)) + timedelta(seconds=exc.retry_after_seconds),
+                )
+                raise
             state.mark_delivered(event.id, server_now)
             delivered += 1
         if len(events) < settings.batch_size:
@@ -313,6 +448,8 @@ def poll_once(settings: Settings, state: StateStore, reader: AuditReader, sender
         last = events[-1]
         after = (last.created_at, last.id)
     state.set_time("scan_through", until)
+    if needs_reconciliation:
+        state.set_time("last_reconciled_at", server_now)
     state.prune(server_now)
     return delivered
 

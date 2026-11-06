@@ -96,9 +96,14 @@ def _read_secret(env_name: str) -> str:
     for component in (secret_path, *secret_path.parents):
         if component == Path("/"):
             break
-        if stat.S_ISLNK(os.lstat(component).st_mode):
+        component_stat = os.lstat(component)
+        if stat.S_ISLNK(component_stat.st_mode):
             raise ValueError(f"{env_name} must not traverse symlinks")
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        if component == secret_path and not stat.S_ISREG(component_stat.st_mode):
+            raise ValueError(f"{env_name} must be a regular secret file")
+    # Even if the final path changes from a regular file to a FIFO after lstat,
+    # O_NONBLOCK prevents startup from hanging before fstat can reject it.
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
         info = os.fstat(fd)
         if (
@@ -251,53 +256,72 @@ class AuditReader:
             # privileges of *all* application relations, including TRUNCATE,
             # rather than checking only the tasks table.
             role = conn.execute(
-                "SELECT rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls "
+                "SELECT rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls, "
+                "EXISTS(SELECT 1 FROM pg_auth_members m WHERE m.member=pg_roles.oid) "
                 "FROM pg_roles WHERE rolname = current_user"
             ).fetchone()
-            if role is None or any(role):
+            if role is None or any(role) or not conn.execute(
+                "SELECT current_user = session_user"
+            ).fetchone()[0]:
                 raise PermissionError("Notifier role has administrative privileges")
             if not conn.execute(
                 "SELECT has_table_privilege(current_user,'public.audit_events','SELECT')"
             ).fetchone()[0]:
                 raise PermissionError("Notifier cannot read the audit log")
             elevated = conn.execute(
-                "SELECT COALESCE(bool_or(" 
+                "SELECT COALESCE(bool_or("
                 "has_table_privilege(current_user,c.oid,'INSERT') OR "
+                "has_any_column_privilege(current_user,c.oid,'INSERT') OR "
                 "has_table_privilege(current_user,c.oid,'UPDATE') OR "
+                "has_any_column_privilege(current_user,c.oid,'UPDATE') OR "
                 "has_table_privilege(current_user,c.oid,'DELETE') OR "
                 "has_table_privilege(current_user,c.oid,'TRUNCATE') OR "
                 "has_table_privilege(current_user,c.oid,'REFERENCES') OR "
+                "has_any_column_privilege(current_user,c.oid,'REFERENCES') OR "
                 "has_table_privilege(current_user,c.oid,'TRIGGER') OR "
                 "(c.oid <> 'public.audit_events'::regclass AND "
-                "has_table_privilege(current_user,c.oid,'SELECT'))), FALSE) "
+                "(has_table_privilege(current_user,c.oid,'SELECT') OR "
+                "has_any_column_privilege(current_user,c.oid,'SELECT')))), FALSE) "
                 "FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
-                "WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','f')"
+                "WHERE n.nspname<>'information_schema' AND left(n.nspname,3)<>'pg_' "
+                "AND c.relkind IN ('r','p','v','m','f')"
             ).fetchone()[0]
             sequences = conn.execute(
-                "SELECT COALESCE(bool_or(" 
+                "SELECT COALESCE(bool_or("
                 "has_sequence_privilege(current_user,c.oid,'USAGE') OR "
                 "has_sequence_privilege(current_user,c.oid,'SELECT') OR "
                 "has_sequence_privilege(current_user,c.oid,'UPDATE')), FALSE) "
                 "FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
-                "WHERE n.nspname='public' AND c.relkind='S'"
+                "WHERE n.nspname<>'information_schema' AND left(n.nspname,3)<>'pg_' "
+                "AND c.relkind='S'"
             ).fetchone()[0]
             can_create = conn.execute(
-                "SELECT has_schema_privilege(current_user,'public','CREATE') OR "
-                "has_database_privilege(current_user,current_database(),'CREATE')"
+                "SELECT has_database_privilege(current_user,current_database(),'CREATE') OR "
+                "EXISTS (SELECT 1 FROM pg_namespace n "
+                "WHERE n.nspname<>'information_schema' AND left(n.nspname,3)<>'pg_' "
+                "AND has_schema_privilege(current_user,n.oid,'CREATE'))"
             ).fetchone()[0]
             if elevated or sequences or can_create:
                 raise PermissionError("Notifier requires a narrow, audit-only database role")
             index_ready = conn.execute(
                 "SELECT EXISTS (SELECT 1 FROM pg_index idx "
                 "JOIN pg_class i ON i.oid=idx.indexrelid "
+                "JOIN pg_am am ON am.oid=i.relam "
                 "JOIN pg_class t ON t.oid=idx.indrelid "
                 "JOIN pg_namespace n ON n.oid=t.relnamespace "
                 "JOIN pg_attribute created ON created.attrelid=t.oid AND created.attname='created_at' "
                 "JOIN pg_attribute event_id ON event_id.attrelid=t.oid AND event_id.attname='id' "
+                "JOIN pg_opclass op0 ON op0.oid=idx.indclass[0] "
+                "JOIN pg_opclass op1 ON op1.oid=idx.indclass[1] "
                 "WHERE n.nspname='public' AND t.relname='audit_events' "
                 "AND i.relname='ix_ai_orchestra_audit_events_created_id' "
+                "AND am.amname='btree' "
                 "AND idx.indisvalid AND idx.indisready AND idx.indpred IS NULL "
                 "AND idx.indexprs IS NULL AND idx.indnkeyatts >= 2 "
+                "AND idx.indoption[0]=0 AND idx.indoption[1]=0 "
+                "AND idx.indcollation[0]=0 AND idx.indcollation[1]=0 "
+                "AND op0.opcdefault AND op1.opcdefault "
+                "AND op0.opcintype=created.atttypid AND op1.opcintype=event_id.atttypid "
                 "AND idx.indkey[0]=created.attnum AND idx.indkey[1]=event_id.attnum)"
             ).fetchone()[0]
             if not index_ready:
@@ -352,7 +376,11 @@ class MessageLimiter:
 
 class TelegramRateLimited(RuntimeError):
     def __init__(self, retry_after_seconds: int):
-        self.retry_after_seconds = max(1, min(3600, retry_after_seconds))
+        self.retry_after_seconds = (
+            retry_after_seconds
+            if isinstance(retry_after_seconds, int) and retry_after_seconds > 0
+            else 60
+        )
         super().__init__("Telegram rate limited delivery")
 
 
@@ -418,37 +446,42 @@ def poll_once(settings: Settings, state: StateStore, reader: AuditReader, sender
         last_reconciled is None
         or server_now - _utc(last_reconciled) >= timedelta(seconds=settings.reconciliation_interval_seconds)
     )
-    if needs_reconciliation:
-        # Periodically rescan the bounded late-commit window. A timestamp
-        # assigned before commit is not a durable commit-order cursor.
-        since = max(started_at, until - timedelta(days=settings.reconciliation_window_days))
-    else:
-        since = max(started_at, scanned_at - timedelta(seconds=settings.overlap_seconds))
-    after: tuple[datetime, str] | None = None
-    delivered = 0
-    while True:
-        events = reader.page(since, until, after, settings.batch_size)
-        for event in events:
-            if event.action not in ALLOWED_ACTIONS:
-                continue
-            if state.was_delivered(event.id):
-                continue
-            try:
-                sender.send(format_notice(event))
-            except TelegramRateLimited as exc:
-                state.set_time(
-                    "telegram_retry_not_before",
-                    max(server_now, datetime.now(timezone.utc)) + timedelta(seconds=exc.retry_after_seconds),
-                )
-                raise
-            state.mark_delivered(event.id, server_now)
-            delivered += 1
-        if len(events) < settings.batch_size:
-            break
-        last = events[-1]
-        after = (last.created_at, last.id)
+    def deliver_range(since: datetime) -> int:
+        after: tuple[datetime, str] | None = None
+        count = 0
+        while True:
+            events = reader.page(since, until, after, settings.batch_size)
+            for event in events:
+                if event.action not in ALLOWED_ACTIONS or state.was_delivered(event.id):
+                    continue
+                try:
+                    sender.send(format_notice(event))
+                except TelegramRateLimited as exc:
+                    now = max(server_now, datetime.now(timezone.utc))
+                    try:
+                        not_before = now + timedelta(seconds=exc.retry_after_seconds)
+                    except OverflowError:
+                        not_before = datetime.max.replace(tzinfo=timezone.utc)
+                    state.set_time("telegram_retry_not_before", not_before)
+                    raise
+                state.mark_delivered(event.id, server_now)
+                count += 1
+            if len(events) < settings.batch_size:
+                break
+            last = events[-1]
+            after = (last.created_at, last.id)
+        return count
+
+    # Backlog scan is independent of the bounded reconciliation pass. A server
+    # can be offline longer than the late-commit window: never lose the oldest
+    # ordinary undelivered events by replacing this scan with the 7-day sweep.
+    delivered = deliver_range(max(started_at, scanned_at - timedelta(seconds=settings.overlap_seconds)))
     state.set_time("scan_through", until)
     if needs_reconciliation:
+        # The independent retrospective pass detects late commits; delivery
+        # dedup is durable so rescanning cannot resend confirmed messages.
+        since = max(started_at, until - timedelta(days=settings.reconciliation_window_days))
+        delivered += deliver_range(since)
         state.set_time("last_reconciled_at", server_now)
     state.prune(server_now)
     return delivered

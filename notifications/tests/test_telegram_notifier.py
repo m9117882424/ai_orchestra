@@ -3,6 +3,7 @@ from io import BytesIO
 import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -214,6 +215,18 @@ class NotifierTests(unittest.TestCase):
         self.assertTrue(self.state.was_delivered(event.id))
         self.assertEqual(poll_once(self.cfg, self.state, reader, sender), 0)
 
+    def test_long_outage_delivers_all_backlog_older_than_reconciliation_window(self):
+        reader = FakeReader(self.now, [])
+        sender = FakeSender()
+        self.assertEqual(poll_once(self.cfg, self.state, reader, sender), 0)
+        event = notice("task.created", self.now + timedelta(days=1))
+        reader.events = [event]
+        reader.now = self.now + timedelta(days=12)
+        self.assertEqual(poll_once(self.cfg, self.state, reader, sender), 1)
+        self.assertTrue(self.state.was_delivered(event.id))
+        self.assertEqual(len(sender.messages), 1)
+        self.assertEqual(poll_once(self.cfg, self.state, reader, sender), 0)
+
     def test_terminal_timeout_and_stalled_tool_events_are_delivered(self):
         reader = FakeReader(self.now, [])
         sender = FakeSender()
@@ -264,6 +277,29 @@ class NotifierTests(unittest.TestCase):
         self.assertEqual(raised.exception.retry_after_seconds, 73)
         self.assertNotIn("secret_token", str(raised.exception))
 
+    def test_429_long_retry_after_is_not_truncated(self):
+        sender = TelegramSender("123456:secret_token_testing_only", "42707740", MessageLimiter(10))
+        http_error = error.HTTPError(
+            "https://api.telegram.org/bot123456:secret_token_testing_only/sendMessage",
+            429, "Too Many Requests", None,
+            BytesIO(b'{"ok":false,"parameters":{"retry_after":7200}}'),
+        )
+        with mock.patch("notifications.telegram_notifier.request.urlopen", side_effect=http_error):
+            with self.assertRaises(TelegramRateLimited) as raised:
+                sender.send("safe")
+        self.assertEqual(raised.exception.retry_after_seconds, 7200)
+
+    def test_unrepresentable_retry_after_pauses_until_max_timestamp(self):
+        reader = FakeReader(self.now, [])
+        sender = FakeSender()
+        poll_once(self.cfg, self.state, reader, sender)
+        reader.events = [notice("task.created", self.now + timedelta(seconds=1))]
+        reader.now += timedelta(seconds=10)
+        sender.rate_limit_next = 10**30
+        with self.assertRaises(TelegramRateLimited):
+            poll_once(self.cfg, self.state, reader, sender)
+        self.assertEqual(self.state.get_time("telegram_retry_not_before").year, 9999)
+
     def test_read_secret_rejects_public_permissions_symlinks_and_non_root(self):
         secret = Path(self.temp.name) / "private-secret"
         secret.write_text("TEST_SECRET", encoding="utf-8")
@@ -295,6 +331,22 @@ class NotifierTests(unittest.TestCase):
                 _read_secret("TEST_SECRET_FILE")
             self.assertTrue(stat.S_ISLNK(symlink.lstat().st_mode))
 
+    def test_fifo_secret_rejected_without_blocking(self):
+        fifo = Path(self.temp.name) / "fifo-secret"
+        os.mkfifo(fifo, mode=0o600)
+        snippet = (
+            "import os; "
+            "from notifications.telegram_notifier import _read_secret; "
+            "_read_secret('TEST_SECRET_FILE')"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", snippet],
+            env={**os.environ, "TEST_SECRET_FILE": str(fifo)},
+            capture_output=True, text=True, timeout=2, check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("regular secret file", result.stderr)
+
     def test_postgres_reader_forces_read_only_and_checks_all_privileges_and_index(self):
         class FakeResult:
             def __init__(self, value):
@@ -323,7 +375,9 @@ class NotifierTests(unittest.TestCase):
                 if sql.startswith("SET "):
                     return FakeResult(None)
                 if sql.startswith("SELECT rolsuper"):
-                    return FakeResult((False,) * 5)
+                    return FakeResult((False,) * 6)
+                if "SELECT current_user = session_user" in sql:
+                    return FakeResult((True,))
                 if sql.startswith("SELECT has_table_privilege(current_user,'public.audit_events'"):
                     return FakeResult((True,))
                 if "relkind IN" in sql:
@@ -347,8 +401,12 @@ class NotifierTests(unittest.TestCase):
             self.assertEqual([sql for sql, _ in pg.sql if sql.startswith("SET TRANSACTION")],
                              ["SET TRANSACTION READ ONLY", "SET TRANSACTION READ ONLY"])
             self.assertTrue(any("TRUNCATE" in sql and "REFERENCES" in sql for sql, _ in pg.sql))
+            self.assertTrue(any("has_any_column_privilege" in sql and "left(n.nspname,3)" in sql
+                                for sql, _ in pg.sql))
             self.assertTrue(any("statement_timeout" in sql for sql, _ in pg.sql))
             self.assertTrue(any("lock_timeout" in sql for sql, _ in pg.sql))
+            self.assertTrue(any("am.amname='btree'" in sql and "opcdefault" in sql
+                                and "idx.indoption[0]=0" in sql for sql, _ in pg.sql))
             pg.extra_grants = True
             with self.assertRaises(PermissionError):
                 reader.current_time()

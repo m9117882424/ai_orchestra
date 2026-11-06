@@ -1,0 +1,28 @@
+name: Telegram notifier checks
+
+on:
+  push:
+    paths:
+      - "notifications/**"
+      - "deploy/docker-compose.telegram-notifier.yml"
+      - "docs/G5_TELEGRAM_NOTIFICATIONS.md"
+      - ".github/workflows/telegram-notifications.yml"
+  pull_request:
+    paths:
+      - "notifications/**"
+      - "deploy/docker-compose.telegram-notifier.yml"
+      - "docs/G5_TELEGRAM_NOTIFICATIONS.md"
+      - ".github/workflows/telegram-notifications.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Compile and run isolated notifier tests
+        run: |
+          python3 -m compileall -q notifications
+          python3 -m unittest discover -v -s notifications/tests

@@ -141,7 +141,7 @@ class NotifierTests(unittest.TestCase):
         self.assertIn("AI Orchestra", rendered)
         self.assertIn("Стамбул", rendered)
 
-    def test_limiter_blocks_eleventh_message_in_minute(self):
+    def test_limiter_blocks_excess_messages_in_minute(self):
         fake_time = [100.0]
         waits = []
 

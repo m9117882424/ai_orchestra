@@ -85,7 +85,11 @@ execution evidence.
    When the explicit network GO is granted, append
    `-f compose.assured-staging-network.yml` **last** in staging commands. Use
    stage-only `CONTROL_PLANE_PORT` and `MODEL_GATEWAY_PORT` values to prevent
-   loopback port collisions. Never issue a blanket `docker compose up`.
+   loopback port collisions. The same overlay also pins a distinct
+   `ai-orchestra-assured-staging/*` image namespace: Compose project names
+   alone do not isolate images tagged explicitly in the base file. Do not
+   overwrite or retag production's images. Never issue a blanket
+   `docker compose up`.
 3. Set `CONTROL_PLANE_ALLOW_HIGH_ASSURANCE_REVIEW=true` **in the isolated deployment
    environment** (not in git). Start only the necessary services using all three Compose files,
    explicitly listing the desired service names. Do not start unrelated disabled workers.

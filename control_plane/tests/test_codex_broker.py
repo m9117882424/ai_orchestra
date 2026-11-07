@@ -438,3 +438,4 @@ def test_high_assurance_cannot_bypass_provenance(broker_client):
     assert client.post("/api/codex-worker/claim", headers=headers).json() is None
     with SessionLocal() as db:
         assert db.get(ExecutionRun, run_id).status == "failed"
+        assert db.get(ExecutionRun, run_id).stage == "subscription_assurance_unsupported"

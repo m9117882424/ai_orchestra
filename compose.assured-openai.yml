@@ -1,0 +1,9 @@
+# Explicit third overlay for an isolated review-only staging project.
+# DO NOT layer over the live general-purpose Orchestra Model Router: this
+# profile intentionally replaces the router catalog with a single OpenAI alias.
+# OPENAI_API_KEY belongs in the existing untracked .env.providers, loaded by
+# the base model-router service. It is never exposed to opencode-review.
+services:
+  model-router:
+    volumes:
+      - ./config/model-router.assured-openai.yaml:/app/config.yaml:ro

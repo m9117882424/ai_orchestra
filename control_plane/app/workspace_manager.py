@@ -24,6 +24,7 @@ from .evidence import materialize_result_package, materialize_terminal_result_pa
 from .models import ExecutionRun, Repository, Task, TaskWorkspace
 from .schema import assert_database_shape
 from .services import write_audit
+from .assured_review import ASSURED_REVIEW_BACKEND
 from .workspace_protocol import (
     DEFAULT_OPENCODE_WORKSPACE_ROOT,
     WorkspaceBinding,
@@ -102,6 +103,7 @@ class WorkspaceLease:
     initial_tree: str | None
     tracked_entries: int | None
     preflight_digest: str | None
+    assured_review: bool = False
 
 
 @dataclass(frozen=True)
@@ -551,6 +553,7 @@ class WorkspaceLeaseManager:
                     initial_tree=workspace.initial_tree,
                     tracked_entries=workspace.tracked_entries,
                     preflight_digest=workspace.preflight_digest,
+                    assured_review=run.backend == ASSURED_REVIEW_BACKEND,
                 )
             )
         db.commit()
@@ -1184,6 +1187,20 @@ class WorkspaceFilesystem:
             raise WorkspaceOperationError(exc.code) from exc
 
     def _preflight_tree(self, mirror: Path, lease: WorkspaceLease, *, heartbeat) -> tuple[str, int]:
+        if lease.assured_review:
+            # The mirror fetches refs/heads/* in a trusted repository-sync step.
+            # Never review an arbitrary/unreachable SHA or silently fall back to main.
+            try:
+                branch = validate_branch(lease.base_branch)
+            except WorkspacePreflightError as exc:
+                raise WorkspaceOperationError(exc.code, terminal=True) from exc
+            branch_head = str(self._run_git(
+                ["--git-dir", str(mirror), "rev-parse", "--verify",
+                 f"refs/remotes/origin/{branch}^{{commit}}"],
+                failure_code="review_source_branch_unavailable", heartbeat=heartbeat,
+            )).strip().lower()
+            if branch_head != lease.base_commit:
+                raise WorkspaceOperationError("review_source_ref_changed", terminal=True)
         commit = str(
             self._run_git(
                 ["--git-dir", str(mirror), "rev-parse", "--verify", f"{lease.base_commit}^{{commit}}"],

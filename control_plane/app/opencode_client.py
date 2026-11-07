@@ -213,9 +213,10 @@ class OpenCodeClient:
         *,
         message_id: str,
         part_id: str,
+        agent: str = "department-lead",
     ) -> None:
         payload: dict = {
-            "agent": "department-lead",
+            "agent": agent,
             "parts": [{"id": part_id, "type": "text", "text": prompt}],
             "messageID": message_id,
         }

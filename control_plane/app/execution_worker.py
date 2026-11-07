@@ -17,7 +17,11 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from .db import SessionLocal
-from .evidence import materialize_terminal_result_package
+from .evidence import materialize_terminal_result_package, record_evidence
+from .assured_review import (
+    ASSURED_REVIEW_AGENT, ASSURED_REVIEW_BACKEND, ASSURED_REVIEW_ROLES,
+    parse_assured_review_verdict,
+)
 from .opencode_observability import capture_opencode_observability
 from .execution_protocol import (
     EXECUTION_METADATA_KEY,
@@ -25,8 +29,9 @@ from .execution_protocol import (
     execution_part_id,
     execution_prompt,
     execution_session_title,
+    assured_review_prompt,
 )
-from .models import ExecutionRun, Repository, RunnerJob, Task, TaskWorkspace
+from .models import ExecutionRun, Repository, RunnerJob, Task, TaskWorkspace, UsageEvent
 from .opencode_client import (
     OpenCodeClient,
     OpenCodeError,
@@ -114,6 +119,7 @@ class ExecutionLease:
     cancel_requested_at: datetime | None
     workspace_path: str | None
     workspace_binding: WorkspaceBinding | None
+    assured_review: bool = False
 
 
 class ExecutionLeaseManager:
@@ -133,6 +139,7 @@ class ExecutionLeaseManager:
         tool_stall_seconds: int = 300,
         workspace_root: Path = DEFAULT_OPENCODE_WORKSPACE_ROOT,
         workspace_max_files: int = 100_000,
+        backend: str = "opencode",
     ):
         if lease_seconds < 30:
             raise ValueError("lease_seconds must be at least 30")
@@ -144,12 +151,15 @@ class ExecutionLeaseManager:
             raise ValueError("workspace_root must be absolute")
         if not 1 <= workspace_max_files <= 1_000_000:
             raise ValueError("workspace_max_files must be between 1 and 1000000")
+        if backend not in {"opencode", ASSURED_REVIEW_BACKEND}:
+            raise ValueError("Execution worker backend is not supported")
         self.worker_id = worker_id
         self.lease_seconds = lease_seconds
         self.execution_timeout_seconds = execution_timeout_seconds
         self.tool_stall_seconds = tool_stall_seconds
         self.workspace_root = workspace_root
         self.workspace_max_files = workspace_max_files
+        self.backend = backend
 
     @property
     def audit_actor(self) -> str:
@@ -279,7 +289,7 @@ class ExecutionLeaseManager:
             db.scalars(
                 select(ExecutionRun)
                 .where(
-                    ExecutionRun.backend == "opencode",
+                    ExecutionRun.backend == self.backend,
                     ExecutionRun.status.in_(ACTIVE_EXECUTION_STATUSES),
                     or_(
                         ExecutionRun.lease_expires_at.is_(None),
@@ -293,6 +303,13 @@ class ExecutionLeaseManager:
         )
         leases: list[ExecutionLease] = []
         for run in rows:
+            if run.backend == ASSURED_REVIEW_BACKEND and (
+                run.contract_version != 2
+                or run.assigned_roles != ASSURED_REVIEW_ROLES
+                or run.lead_role != ASSURED_REVIEW_AGENT
+            ):
+                self._reject_invalid_workspace_binding(db, run, "assured_review_role_binding_invalid", now)
+                continue
             try:
                 workspace_binding = self._workspace_binding(db, run)
             except (WorkspacePreflightError, TypeError, ValueError) as exc:
@@ -348,6 +365,7 @@ class ExecutionLeaseManager:
                     cancel_requested_at=_as_utc(run.cancel_requested_at),
                     workspace_path=run.workspace_path if run.contract_version == 2 else None,
                     workspace_binding=workspace_binding,
+                    assured_review=run.backend == ASSURED_REVIEW_BACKEND,
                 )
             )
         db.commit()
@@ -975,7 +993,16 @@ def _queued_dispatch_context(
             return None
         session_id = run.opencode_session_id
         title = execution_session_title(task, run.id)
-        prompt = execution_prompt(task)
+        if lease.assured_review:
+            workspace = db.get(TaskWorkspace, run.workspace_id)
+            if workspace is None or run.base_commit is None:
+                db.rollback()
+                return None
+            prompt = assured_review_prompt(
+                task, branch=workspace.base_branch, commit=run.base_commit,
+            )
+        else:
+            prompt = execution_prompt(task)
         runtime_verified = run.contract_version == 1 or (
             run.workspace_runtime_preflight_digest
             == run.workspace_preflight_digest
@@ -1082,6 +1109,71 @@ def _fail_runner_gate(
         )
         db.commit()
         return "failed"
+
+
+def _require_assured_review_before_completion(
+    manager: ExecutionLeaseManager,
+    lease: ExecutionLease,
+    result: str,
+) -> str:
+    """Fail closed if the immutable source, actual metering or review verdict is missing."""
+    if CHECKPOINT_BEGIN in result:
+        return _fail_runner_gate(
+            manager, lease, code="assured_review_checkpoint_forbidden",
+            detail="Read-only reviewer cannot request Runner Manager commands",
+        )
+    try:
+        _, has_changes = _checkpoint_workspace_snapshot(manager, lease)
+    except WorkspacePreflightError as exc:
+        return _fail_runner_gate(
+            manager, lease, code="assured_review_source_untrusted",
+            detail=f"Read-only source identity verification failed: {exc.code}",
+        )
+    if has_changes:
+        return _fail_runner_gate(
+            manager, lease, code="assured_review_source_modified",
+            detail="Read-only review workspace contains changed or untracked files",
+        )
+    verdict = parse_assured_review_verdict(result)
+    if verdict is None:
+        return _fail_runner_gate(
+            manager, lease, code="assured_review_verdict_missing",
+            detail="Reviewer did not produce one valid bounded verdict",
+        )
+    with SessionLocal() as db:
+        now = utc_now()
+        run = manager._locked_owned_run(db, lease, now)
+        if run is None or run.status != "running" or run.cancel_requested_at is not None:
+            db.rollback()
+            return "lost"
+        metered = db.scalar(select(UsageEvent).where(
+            UsageEvent.execution_id == lease.execution_id,
+            UsageEvent.source == "opencode-message",
+            UsageEvent.role == ASSURED_REVIEW_AGENT,
+            UsageEvent.provider != "unknown",
+            UsageEvent.model != "unknown",
+            (UsageEvent.input_tokens + UsageEvent.output_tokens) > 0,
+        ).order_by(UsageEvent.created_at.asc(), UsageEvent.id.asc()))
+        if not metered:
+            db.rollback()
+            return _fail_runner_gate(
+                manager, lease, code="assured_review_metering_missing",
+                detail="No server-observed assistant message with provider, model and positive tokens",
+            )
+        record_evidence(
+            db, execution_id=run.id, source="opencode-review",
+            source_key=f"verdict:{run.id}", kind="review", role=ASSURED_REVIEW_AGENT,
+            model=f"{metered.provider}/{metered.model}"[:120], status=verdict["verdict"],
+            details={"findings_count": verdict["findings_count"], "review_mode": "read-only",
+                     "usage_event_id": metered.id},
+        )
+        write_audit(
+            db, actor=manager.audit_actor, action="execution.assured_review_verdict",
+            entity_type="execution", entity_id=run.id,
+            details={"verdict": verdict["verdict"], "findings_count": verdict["findings_count"]},
+        )
+        db.commit()
+    return "allow"
 
 
 def _ensure_runner_checkpoint_jobs(
@@ -1583,6 +1675,9 @@ def _prompt_with_repository_trust_gate(
     """
     binding = lease.workspace_binding
     if binding is None:
+        if lease.assured_review:
+            with SessionLocal() as db:
+                return manager.mark_runtime_workspace_rejected(db, lease, "assured_review_binding_missing")
         if not _renew_before_external_side_effect(manager, lease):
             return "lost"
         client.prompt_async(
@@ -1604,6 +1699,8 @@ def _prompt_with_repository_trust_gate(
             rejection_code = "repository_trust_revoked"
         elif repository.status != "ready":
             rejection_code = "repository_not_ready"
+        elif lease.assured_review and repository.assurance_tier != "general-high-assurance":
+            rejection_code = "assured_review_tier_changed"
         else:
             now = utc_now()
             run = manager._locked_owned_run(db, lease, now)
@@ -1617,12 +1714,10 @@ def _prompt_with_repository_trust_gate(
             run.heartbeat_at = now
             run.lease_expires_at = manager._deadline(now)
             run.updated_at = now
-            client.prompt_async(
-                session_id,
-                prompt,
-                message_id=message_id,
-                part_id=part_id,
-            )
+            kwargs = {"message_id": message_id, "part_id": part_id}
+            if lease.assured_review:
+                kwargs["agent"] = ASSURED_REVIEW_AGENT
+            client.prompt_async(session_id, prompt, **kwargs)
             db.commit()
             return "prompted"
         db.rollback()
@@ -1972,6 +2067,24 @@ def poll_execution(
             return timeout_execution(manager, client, lease)
 
         if state_type == "idle" and result.strip():
+            if lease.assured_review:
+                if provider_error:
+                    return _fail_runner_gate(
+                        manager, lease, code="assured_review_provider_error",
+                        detail="Assistant message has a provider error despite idle status",
+                    )
+                outcome = _require_assured_review_before_completion(manager, lease, result)
+                if outcome != "allow":
+                    return outcome
+                with SessionLocal() as db:
+                    finished = manager.apply_observation(
+                        db, lease, state_type="idle", result=result, provider_error=provider_error,
+                    )
+                if finished == "cancel_requested":
+                    return cancel_execution(manager, client, lease)
+                if finished == "deadline":
+                    return timeout_execution(manager, client, lease)
+                return finished
             assistant = extract_last_assistant_message(messages)
             try:
                 checkpoint = parse_runner_checkpoint(result)
@@ -2102,6 +2215,9 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     settings = get_settings()
+    worker_backend = os.getenv("CONTROL_PLANE_EXECUTION_WORKER_BACKEND", "opencode")
+    if worker_backend == ASSURED_REVIEW_BACKEND and not settings.allow_high_assurance_review:
+        raise RuntimeError("Assured review worker requires explicit administrative enablement")
     worker_id = f"{socket.gethostname()[:40]}:{os.getpid()}:{uuid4().hex[:12]}"
     lease_seconds = _positive_int(
         "CONTROL_PLANE_EXECUTION_WORKER_LEASE_SECONDS",
@@ -2157,18 +2273,21 @@ def main() -> int:
         tool_stall_seconds=tool_stall_seconds,
         workspace_root=workspace_root,
         workspace_max_files=workspace_max_files,
+        backend=worker_backend,
     )
 
     def client_factory() -> OpenCodeClient:
         return OpenCodeClient(
-            settings.opencode_internal_url,
+            (settings.opencode_review_internal_url if worker_backend == ASSURED_REVIEW_BACKEND
+             else settings.opencode_internal_url),
             settings.opencode_username,
             settings.opencode_password,
         )
 
     LOGGER.info(
-        "Execution worker started worker_id=%s lease_seconds=%s tool_stall_seconds=%s max_active=%s poll_seconds=%s",
+        "Execution worker started worker_id=%s backend=%s lease_seconds=%s tool_stall_seconds=%s max_active=%s poll_seconds=%s",
         worker_id,
+        worker_backend,
         lease_seconds,
         tool_stall_seconds,
         max_active,

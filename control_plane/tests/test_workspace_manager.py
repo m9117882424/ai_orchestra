@@ -166,6 +166,29 @@ def test_prepare_creates_clean_standalone_workspace_idempotently(tmp_path):
     assert read_manifest(workspace)["preflight_digest"] == result.preflight_digest
 
 
+def test_assured_review_workspace_requires_exact_remote_branch_head(tmp_path):
+    repository_id = str(uuid4())
+    mirror_root, commit = _build_mirror(tmp_path, repository_id)
+    mirror = mirror_root / f"{repository_id}.git"
+    _git(mirror, "update-ref", "refs/remotes/origin/feature/efficiency", commit)
+    workspace_root = tmp_path / "workspaces"
+    lease = replace(
+        _lease(workspace_root, repository_id, commit),
+        base_branch="feature/efficiency", assured_review=True,
+    )
+    filesystem = _filesystem(mirror_root, workspace_root)
+    prepared = filesystem.prepare(lease, heartbeat=lambda: True)
+    assert prepared.tree == _git(mirror, "rev-parse", f"{commit}^{{tree}}")
+
+    # An approved PR head changed between queueing and workspace preparation.
+    # The mirror still contains the requested commit, but it is no longer the
+    # named branch head: never silently review the old or the new source.
+    moved = replace(lease, workspace_id=str(uuid4()), opencode_path=str(
+        workspace_root / str(uuid4())), base_commit="b" * 40)
+    with pytest.raises(WorkspaceOperationError, match="review_source_ref_changed"):
+        filesystem._preflight_tree(mirror, moved, heartbeat=lambda: True)
+
+
 def test_prepare_accepts_tracked_directory_symlink_that_stays_inside_workspace(tmp_path):
     repository_id = str(uuid4())
     mirror_root, commit = _build_mirror(

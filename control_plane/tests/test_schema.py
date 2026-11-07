@@ -83,7 +83,50 @@ print('STARTED')
 
 
 def test_declared_schema_head_is_stable():
-    assert head_revision() == "20261010_0012"
+    assert head_revision() == "20261107_0013"
+
+
+def test_assured_review_backend_migration_preserves_existing_runs(tmp_path):
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'assured-review-migration.db'}"
+    created = _run_alembic_upgrade(database_url, "20261010_0012")
+    assert created.returncode == 0, created.stderr
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(text("""
+            INSERT INTO tasks (id, title, description, project, domain, priority,
+                status, risk_level, owner_role, created_at, updated_at)
+            VALUES ('existing-task', 'Existing', '', 'general', 'development', 'normal',
+                    'in_progress', 'low', NULL, '2026-11-07 00:00:00',
+                    '2026-11-07 00:00:00')
+        """))
+        connection.execute(text("""
+            INSERT INTO execution_runs (id, task_id, backend, status, stage,
+                opencode_session_id, lead_role, assigned_roles, result, error,
+                lease_generation, created_at, updated_at)
+            VALUES ('existing-run', 'existing-task', 'codex-subscription',
+                'completed', 'done', NULL, 'architect', '[]', '', '', 0,
+                '2026-11-07 00:00:00', '2026-11-07 00:00:00')
+        """))
+
+    upgraded = _run_schema_cli(database_url, "migrate")
+    assert upgraded.returncode == 0, upgraded.stderr
+    with engine.begin() as connection:
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "20261107_0013"
+        assert connection.execute(text(
+            "SELECT backend FROM execution_runs WHERE id = 'existing-run'"
+        )).scalar_one() == "codex-subscription"
+        connection.execute(text("""
+            INSERT INTO execution_runs (id, task_id, backend, status, stage,
+                opencode_session_id, lead_role, assigned_roles, result, error,
+                lease_generation, created_at, updated_at)
+            VALUES ('review-run', 'existing-task', 'opencode-review',
+                'failed', 'preflight_rejected', NULL, 'assured-reviewer',
+                '["assured-reviewer"]', '', '', 0,
+                '2026-11-07 00:00:00', '2026-11-07 00:00:00')
+        """))
+        assert connection.execute(text(
+            "SELECT count(*) FROM execution_runs WHERE backend = 'opencode-review'"
+        )).scalar_one() == 1
 
 
 def test_fresh_database_is_created_by_alembic(tmp_path):
@@ -148,7 +191,7 @@ def test_fresh_database_is_created_by_alembic(tmp_path):
         }
 
     assert set(Base.metadata.tables).issubset(tables)
-    assert revision == "20261010_0012"
+    assert revision == "20261107_0013"
     assert session_column["nullable"] is True
     assert "deadline_at" in execution_columns
     assert "cancel_requested_at" in execution_columns
@@ -293,7 +336,7 @@ def test_matching_current_unversioned_database_is_verified_then_stamped(tmp_path
 
     with engine.connect() as connection:
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert revision == "20261010_0012"
+    assert revision == "20261107_0013"
 
 
 def test_unversioned_historical_baseline_is_verified_then_migrated(tmp_path):
@@ -338,7 +381,7 @@ def test_unversioned_historical_baseline_is_verified_then_migrated(tmp_path):
             if column["name"] == "opencode_session_id"
         )
 
-    assert revision == "20261010_0012"
+    assert revision == "20261107_0013"
     assert marker == "Legacy marker"
     assert {
         "lease_owner",
@@ -368,7 +411,7 @@ def test_unversioned_previous_head_is_verified_then_migrated_without_data_loss(t
     assert migrated.returncode == 0, migrated.stderr
     assert "Historical baseline 20260917_0011 verified" in migrated.stdout
     with engine.connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "20261010_0012"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "20261107_0013"
         assert connection.execute(text("SELECT action FROM audit_events WHERE id = 'previous-head-marker'")).scalar_one() == "marker"
         assert "backend" in {column["name"] for column in inspect(connection).get_columns("execution_runs")}
 
@@ -415,7 +458,7 @@ def test_versioned_0002_database_upgrades_to_current_execution_schema(tmp_path):
         execution_columns = {
             column["name"] for column in inspect(connection).get_columns("execution_runs")
         }
-    assert revision == "20261010_0012"
+    assert revision == "20261107_0013"
     assert after["nullable"] is True
     assert "deadline_at" in execution_columns
     assert "cancel_requested_at" in execution_columns
@@ -477,7 +520,7 @@ def test_versioned_0003_backfills_only_active_execution_deadlines(tmp_path):
             ).all()
         )
 
-    assert revision == "20261010_0012"
+    assert revision == "20261107_0013"
     assert deadlines["queued-run"] is not None
     assert deadlines["completed-run"] is None
 
@@ -514,7 +557,7 @@ def test_versioned_0004_adds_registry_without_mutating_existing_data(tmp_path):
         ).scalar_one()
         tables = set(inspect(connection).get_table_names())
 
-    assert revision == "20261010_0012"
+    assert revision == "20261107_0013"
     assert marker == "marker"
     assert "repositories" in tables
 
@@ -568,7 +611,7 @@ def test_versioned_0005_registry_is_requeued_without_losing_policy(tmp_path):
             )
         ).one()
 
-    assert revision == "20261010_0012"
+    assert revision == "20261107_0013"
     assert tuple(row[:5]) == (
         "existing-repository",
         "github.com/example/existing",
@@ -645,7 +688,7 @@ def test_versioned_0006_preserves_legacy_execution_as_contract_v1(tmp_path):
             text("SELECT count(*) FROM task_workspaces")
         ).scalar_one()
 
-    assert revision == "20261010_0012"
+    assert revision == "20261107_0013"
     assert task_repository is None
     assert tuple(run) == (1, None, None, None, None, "queued", "dispatch_pending")
     assert workspace_count == 0

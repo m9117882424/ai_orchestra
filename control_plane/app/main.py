@@ -18,6 +18,7 @@ from .codex_broker import (
     router as codex_worker_router,
     terminal as finish_codex_run,
 )
+from .assured_review import ASSURED_REVIEW_AGENT, ASSURED_REVIEW_BACKEND, ASSURED_REVIEW_ROLES
 from .db import get_db
 from .models import (
     Approval,
@@ -128,6 +129,15 @@ def get_opencode_client() -> OpenCodeClient:
     settings = get_settings()
     return OpenCodeClient(
         settings.opencode_internal_url,
+        settings.opencode_username,
+        settings.opencode_password,
+    )
+
+
+def get_review_opencode_client() -> OpenCodeClient:
+    settings = get_settings()
+    return OpenCodeClient(
+        settings.opencode_review_internal_url,
         settings.opencode_username,
         settings.opencode_password,
     )
@@ -1236,6 +1246,8 @@ def request_workspace_cleanup(
 class ExecutionStartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     backend: str = "codex-subscription"
+    source_branch: str | None = None
+    expected_commit: str | None = None
 
 
 @app.post("/api/tasks/{task_id}/execute", response_model=ExecutionRead, status_code=status.HTTP_201_CREATED)
@@ -1248,8 +1260,17 @@ def start_execution(
 ) -> ExecutionRun:
     """Persist a repository-bound intent; no inference occurs before preflight."""
     payload = payload or ExecutionStartRequest()
-    if payload.backend not in {"codex-subscription", "opencode"}:
+    if payload.backend not in {"codex-subscription", "opencode", ASSURED_REVIEW_BACKEND}:
         raise HTTPException(status_code=422, detail="Unsupported execution backend")
+    if payload.backend != ASSURED_REVIEW_BACKEND and (
+        payload.source_branch is not None or payload.expected_commit is not None
+    ):
+        raise HTTPException(status_code=422, detail="Pinned source is available only for assured review")
+    if payload.backend == ASSURED_REVIEW_BACKEND:
+        if not get_settings().allow_high_assurance_review:
+            raise HTTPException(status_code=403, detail="Assured review backend is disabled by administrator")
+        if payload.source_branch is None or payload.expected_commit is None:
+            raise HTTPException(status_code=422, detail="Assured review requires source_branch and expected_commit")
     if payload.backend == "opencode" and not get_settings().allow_paid_opencode_execution:
         raise HTTPException(status_code=403, detail="Paid OpenCode backend is disabled by administrator")
     if payload.backend == "codex-subscription" and not get_settings().codex_worker_token_file:
@@ -1303,6 +1324,16 @@ def start_execution(
                 "Уровень защиты репозитория не изменён."
             ),
         )
+    if payload.backend == ASSURED_REVIEW_BACKEND and repository.assurance_tier != "general-high-assurance":
+        raise HTTPException(
+            status_code=409,
+            detail="Assured review backend requires general-high-assurance repository; regulated-critical is not supported",
+        )
+    if payload.backend == "opencode" and repository.assurance_tier in HIGH_ASSURANCE_TIERS:
+        raise HTTPException(
+            status_code=409,
+            detail="High-assurance repositories require the isolated opencode-review backend",
+        )
 
     now = datetime.now(timezone.utc)
     run_id = new_id()
@@ -1310,8 +1341,14 @@ def start_execution(
     try:
         canonical_uuid(task.id, field="task_id")
         canonical_uuid(repository.id, field="repository_id")
-        base_commit = normalize_commit(repository.last_known_commit)
-        base_branch = validate_branch(repository.default_branch)
+        base_commit = normalize_commit(
+            payload.expected_commit if payload.backend == ASSURED_REVIEW_BACKEND
+            else repository.last_known_commit
+        )
+        base_branch = validate_branch(
+            payload.source_branch if payload.backend == ASSURED_REVIEW_BACKEND
+            else repository.default_branch
+        )
         branch_name = workspace_branch_name(task.id, run_id)
     except WorkspacePreflightError as exc:
         raise HTTPException(
@@ -1356,8 +1393,11 @@ def start_execution(
         opencode_session_id=None,
         assigned_roles=(
             ["architect", "qa", "reviewer"]
-            if payload.backend == "codex-subscription" else ["department-lead"]
+            if payload.backend == "codex-subscription"
+            else ASSURED_REVIEW_ROLES.copy() if payload.backend == ASSURED_REVIEW_BACKEND
+            else ["department-lead"]
         ),
+        lead_role=ASSURED_REVIEW_AGENT if payload.backend == ASSURED_REVIEW_BACKEND else "department-lead",
         deadline_at=now + timedelta(seconds=get_settings().execution_timeout_seconds),
         created_at=now,
         updated_at=now,
@@ -1837,14 +1877,16 @@ def execution_progress(
             "error": run.error,
             "items": durable["items"],
         }
-    scoped_opencode = opencode
+    scoped_opencode = (
+        get_review_opencode_client() if run.backend == ASSURED_REVIEW_BACKEND else opencode
+    )
     if run.contract_version == 2:
         if not run.workspace_path:
             raise HTTPException(
                 status_code=503,
                 detail="У запуска отсутствует неизменяемая привязка рабочего каталога",
             )
-        scoped_opencode = opencode.for_directory(run.workspace_path)
+        scoped_opencode = scoped_opencode.for_directory(run.workspace_path)
     try:
         statuses = scoped_opencode.session_statuses()
         messages = scoped_opencode.messages(run.opencode_session_id)

@@ -380,7 +380,10 @@ class CapabilityGuard(Base):
 class ExecutionRun(Base):
     __tablename__ = "execution_runs"
     __table_args__ = (
-        CheckConstraint("backend IN ('opencode', 'codex-subscription')", name="ck_execution_runs_backend"),
+        CheckConstraint(
+            "backend IN ('opencode', 'codex-subscription', 'opencode-review')",
+            name="ck_execution_runs_backend",
+        ),
         CheckConstraint(
             "contract_version IN (1, 2)",
             name="ck_execution_runs_contract_version",

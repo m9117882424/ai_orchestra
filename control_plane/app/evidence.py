@@ -22,6 +22,7 @@ from .models import (
     UsageEvent,
 )
 from .workspace_protocol import WorkspacePreflightError, validate_relative_git_path
+from .assured_review import ASSURED_REVIEW_BACKEND, ASSURED_REVIEW_AGENT
 
 
 def utc_now() -> datetime:
@@ -235,7 +236,7 @@ def execution_cost_summary(db: Session, execution_id: str) -> dict:
     unknown_automatic_cost_rows = db.scalar(
         select(func.count(UsageEvent.id)).where(
             UsageEvent.execution_id == execution_id,
-            UsageEvent.source == "opencode-session",
+            UsageEvent.source.in_(("opencode-session", "opencode-message")),
             UsageEvent.cost == 0,
             (UsageEvent.input_tokens > 0) | (UsageEvent.output_tokens > 0),
         )
@@ -375,6 +376,7 @@ def _assurance_provenance(
     changed_files: list[str],
     trusted_artifacts: list[dict],
     automatic_usage_count: int,
+    assured_review_verdict: bool = False,
 ) -> dict:
     tier = repository.assurance_tier if repository is not None else "general-standard"
     profile = repository.assurance_profile if repository is not None else None
@@ -445,6 +447,11 @@ def _assurance_provenance(
             "required": high_assurance,
             "satisfied": automatic_usage_count > 0,
         },
+        {
+            "code": "independent_read_only_review_verdict",
+            "required": run.backend == ASSURED_REVIEW_BACKEND,
+            "satisfied": assured_review_verdict,
+        },
     ]
     missing = [
         control["code"]
@@ -495,12 +502,19 @@ def build_result_package_payload(db: Session, execution_id: str) -> dict:
             .order_by(ExecutionChildRun.started_at.asc(), ExecutionChildRun.id.asc())
         )
     )
+    assured_review = run.backend == ASSURED_REVIEW_BACKEND
     automatic_usage_count = db.scalar(
         select(func.count(UsageEvent.id)).where(
             UsageEvent.execution_id == execution_id,
-            UsageEvent.source == "opencode-session",
+            UsageEvent.source == ("opencode-message" if assured_review else "opencode-session"),
+            *((UsageEvent.role == ASSURED_REVIEW_AGENT,
+               UsageEvent.provider != "unknown", UsageEvent.model != "unknown",
+               (UsageEvent.input_tokens + UsageEvent.output_tokens) > 0)
+              if assured_review else ()),
         )
     ) or 0
+    automatic_session_rows = 0 if assured_review else int(automatic_usage_count)
+    automatic_message_rows = int(automatic_usage_count) if assured_review else 0
     cost_summary = execution_cost_summary(db, execution_id)
     changed_files = _trusted_changed_files(db, workspace.id) if workspace is not None else []
     trusted_artifacts = (
@@ -516,6 +530,11 @@ def build_result_package_payload(db: Session, execution_id: str) -> dict:
         changed_files=changed_files,
         trusted_artifacts=trusted_artifacts,
         automatic_usage_count=int(automatic_usage_count),
+        assured_review_verdict=any(
+            event.kind == "review" and event.role == ASSURED_REVIEW_AGENT
+            and event.status in {"pass", "fail", "blocked"}
+            for event in evidence
+        ),
     )
     limitations: list[str] = []
     if workspace is not None and workspace.status != "retained":
@@ -551,6 +570,7 @@ def build_result_package_payload(db: Session, execution_id: str) -> dict:
         },
         "plan": None,
         "source": {
+            "branch": workspace.base_branch if workspace else None,
             "base_sha": run.base_commit,
             "head_sha": workspace.current_head_commit if workspace else run.base_commit,
             "base_tree": run.workspace_tree,
@@ -634,7 +654,8 @@ def build_result_package_payload(db: Session, execution_id: str) -> dict:
         },
         "cost": cost_summary,
         "usage_capture": {
-            "automatic_session_rows": int(automatic_usage_count),
+            "automatic_session_rows": automatic_session_rows,
+            "automatic_message_rows": automatic_message_rows,
             "automatic_provider_capture": bool(automatic_usage_count),
             "automatic_cost_capture": bool(automatic_usage_count)
             and cost_summary["unknown_automatic_cost_rows"] == 0,

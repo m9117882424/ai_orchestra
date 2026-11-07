@@ -1,0 +1,50 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "orchestra/orchestra-reviewer",
+  "default_agent": "assured-reviewer",
+  "provider": {
+    "orchestra": {
+      "npm": "@ai-sdk/openai",
+      "name": "AI Orchestra Model Router (isolated review)",
+      "options": {
+        "baseURL": "http://model-gateway:8080/v1",
+        "apiKey": "{env:MODEL_ROUTER_CLIENT_KEY}"
+      },
+      "models": {"orchestra-reviewer": {"name": "Reviewer"}}
+    }
+  },
+  "permission": {
+    "*": "deny",
+    "read": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "list": "allow",
+    "external_directory": "deny",
+    "edit": "deny",
+    "bash": "deny",
+    "task": "deny",
+    "webfetch": "deny",
+    "websearch": "deny"
+  },
+  "agent": {
+    "assured-reviewer": {
+      "description": "Read-only independent code review of an immutable Git commit",
+      "mode": "primary",
+      "model": "orchestra/orchestra-reviewer",
+      "steps": 32,
+      "permission": {
+        "*": "deny",
+        "read": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "list": "allow",
+        "external_directory": "deny",
+        "edit": "deny",
+        "bash": "deny",
+        "task": "deny",
+        "webfetch": "deny",
+        "websearch": "deny"
+      }
+    }
+  }
+}

@@ -18,10 +18,13 @@ class Settings(BaseSettings):
     server_password: str = "CHANGE_ME_MANAGER_PASSWORD"
     opencode_url: str = "http://127.0.0.1:4096"
     opencode_internal_url: str = "http://opencode:4096"
+    opencode_review_internal_url: str = "http://opencode-review:4096"
     opencode_username: str = "opencode"
     opencode_password: str = ""
     execution_timeout_seconds: int = Field(default=7200, ge=60, le=604800)
     allow_paid_opencode_execution: bool = False
+    # Explicit opt-in, separate from the general-purpose paid development lane.
+    allow_high_assurance_review: bool = False
     codex_worker_token_file: str | None = None
     default_monthly_budget: float = 25000.0
 

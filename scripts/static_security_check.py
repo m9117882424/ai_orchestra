@@ -78,6 +78,25 @@ def resolved_runner_overlay() -> dict:
     return json.loads(result.stdout)
 
 
+def resolved_assured_review_overlay() -> dict:
+    result = subprocess.run(
+        ["docker", "compose", "-f", "docker-compose.yml", "-f",
+         "compose.assured-review.yml", "config", "--format", "json"],
+        cwd=ROOT, check=True, capture_output=True, text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def resolved_assured_openai_overlay() -> dict:
+    result = subprocess.run(
+        ["docker", "compose", "-f", "docker-compose.yml", "-f",
+         "compose.assured-review.yml", "-f", "compose.assured-openai.yml",
+         "config", "--format", "json"],
+        cwd=ROOT, check=True, capture_output=True, text=True,
+    )
+    return json.loads(result.stdout)
+
+
 def network_set(service: dict) -> set[str]:
     value = service.get("networks") or {}
     return set(value.keys() if isinstance(value, dict) else value)
@@ -754,6 +773,71 @@ def main() -> int:
         ROOT / "control_plane/app/runner_manager.py"
     ).read_text(encoding="utf-8")
     runner_overlay = resolved_runner_overlay()
+    review_overlay = resolved_assured_review_overlay()
+    review_service = review_overlay["services"]["opencode-review"]
+    review_worker = review_overlay["services"]["assured-review-worker"]
+    assert review_service.get("read_only") is True
+    assert review_worker.get("read_only") is True
+    assert not review_service.get("ports")
+    assert not review_worker.get("ports")
+    assert network_set(review_service) == {"model-net"}
+    assert network_set(review_worker) == {"model-net", "control-db"}
+    assert set(review_service.get("cap_drop") or []) == {"ALL"}
+    assert set(review_worker.get("cap_drop") or []) == {"ALL"}
+    # The reviewer sees only a read-only UID-10001 workspace mount.
+    # It may traverse private source files, but must never gain a write cap.
+    assert set(review_service.get("cap_add") or []) == {"DAC_READ_SEARCH"}
+    assert not review_worker.get("cap_add")
+    assert "/root/.config/opencode:size=4m,mode=0700" in (
+        review_service.get("tmpfs") or []
+    )
+    for service_name, service in (("opencode-review", review_service),
+                                  ("assured-review-worker", review_worker)):
+        for mount in service.get("volumes") or []:
+            assert mount.get("target") != "/var/run/docker.sock", service_name
+            if mount.get("target") == "/workspace/worktrees/managed":
+                assert mount.get("read_only") is True, service_name
+        assert "MODEL_ROUTER_MASTER_KEY" not in (service.get("environment") or {})
+    assert "MODEL_ROUTER_CLIENT_KEY" not in (review_worker.get("environment") or {})
+    assert (review_worker["environment"]["CONTROL_PLANE_EXECUTION_WORKER_BACKEND"]
+            == "opencode-review")
+    review_opt_in = review_overlay["services"]["control-plane"]["environment"][
+        "CONTROL_PLANE_ALLOW_HIGH_ASSURANCE_REVIEW"
+    ]
+    assert review_opt_in in {"false", "true"}
+    assert review_worker["environment"]["CONTROL_PLANE_ALLOW_HIGH_ASSURANCE_REVIEW"] == review_opt_in
+    review_config = json.loads(
+        (ROOT / "config/opencode.assured-review.json").read_text(encoding="utf-8")
+    )
+    assert review_config.get("default_agent") == "assured-reviewer"
+    assert review_config["provider"]["orchestra"]["npm"] == "@ai-sdk/openai"
+    assert review_config["provider"]["orchestra"]["options"]["baseURL"] == (
+        "http://model-gateway:8080/v1"
+    )
+    assert review_config["agent"]["assured-reviewer"]["permission"]["bash"] == "deny"
+    assert review_config["agent"]["assured-reviewer"]["permission"]["edit"] == "deny"
+    assert review_config["permission"]["task"] == "deny"
+    openai_only = yaml.safe_load(
+        (ROOT / "config/model-router.assured-openai.yaml").read_text(encoding="utf-8")
+    )
+    assert len(openai_only["model_list"]) == 1
+    review_route = openai_only["model_list"][0]
+    assert review_route["model_name"] == "orchestra-reviewer"
+    assert review_route["litellm_params"] == {
+        "model": "openai/gpt-6.1-sol",
+        "api_key": "os.environ/OPENAI_API_KEY",
+        "max_completion_tokens": 3072,
+        "additional_drop_params": ["max_tokens"],
+    }
+    openai_overlay = resolved_assured_openai_overlay()
+    model_router_mount = next(
+        mount for mount in openai_overlay["services"]["model-router"].get("volumes", [])
+        if mount.get("target") == "/app/config.yaml"
+    )
+    assert model_router_mount["source"].endswith("/config/model-router.assured-openai.yaml")
+    assert model_router_mount["read_only"] is True
+    for service_name in ("opencode-review", "assured-review-worker"):
+        assert "OPENAI_API_KEY" not in (openai_overlay["services"][service_name].get("environment") or {})
     runner_manager_service = runner_overlay["services"]["runner-manager"]
     assert network_set(runner_manager_service) == {"control-db"}
     assert str(runner_manager_service.get("user")) == "10001:10001"

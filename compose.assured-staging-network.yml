@@ -16,6 +16,9 @@ services:
     image: ai-orchestra-assured-staging/repo-manager:0.9.1
   workspace-manager:
     image: ai-orchestra-assured-staging/workspace-manager:0.9.0
+    # workspace-volume-init owns the private managed volume as UID 10001.
+    # Running this manager as root fails its own ownership preflight.
+    user: "10001:10001"
   workspace-volume-init:
     image: ai-orchestra-assured-staging/workspace-manager:0.9.0
   model-router:

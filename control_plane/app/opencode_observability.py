@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from .evidence import capture_opencode_evidence, record_evidence
 from .models import ExecutionChildRun, ExecutionRun, UsageEvent
+from .assured_review import ASSURED_REVIEW_BACKEND, ASSURED_REVIEW_AGENT
 
 REVIEW_ROLES = frozenset({"qa-engineer", "code-reviewer", "trade-reviewer"})
 TERMINAL_CHILD_STATUSES = frozenset({"completed", "failed"})
@@ -156,6 +157,49 @@ def _upsert_usage_snapshot(
     existing.cost = cost
     db.flush()
     return True
+
+
+def _capture_assured_message_usage(db: Session, *, run: ExecutionRun, messages: list[dict]) -> int:
+    """Use assistant message metering, not session summaries with unknown tokens.
+
+    OpenCode exposes providerID/modelID/tokens on assistant Message.info.
+    A missing/zero/unknown report is *not* evidence of a billed model call.
+    """
+    count = 0
+    for message in messages:
+        info = message.get("info") if isinstance(message.get("info"), dict) else {}
+        if info.get("role") != "assistant" or info.get("agent") != ASSURED_REVIEW_AGENT:
+            continue
+        message_id = _bounded_text(info.get("id"), 160)
+        provider = _bounded_text(info.get("providerID"), 80)
+        model = _bounded_text(info.get("modelID"), 120)
+        tokens = info.get("tokens") if isinstance(info.get("tokens"), dict) else {}
+        input_tokens = _safe_nonnegative_int(tokens.get("input"))
+        output_tokens = _safe_nonnegative_int(tokens.get("output"))
+        if not (message_id and provider and model and input_tokens + output_tokens > 0):
+            continue
+        event = db.scalar(select(UsageEvent).where(
+            UsageEvent.execution_id == run.id,
+            UsageEvent.source == "opencode-message",
+            UsageEvent.source_key == message_id,
+        ))
+        if event is None:
+            db.add(UsageEvent(
+                task_id=run.task_id, execution_id=run.id, source="opencode-message",
+                source_key=message_id, role=ASSURED_REVIEW_AGENT, provider=provider,
+                model=model, input_tokens=input_tokens, output_tokens=output_tokens,
+                cost=_safe_cost(info.get("cost")),
+            ))
+        else:
+            event.provider = provider
+            event.model = model
+            event.input_tokens = input_tokens
+            event.output_tokens = output_tokens
+            event.cost = _safe_cost(info.get("cost"))
+        count += 1
+    if count:
+        db.flush()
+    return count
 
 
 def _verdict_payload(output: object) -> dict | None:
@@ -324,7 +368,9 @@ def capture_opencode_observability(
         if isinstance(item, dict) and item.get("id")
     }
     root_session = by_id.get(root_session_id)
-    if root_session is not None:
+    if run.backend == ASSURED_REVIEW_BACKEND:
+        created += _capture_assured_message_usage(db, run=run, messages=messages)
+    elif root_session is not None:
         created += int(
             _upsert_usage_snapshot(
                 db,

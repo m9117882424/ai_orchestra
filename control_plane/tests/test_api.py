@@ -321,6 +321,92 @@ def test_paid_backend_requires_explicit_admin_enable(auth, mutation_headers):
         assert db.query(ExecutionRun).filter_by(task_id=task_id).count() == 0
 
 
+def test_assured_review_is_disabled_by_default_before_workspace_creation(auth, mutation_headers):
+    with TestClient(app) as client:
+        task_id = _create_development_task(client, auth, mutation_headers)
+        response = client.post(
+            f"/api/tasks/{task_id}/execute", auth=auth, headers=mutation_headers,
+            json={"backend": "opencode-review", "source_branch": "feature/example",
+                  "expected_commit": "b" * 40},
+        )
+    assert response.status_code == 403
+    with SessionLocal() as db:
+        assert db.query(ExecutionRun).filter_by(task_id=task_id).count() == 0
+        assert db.query(TaskWorkspace).filter_by(task_id=task_id).count() == 0
+
+
+def test_assured_review_pins_exact_pr_commit_and_does_not_unlock_general_paid_backend(
+    auth, mutation_headers, monkeypatch,
+):
+    from control_plane.app import main
+    settings = main.get_settings().model_copy(update={"allow_high_assurance_review": True})
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    assert settings.allow_paid_opencode_execution is False
+    with TestClient(app) as client:
+        task_id = _create_development_task(client, auth, mutation_headers)
+        with SessionLocal() as db:
+            task = db.get(Task, task_id)
+            repository = db.get(Repository, task.repository_id)
+            repository.assurance_tier = "general-high-assurance"
+            db.commit()
+        started = client.post(
+            f"/api/tasks/{task_id}/execute", auth=auth, headers=mutation_headers,
+            json={"backend": "opencode-review", "source_branch": "feature/efficiency",
+                  "expected_commit": "b" * 40},
+        )
+        general_paid = client.post(
+            f"/api/tasks/{task_id}/execute", auth=auth, headers=mutation_headers,
+            json={"backend": "opencode"},
+        )
+    assert started.status_code == 201
+    assert general_paid.status_code == 403
+    assert started.json()["backend"] == "opencode-review"
+    assert started.json()["base_commit"] == "b" * 40
+    with SessionLocal() as db:
+        run = db.get(ExecutionRun, started.json()["id"])
+        workspace = db.get(TaskWorkspace, run.workspace_id)
+        assert run.lead_role == "assured-reviewer"
+        assert run.assigned_roles == ["assured-reviewer"]
+        assert workspace.base_branch == "feature/efficiency"
+        assert workspace.base_commit == "b" * 40
+
+
+def test_assured_review_rejects_wrong_tier_or_unpinned_source(auth, mutation_headers, monkeypatch):
+    from control_plane.app import main
+    settings = main.get_settings().model_copy(update={"allow_high_assurance_review": True})
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    with TestClient(app) as client:
+        task_id = _create_development_task(client, auth, mutation_headers)
+        missing = client.post(
+            f"/api/tasks/{task_id}/execute", auth=auth, headers=mutation_headers,
+            json={"backend": "opencode-review"},
+        )
+        wrong_tier = client.post(
+            f"/api/tasks/{task_id}/execute", auth=auth, headers=mutation_headers,
+            json={"backend": "opencode-review", "source_branch": "main",
+                  "expected_commit": "a" * 40},
+        )
+        with SessionLocal() as db:
+            task = db.get(Task, task_id)
+            db.get(Repository, task.repository_id).assurance_tier = "general-high-assurance"
+            db.commit()
+        invalid_sha = client.post(
+            f"/api/tasks/{task_id}/execute", auth=auth, headers=mutation_headers,
+            json={"backend": "opencode-review", "source_branch": "feature/pr",
+                  "expected_commit": "not-a-sha"},
+        )
+        ignored_pin = client.post(
+            f"/api/tasks/{task_id}/execute", auth=auth, headers=mutation_headers,
+            json={"backend": "codex-subscription", "expected_commit": "a" * 40},
+        )
+    assert missing.status_code == 422
+    assert wrong_tier.status_code == 409
+    assert invalid_sha.status_code == 409
+    assert ignored_pin.status_code == 422
+    with SessionLocal() as db:
+        assert db.query(ExecutionRun).filter_by(task_id=task_id).count() == 0
+
+
 def test_subscription_missing_token_setting_fails_before_queue(auth, mutation_headers, monkeypatch):
     from control_plane.app import main
     settings = main.get_settings().model_copy(update={"codex_worker_token_file": None})

@@ -2,6 +2,11 @@
 
 The operator CLI and the cabinet use separate execution records. The subscription backend is present in the deployed Control Plane. Permanent worker activation is tracked under issue #49. The workplace pilot verified the three read-only roles, a durable result and recovery before inference on its candidate branch. Use the [version and environment matrix](PROJECT_STATUS.md) to distinguish those results from the deployed runtime.
 
+For the distinct, opt-in **paid OpenCode** path that performs isolated, source-pinned
+`general-high-assurance` static reviews with message-level usage provenance,
+see [ASSURED_READONLY_REVIEW.md](ASSURED_READONLY_REVIEW.md). The subscription lane
+is still restricted to `general-standard` and must not be relabeled high-assurance.
+
 ## Issue 49 container staging profile (opt in)
 
 The container files are `deploy/codex-worker/Dockerfile` and

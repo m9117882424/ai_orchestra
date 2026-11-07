@@ -123,6 +123,22 @@ jobs:
             rg --version | head -n 1
           '
 
+      - name: Проверить read-only контейнер независимого ревью без inference
+        run: |
+          docker compose -f docker-compose.yml -f compose.assured-review.yml \
+            run --rm -T --no-deps --entrypoint sh opencode-review -lc '
+              test -f /root/.config/opencode/opencode.json &&
+              test -d /workspace/worktrees/managed &&
+              if touch /workspace/worktrees/managed/.ci-review-write 2>/dev/null; then
+                echo "Reviewer must not write task workspace" >&2
+                exit 1
+              fi &&
+              if touch /usr/local/bin/.ci-review-rootfs-write 2>/dev/null; then
+                echo "Reviewer root filesystem must be read-only" >&2
+                exit 1
+              fi
+            '
+
       - name: Проверить isolated Git worker toolchains and workspace ownership
         run: |
           echo "[CHECK] Control Plane has no Git toolchain"

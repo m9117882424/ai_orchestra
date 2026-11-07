@@ -71,6 +71,42 @@ def _task_part(session_id: str, *, status: str, title: str, output: str, call_id
     }
 
 
+def test_assured_review_uses_only_positive_message_metering_and_never_session_placeholder():
+    _, run_id = _seed_running()
+    with SessionLocal() as db:
+        run = db.get(ExecutionRun, run_id)
+        run.backend = "opencode-review"
+        run.lead_role = "assured-reviewer"
+        run.assigned_roles = ["assured-reviewer"]
+        db.commit()
+    messages = [
+        {"info": {"id": "msg-unmetered", "role": "assistant", "agent": "assured-reviewer",
+                  "providerID": "orchestra", "modelID": "orchestra-reviewer",
+                  "tokens": {"input": 0, "output": 0}}, "parts": []},
+        {"info": {"id": "msg-metered", "role": "assistant", "agent": "assured-reviewer",
+                  "providerID": "orchestra", "modelID": "orchestra-reviewer",
+                  "tokens": {"input": 123, "output": 45}, "cost": 0.03}, "parts": []},
+        {"info": {"id": "msg-unknown", "role": "assistant", "agent": "assured-reviewer",
+                  "providerID": "orchestra", "tokens": {"input": 12}}, "parts": []},
+    ]
+    for _ in range(2):
+        with SessionLocal() as db:
+            capture_opencode_observability(
+                db, execution_id=run_id, generation=7, root_session_id="ses-root",
+                session_state="idle", messages=messages,
+                sessions=[_session("ses-root", "assured-reviewer", "orchestra-reviewer", 999, 999, "0")],
+            )
+            db.commit()
+    with SessionLocal() as db:
+        usage = list(db.scalars(select(UsageEvent).where(UsageEvent.execution_id == run_id)))
+    assert len(usage) == 1
+    assert usage[0].source == "opencode-message"
+    assert usage[0].source_key == "msg-metered"
+    assert usage[0].provider == "orchestra"
+    assert usage[0].model == "orchestra-reviewer"
+    assert (usage[0].input_tokens, usage[0].output_tokens) == (123, 45)
+
+
 def test_child_run_usage_and_structured_verdict_are_durable_and_redacted(auth):
     task_id, run_id = _seed_running()
     raw_output = (

@@ -575,6 +575,47 @@ def test_high_assurance_result_package_proves_complete_provenance_baseline():
     )
 
 
+def test_assured_review_provenance_requires_root_verdict_and_metered_model_message():
+    now = datetime.now(timezone.utc)
+    workspace_id, run_id = _seed_completed_workspace_run(
+        now, assurance_tier="general-high-assurance",
+    )
+    with SessionLocal() as db:
+        run = db.get(ExecutionRun, run_id)
+        workspace = db.get(TaskWorkspace, workspace_id)
+        run.backend = "opencode-review"
+        run.lead_role = "assured-reviewer"
+        run.assigned_roles = ["assured-reviewer"]
+        workspace.base_branch = "feature/efficiency"
+        workspace.has_changes = False
+        workspace.changed_file_count = 0
+        workspace.current_head_commit = workspace.base_commit
+        workspace.current_tree = workspace.initial_tree
+        db.add(UsageEvent(
+            execution_id=run_id, source="opencode-message", source_key="msg-good",
+            role="assured-reviewer", provider="orchestra", model="orchestra-reviewer",
+            input_tokens=51, output_tokens=23, cost=Decimal("0"),
+        ))
+        incomplete = materialize_result_package(db, run_id, final=False, now=now)
+        assert incomplete.payload["assurance"]["provenance_status"] == "incomplete"
+        assert incomplete.payload["assurance"]["missing_requirements"] == [
+            "independent_read_only_review_verdict",
+        ]
+        db.add(ExecutionEvidence(
+            execution_id=run_id, source="opencode-review", source_key="verdict:good",
+            kind="review", role="assured-reviewer", status="pass",
+            details={"findings_count": 0},
+        ))
+        final = materialize_result_package(db, run_id, final=True, now=now)
+        db.commit()
+    assert final.payload["assurance"]["provenance_status"] == "complete"
+    assert final.payload["source"]["branch"] == "feature/efficiency"
+    assert final.payload["usage_capture"]["automatic_message_rows"] == 1
+    assert final.payload["usage_capture"]["automatic_session_rows"] == 0
+    assert final.payload["cost"]["cost_status"] == "unknown"
+    assert final.payload["cost"]["actual_cost"] is None
+
+
 def test_result_package_contains_empty_changed_files_without_audit_events():
     now = datetime.now(timezone.utc)
     _, run_id = _seed_completed_workspace_run(now)

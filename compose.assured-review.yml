@@ -1,0 +1,120 @@
+# Deliberately opt-in. Never enable by running the base compose file alone.
+# Deploy only after migration 20261107_0013 and security/config validation.
+services:
+  control-plane:
+    environment:
+      CONTROL_PLANE_ALLOW_HIGH_ASSURANCE_REVIEW: ${CONTROL_PLANE_ALLOW_HIGH_ASSURANCE_REVIEW:-false}
+      CONTROL_PLANE_OPENCODE_REVIEW_INTERNAL_URL: http://opencode-review:4096
+
+  opencode-review:
+    build:
+      context: .
+      args:
+        OPENCODE_VERSION: ${OPENCODE_VERSION:-1.18.27}
+    image: ai-development-department/opencode:${OPENCODE_VERSION:-1.18.27}-toolchain1
+    restart: unless-stopped
+    init: true
+    read_only: true
+    working_dir: /workspace/worktrees/managed
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /root/.cache:size=128m,mode=0700
+    environment:
+      OPENCODE_CONFIG: /root/.config/opencode/opencode.json
+      OPENCODE_SERVER_USERNAME: ${OPENCODE_SERVER_USERNAME}
+      OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD}
+      MODEL_ROUTER_CLIENT_KEY: ${MODEL_ROUTER_CLIENT_KEY}
+    command: ["opencode", "web", "--hostname", "0.0.0.0", "--port", "4096"]
+    volumes:
+      - ./config/opencode.assured-review.json:/root/.config/opencode/opencode.json:ro
+      - ./policy/AGENTS.md:/workspace/worktrees/AGENTS.md:ro
+      - task-workspaces:/workspace/worktrees/managed:ro
+      - assured-review-share:/root/.local/share/opencode
+      - assured-review-state:/root/.local/state/opencode
+    networks:
+      - model-net
+    depends_on:
+      model-gateway:
+        condition: service_healthy
+      workspace-volume-init:
+        condition: service_completed_successfully
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 80
+    mem_limit: 1g
+    cpus: 1.00
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -u \"$${OPENCODE_SERVER_USERNAME}:$${OPENCODE_SERVER_PASSWORD}\" http://127.0.0.1:4096/global/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+
+  assured-review-worker:
+    build:
+      context: ./control_plane
+      target: execution-worker
+    image: ai-development-department/execution-worker:0.9.0
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    command: ["python", "-m", "app.execution_worker"]
+    environment:
+      CONTROL_PLANE_ENVIRONMENT: production
+      CONTROL_PLANE_DB_HOST: postgres
+      CONTROL_PLANE_DB_PORT: 5432
+      CONTROL_PLANE_DB_NAME: ai_orchestra
+      CONTROL_PLANE_DB_USER: ai_orchestra
+      CONTROL_PLANE_DB_PASSWORD: ${CONTROL_PLANE_DB_PASSWORD}
+      CONTROL_PLANE_SERVER_USERNAME: assured-review-worker
+      CONTROL_PLANE_SERVER_PASSWORD: assured-review-worker-does-not-use-manager-auth
+      CONTROL_PLANE_OPENCODE_USERNAME: ${OPENCODE_SERVER_USERNAME}
+      CONTROL_PLANE_OPENCODE_PASSWORD: ${OPENCODE_SERVER_PASSWORD}
+      CONTROL_PLANE_OPENCODE_REVIEW_INTERNAL_URL: http://opencode-review:4096
+      CONTROL_PLANE_ALLOW_HIGH_ASSURANCE_REVIEW: ${CONTROL_PLANE_ALLOW_HIGH_ASSURANCE_REVIEW:-false}
+      CONTROL_PLANE_EXECUTION_WORKER_BACKEND: opencode-review
+      CONTROL_PLANE_EXECUTION_WORKER_MAX_ACTIVE: 1
+      CONTROL_PLANE_EXECUTION_WORKER_LEASE_SECONDS: ${CONTROL_PLANE_EXECUTION_WORKER_LEASE_SECONDS:-120}
+      CONTROL_PLANE_EXECUTION_WORKER_POLL_SECONDS: ${CONTROL_PLANE_EXECUTION_WORKER_POLL_SECONDS:-5}
+      CONTROL_PLANE_EXECUTION_WORKER_HEALTH_PATH: /tmp/ai-orchestra-assured-review-worker.heartbeat
+      CONTROL_PLANE_TASK_WORKSPACE_ROOT: /workspace/worktrees/managed
+      CONTROL_PLANE_WORKSPACE_MANAGER_MAX_FILES: ${WORKSPACE_MANAGER_MAX_FILES:-100000}
+    volumes:
+      - task-workspaces:/workspace/worktrees/managed:ro
+    networks:
+      - control-db
+      - model-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      workspace-manager:
+        condition: service_healthy
+      opencode-review:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 0.35
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,time; p='/tmp/ai-orchestra-assured-review-worker.heartbeat'; assert os.path.isfile(p) and time.time()-os.path.getmtime(p) < 180"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+
+volumes:
+  assured-review-share:
+  assured-review-state:

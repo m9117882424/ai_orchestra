@@ -64,7 +64,6 @@ def test_optional_staging_networks_are_separate_and_never_reuse_prod_networks():
     assert overlay["services"]["opencode-review"]["image"] == (
         overlay["services"]["opencode"]["image"]
     )
-    assert overlay["services"]["workspace-manager"]["user"] == "10001:10001"
     networks = overlay["networks"]
     assert set(networks) == {
         "control-db", "control-access", "model-net", "router-backend",

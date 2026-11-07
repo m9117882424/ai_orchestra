@@ -44,6 +44,13 @@ def test_openai_only_review_profile_keeps_provider_credentials_outside_agent():
     assert overlay["services"]["model-router"]["volumes"] == [
         "./config/model-router.assured-openai.yaml:/app/config.yaml:ro"
     ]
+    review = yaml.safe_load(
+        (root / "compose.assured-review.yml").read_text(encoding="utf-8")
+    )["services"]["opencode-review"]
+    assert review["cap_drop"] == ["ALL"]
+    assert review["cap_add"] == ["DAC_READ_SEARCH"]
+    assert review["read_only"] is True
+    assert "task-workspaces:/workspace/worktrees/managed:ro" in review["volumes"]
 
 
 def test_optional_staging_networks_are_separate_and_never_reuse_prod_networks():

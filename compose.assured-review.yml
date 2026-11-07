@@ -42,6 +42,10 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # Workspace Manager owns task-workspaces as UID 10001 with mode 0700.
+    # OpenCode mounts that volume read-only: grant read/traverse, not write.
+    cap_add:
+      - DAC_READ_SEARCH
     pids_limit: 80
     mem_limit: 1g
     cpus: 1.00

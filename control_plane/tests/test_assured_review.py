@@ -1,4 +1,5 @@
 import json
+from ipaddress import ip_network
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -43,6 +44,32 @@ def test_openai_only_review_profile_keeps_provider_credentials_outside_agent():
     assert overlay["services"]["model-router"]["volumes"] == [
         "./config/model-router.assured-openai.yaml:/app/config.yaml:ro"
     ]
+
+
+def test_optional_staging_networks_are_separate_and_never_reuse_prod_networks():
+    root = Path(__file__).resolve().parents[2]
+    overlay = yaml.safe_load(
+        (root / "compose.assured-staging-network.yml").read_text(encoding="utf-8")
+    )
+    assert list(overlay) == ["networks"]
+    networks = overlay["networks"]
+    assert set(networks) == {
+        "control-db", "control-access", "model-net", "router-backend",
+        "provider-egress", "repository-egress",
+    }
+    assert all("external" not in settings and "name" not in settings
+               for settings in networks.values())
+    assert all(networks[part]["internal"] for part in (
+        "control-db", "control-access", "model-net", "router-backend",
+    ))
+    ranges = [
+        ip_network(settings["ipam"]["config"][0]["subnet"])
+        for settings in networks.values()
+    ]
+    assert all(part.prefixlen == 27 and part.subnet_of(ip_network("172.23.0.0/24"))
+               for part in ranges)
+    assert all(not first.overlaps(second)
+               for i, first in enumerate(ranges) for second in ranges[i + 1:])
 
 
 @pytest.mark.parametrize("payload", [

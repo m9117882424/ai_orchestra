@@ -1,7 +1,7 @@
 # AI Orchestra — согласованная схема AI-ресурсов
 
 **Владелец:** Максим Анисимов. **Решение:** 07.11.2026.
-**Статус:** политика согласована; production-переключений и новых API-запросов этим документом не выполняется.
+**Статус:** политика согласована; API-кредиты проверены; production-переключений и новых API-запросов этим документом не выполняется.
 
 ## Разрешённые маршруты
 
@@ -25,5 +25,7 @@
 
 - Arvento: https://github.com/m9117882424/arvento-kpp-report/pull/31 — Draft, последний проверяемый SHA после Excel QA `14c40c9c5acbb8fd742fa2d13468c22e6badae8d`.
 - Orchestra: https://github.com/m9117882424/ai_orchestra/pull/57 — подписочный preflight; https://github.com/m9117882424/ai_orchestra/pull/58 — read-only review backend и OpenAI-only профиль.
-- PRIMARY по read-only состоянию 07.11: Model Router/Gateway выключены; расширение Docker bridge-сетей заблокировано исчерпанием default address pools. Изменение сетей/firewall или переключение production — не часть этого решения.
-- Пока не выполнены подтверждение API-кредитов, контролируемый staging и модельный provenance-run, нельзя говорить, что независимый AI Orchestra review или production Arvento завершены.
+- API Platform 07.11: подписка привязана, **$110.96** API-кредитов, Auto-reload OFF; срок действия до **22.11.2026**. Кредиты относятся к организации, а не к произвольному ключу — привязка server-side ключа к этой организации не проверена.
+- PRIMARY по read-only состоянию 07.11: Model Router/Gateway выключены; стандартные Docker bridge-пулы исчерпаны. Отдельный декларативный сетевой профиль с фиксированными неиспользуемыми на момент проверки CIDR подготовлен, но **не применён**. Никакие сети/firewall или production не менялись.
+- Ключ OpenAI из PRIMARY хранится с режимом 0600, но из-за ранее раскрытого в чате ключа **требуется безопасная ротация и подтверждение project/org**, прежде чем разрешить inference.
+- Пока не выполнены контролируемый staging и модельный provenance-run, нельзя говорить, что независимый AI Orchestra review или production Arvento завершены.

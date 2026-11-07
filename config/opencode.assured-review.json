@@ -4,7 +4,7 @@
   "default_agent": "assured-reviewer",
   "provider": {
     "orchestra": {
-      "npm": "@ai-sdk/openai-compatible",
+      "npm": "@ai-sdk/openai",
       "name": "AI Orchestra Model Router (isolated review)",
       "options": {
         "baseURL": "http://model-gateway:8080/v1",

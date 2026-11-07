@@ -38,6 +38,7 @@ def test_openai_only_review_profile_keeps_provider_credentials_outside_agent():
         (root / "config/opencode.assured-review.json").read_text(encoding="utf-8")
     )
     assert "OPENAI_API_KEY" not in json.dumps(agent_config)
+    assert agent_config["provider"]["orchestra"]["npm"] == "@ai-sdk/openai"
     overlay = yaml.safe_load(
         (root / "compose.assured-openai.yml").read_text(encoding="utf-8")
     )

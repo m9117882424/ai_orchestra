@@ -784,6 +784,13 @@ def main() -> int:
     assert network_set(review_worker) == {"model-net", "control-db"}
     assert set(review_service.get("cap_drop") or []) == {"ALL"}
     assert set(review_worker.get("cap_drop") or []) == {"ALL"}
+    # The reviewer sees only a read-only UID-10001 workspace mount.
+    # It may traverse private source files, but must never gain a write cap.
+    assert set(review_service.get("cap_add") or []) == {"DAC_READ_SEARCH"}
+    assert not review_worker.get("cap_add")
+    assert "/root/.config/opencode:size=4m,mode=0700" in (
+        review_service.get("tmpfs") or []
+    )
     for service_name, service in (("opencode-review", review_service),
                                   ("assured-review-worker", review_worker)):
         for mount in service.get("volumes") or []:
@@ -803,6 +810,10 @@ def main() -> int:
         (ROOT / "config/opencode.assured-review.json").read_text(encoding="utf-8")
     )
     assert review_config.get("default_agent") == "assured-reviewer"
+    assert review_config["provider"]["orchestra"]["npm"] == "@ai-sdk/openai"
+    assert review_config["provider"]["orchestra"]["options"]["baseURL"] == (
+        "http://model-gateway:8080/v1"
+    )
     assert review_config["agent"]["assured-reviewer"]["permission"]["bash"] == "deny"
     assert review_config["agent"]["assured-reviewer"]["permission"]["edit"] == "deny"
     assert review_config["permission"]["task"] == "deny"
@@ -815,7 +826,8 @@ def main() -> int:
     assert review_route["litellm_params"] == {
         "model": "openai/gpt-6.1-sol",
         "api_key": "os.environ/OPENAI_API_KEY",
-        "max_tokens": 3072,
+        "max_completion_tokens": 3072,
+        "additional_drop_params": ["max_tokens"],
     }
     openai_overlay = resolved_assured_openai_overlay()
     model_router_mount = next(

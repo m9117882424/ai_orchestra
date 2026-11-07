@@ -87,6 +87,16 @@ def resolved_assured_review_overlay() -> dict:
     return json.loads(result.stdout)
 
 
+def resolved_assured_openai_overlay() -> dict:
+    result = subprocess.run(
+        ["docker", "compose", "-f", "docker-compose.yml", "-f",
+         "compose.assured-review.yml", "-f", "compose.assured-openai.yml",
+         "config", "--format", "json"],
+        cwd=ROOT, check=True, capture_output=True, text=True,
+    )
+    return json.loads(result.stdout)
+
+
 def network_set(service: dict) -> set[str]:
     value = service.get("networks") or {}
     return set(value.keys() if isinstance(value, dict) else value)
@@ -796,6 +806,26 @@ def main() -> int:
     assert review_config["agent"]["assured-reviewer"]["permission"]["bash"] == "deny"
     assert review_config["agent"]["assured-reviewer"]["permission"]["edit"] == "deny"
     assert review_config["permission"]["task"] == "deny"
+    openai_only = yaml.safe_load(
+        (ROOT / "config/model-router.assured-openai.yaml").read_text(encoding="utf-8")
+    )
+    assert len(openai_only["model_list"]) == 1
+    review_route = openai_only["model_list"][0]
+    assert review_route["model_name"] == "orchestra-reviewer"
+    assert review_route["litellm_params"] == {
+        "model": "openai/gpt-6.1-sol",
+        "api_key": "os.environ/OPENAI_API_KEY",
+        "max_tokens": 3072,
+    }
+    openai_overlay = resolved_assured_openai_overlay()
+    model_router_mount = next(
+        mount for mount in openai_overlay["services"]["model-router"].get("volumes", [])
+        if mount.get("target") == "/app/config.yaml"
+    )
+    assert model_router_mount["source"].endswith("/config/model-router.assured-openai.yaml")
+    assert model_router_mount["read_only"] is True
+    for service_name in ("opencode-review", "assured-review-worker"):
+        assert "OPENAI_API_KEY" not in (openai_overlay["services"][service_name].get("environment") or {})
     runner_manager_service = runner_overlay["services"]["runner-manager"]
     assert network_set(runner_manager_service) == {"control-db"}
     assert str(runner_manager_service.get("user")) == "10001:10001"

@@ -1,0 +1,16 @@
+# Isolated high-assurance code-review profile: OpenAI API only.
+# Deploy with compose.assured-openai.yml in a staging project; it deliberately
+# does not expose the other department aliases or any third-party provider.
+model_list:
+  - model_name: orchestra-reviewer
+    litellm_params:
+      model: openai/gpt-6.1-sol
+      api_key: os.environ/OPENAI_API_KEY
+      max_tokens: 3072
+
+general_settings:
+  master_key: os.environ/MODEL_ROUTER_MASTER_KEY
+
+litellm_settings:
+  drop_params: true
+  request_timeout: 180

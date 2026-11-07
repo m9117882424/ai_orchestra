@@ -17,6 +17,26 @@ At workspace preparation, Workspace Manager verifies that the trusted mirror's
 or a moved PR head fails closed; it never falls back to repository `main`.
 The source tree and worktree identity are rechecked before inference and before review completion.
 
+### OpenAI-only profile (no third-party provider)
+
+`compose.assured-openai.yml` optionally replaces the Model Router's catalog with
+`config/model-router.assured-openai.yaml`: **only** the `orchestra-reviewer` alias is
+available and it resolves to the official OpenAI API model `gpt-6.1-sol`.
+The API credential is read exclusively by Model Router from the untracked
+`.env.providers` (`OPENAI_API_KEY`); OpenCode and the review worker receive no
+provider credential. This is a **review-only isolated staging profile**. Never
+layer it over a running general-purpose Orchestra deployment: other agent aliases
+are intentionally absent and would stop resolving.
+
+Eligible ChatGPT Pro subscriptions may claim OpenAI API credits by linking their
+subscription to an owned API organization in ChatGPT Settings → Billing. The
+benefit must be explicitly claimed and its remaining credits checked; ChatGPT
+subscription access alone does **not** make arbitrary API requests free. Prior to
+the first review, verify the project API key's model access and that the provider
+organization cannot continue into paid purchased credits/auto-recharge without
+the owner's approval. Do not store credentials in git, prompts, screenshots or
+execution evidence.
+
 ## Isolation and evidence
 
 - An optional Compose overlay supplies `opencode-review` and `assured-review-worker`; **neither
@@ -42,11 +62,16 @@ The source tree and worktree identity are rechecked before inference and before 
 1. Review and merge PR #57 and this PR in that order; verify green CI and apply migration
    `20261107_0013`. Back up PostgreSQL first. Confirm existing taxi/Arvento services are not
    affected by Model Router startup and that Docker network/address capacity is sufficient.
-2. Validate `docker compose -f docker-compose.yml -f compose.assured-review.yml config` and
-   the isolation checks in `scripts/static_security_check.py`. Confirm the Model Gateway's
-   `orchestra-reviewer` provider alias is functional and a bounded spending budget exists.
+2. Validate `docker compose -f docker-compose.yml -f compose.assured-review.yml
+   -f compose.assured-openai.yml config` and the isolation checks in
+   `scripts/static_security_check.py` **only on the review-only staging deployment**.
+   Confirm the Model Gateway's `orchestra-reviewer` OpenAI alias is functional,
+   subscriber API credits are active and further chargeable usage is blocked by
+   the organization's billing configuration. A dry config check must not dump
+   provider secret values to logs or chat. Do not create new bridge networks on
+   PRIMARY while the default Docker address pools are exhausted.
 3. Set `CONTROL_PLANE_ALLOW_HIGH_ASSURANCE_REVIEW=true` **in the isolated deployment
-   environment** (not in git). Start only the necessary services using both Compose files,
+   environment** (not in git). Start only the necessary services using all three Compose files,
    explicitly listing the desired service names. Do not start unrelated disabled workers.
 4. Readiness: check private `opencode-review` health, `assured-review-worker` heartbeat,
    DB migration head, model routing and current registry status before creating a run.
@@ -57,7 +82,7 @@ The source tree and worktree identity are rechecked before inference and before 
    {
      "backend": "opencode-review",
      "source_branch": "feature/efficiency-report-speed-controls",
-     "expected_commit": "602980e28b56f7ac73b0f41c60fe9cedf63e5b2a"
+     "expected_commit": "14c40c9c5acbb8fd742fa2d13468c22e6badae8d"
    }
    ```
 

@@ -1,6 +1,9 @@
+import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
+import yaml
 from sqlalchemy import select
 
 from control_plane.app import execution_worker
@@ -13,6 +16,33 @@ from control_plane.app.execution_worker import (
 )
 from control_plane.app.models import ExecutionEvidence, ExecutionRun, Task, UsageEvent
 from control_plane.app.opencode_client import OpenCodeClient
+
+
+def test_openai_only_review_profile_keeps_provider_credentials_outside_agent():
+    root = Path(__file__).resolve().parents[2]
+    router = yaml.safe_load(
+        (root / "config/model-router.assured-openai.yaml").read_text(encoding="utf-8")
+    )
+    assert router["model_list"] == [{
+        "model_name": "orchestra-reviewer",
+        "litellm_params": {
+            "model": "openai/gpt-6.1-sol",
+            "api_key": "os.environ/OPENAI_API_KEY",
+            "max_tokens": 3072,
+        },
+    }]
+    assert "AITUNNEL" not in json.dumps(router)
+    agent_config = json.loads(
+        (root / "config/opencode.assured-review.json").read_text(encoding="utf-8")
+    )
+    assert "OPENAI_API_KEY" not in json.dumps(agent_config)
+    overlay = yaml.safe_load(
+        (root / "compose.assured-openai.yml").read_text(encoding="utf-8")
+    )
+    assert list(overlay["services"]) == ["model-router"]
+    assert overlay["services"]["model-router"]["volumes"] == [
+        "./config/model-router.assured-openai.yaml:/app/config.yaml:ro"
+    ]
 
 
 @pytest.mark.parametrize("payload", [

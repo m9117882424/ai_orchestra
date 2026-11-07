@@ -82,6 +82,8 @@ jobs:
       - name: Проверить Docker Compose и границы безопасности
         run: |
           docker compose config --quiet
+          docker compose -f docker-compose.yml -f compose.assured-review.yml \
+            -f compose.assured-openai.yml config --quiet
           python3 scripts/static_security_check.py
           python3 scripts/codex_compose_synthetic_check.py
 

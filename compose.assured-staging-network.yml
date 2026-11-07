@@ -3,6 +3,30 @@
 # Before each deployment, confirm ALL six subnets are absent from `ip route`
 # and `docker network inspect` (and from private/VPN routing plans). Static
 # CIDRs do not grant permission to change PRIMARY networking without a GO.
+services:
+  # The base Compose pins global image names. A separate project name does NOT
+  # isolate those tags; staging builds must never replace production images.
+  control-plane:
+    image: ai-orchestra-assured-staging/control-plane:0.9.0
+  execution-worker:
+    image: ai-orchestra-assured-staging/execution-worker:0.9.0
+  assured-review-worker:
+    image: ai-orchestra-assured-staging/execution-worker:0.9.0
+  repo-manager:
+    image: ai-orchestra-assured-staging/repo-manager:0.9.1
+  workspace-manager:
+    image: ai-orchestra-assured-staging/workspace-manager:0.9.0
+  workspace-volume-init:
+    image: ai-orchestra-assured-staging/workspace-manager:0.9.0
+  model-router:
+    image: ai-orchestra-assured-staging/model-router:1.98.0
+  model-gateway:
+    image: ai-orchestra-assured-staging/model-gateway:0.1.0
+  opencode:
+    image: ai-orchestra-assured-staging/opencode:1.18.27-toolchain1
+  opencode-review:
+    image: ai-orchestra-assured-staging/opencode:1.18.27-toolchain1
+
 networks:
   control-db:
     internal: true

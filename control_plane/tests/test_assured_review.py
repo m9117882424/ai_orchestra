@@ -30,6 +30,7 @@ def test_openai_only_review_profile_keeps_provider_credentials_outside_agent():
             "model": "openai/gpt-6.1-sol",
             "api_key": "os.environ/OPENAI_API_KEY",
             "max_completion_tokens": 3072,
+            "additional_drop_params": ["max_tokens"],
         },
     }]
     assert "AITUNNEL" not in json.dumps(router)

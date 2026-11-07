@@ -13,7 +13,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .auth import require_control_request, require_manager
-from .codex_broker import router as codex_worker_router, terminal as finish_codex_run
+from .codex_broker import (
+    SUBSCRIPTION_ASSURANCE_TIER,
+    router as codex_worker_router,
+    terminal as finish_codex_run,
+)
 from .db import get_db
 from .models import (
     Approval,
@@ -1287,6 +1291,17 @@ def start_execution(
         raise HTTPException(
             status_code=409,
             detail="Репозиторий не готов к безопасному запуску; дождитесь успешной синхронизации",
+        )
+    if (payload.backend == "codex-subscription"
+            and repository.assurance_tier != SUBSCRIPTION_ASSURANCE_TIER):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Подписочный Codex поддерживает только general-standard. "
+                f"Репозиторий имеет профиль {repository.assurance_tier}; "
+                "для его ревью нужен исполнитель с обязательным provenance. "
+                "Уровень защиты репозитория не изменён."
+            ),
         )
 
     now = datetime.now(timezone.utc)

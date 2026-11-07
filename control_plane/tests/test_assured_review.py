@@ -51,7 +51,19 @@ def test_optional_staging_networks_are_separate_and_never_reuse_prod_networks():
     overlay = yaml.safe_load(
         (root / "compose.assured-staging-network.yml").read_text(encoding="utf-8")
     )
-    assert list(overlay) == ["networks"]
+    assert set(overlay) == {"services", "networks"}
+    assert set(overlay["services"]) == {
+        "control-plane", "execution-worker", "assured-review-worker",
+        "repo-manager", "workspace-manager", "workspace-volume-init",
+        "model-router", "model-gateway", "opencode", "opencode-review",
+    }
+    assert all(
+        spec["image"].startswith("ai-orchestra-assured-staging/")
+        for spec in overlay["services"].values()
+    )
+    assert overlay["services"]["opencode-review"]["image"] == (
+        overlay["services"]["opencode"]["image"]
+    )
     networks = overlay["networks"]
     assert set(networks) == {
         "control-db", "control-access", "model-net", "router-backend",

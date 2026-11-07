@@ -68,8 +68,24 @@ execution evidence.
    Confirm the Model Gateway's `orchestra-reviewer` OpenAI alias is functional,
    subscriber API credits are active and further chargeable usage is blocked by
    the organization's billing configuration. A dry config check must not dump
-   provider secret values to logs or chat. Do not create new bridge networks on
-   PRIMARY while the default Docker address pools are exhausted.
+   provider secret values to logs or chat. Do not attempt Docker's automatic
+   bridge address allocation on PRIMARY while the default pools are exhausted.
+
+   If the PRIMARY's automatic address pools are exhausted, an **optional,
+   not-yet-deployed** `compose.assured-staging-network.yml` defines six separate
+   staging-only `/27` bridge networks within `172.23.0.0/24`. This does **not**
+   authorize creating them. Before a controlled GO, check `ip -4 route`, all
+   existing Docker network IPAM subnets and private/VPN route plans for overlap;
+   confirm an independent `-p ai-orchestra-review-staging` project and separate
+   credentials, volumes and loopback ports. Never reuse empty networks owned by
+   the live Orchestra, CRM or other systems. Creation will change Docker bridge
+   and iptables state even without touching an existing container; stop if an
+   approval, routing, resource or network-isolation gate is not satisfied.
+
+   When the explicit network GO is granted, append
+   `-f compose.assured-staging-network.yml` **last** in staging commands. Use
+   stage-only `CONTROL_PLANE_PORT` and `MODEL_GATEWAY_PORT` values to prevent
+   loopback port collisions. Never issue a blanket `docker compose up`.
 3. Set `CONTROL_PLANE_ALLOW_HIGH_ASSURANCE_REVIEW=true` **in the isolated deployment
    environment** (not in git). Start only the necessary services using all three Compose files,
    explicitly listing the desired service names. Do not start unrelated disabled workers.
@@ -105,3 +121,19 @@ contains multiple prepared workspaces; per-task path access is additionally rest
 OpenCode's `external_directory` permission, but this is not a separately mounted namespace
 per task. For stricter tenant separation, provision one filesystem-mounted workspace per
 execution before extending this lane to unrelated repositories.
+
+### PRIMARY read-only preflight, 07.11.2026
+
+- ChatGPT Pro subscription-linked API credits were verified in the owner's OpenAI Platform:
+  **$110.96 remaining**, expiring **22.11.2026**; **Auto-reload OFF**. This confirms the
+  organization's credit grant, **not** the project association of a server API key.
+- Docker uses the exhausted default subnet pools. Empty existing networks belong to
+  other Compose projects and are **not** suitable as spare staging networks.
+- The host currently has no local IPv4 route in `172.23.0.0/16`; the optional fixed
+  staging CIDRs require a fresh overlap check and explicit networking GO before creation.
+- The protected `OPENAI_API_KEY` entry exists in PRIMARY's `.env.providers`, mode `0600`,
+  but its project/rotation provenance is not verified. Because a key was previously
+  pasted into chat, **do not use the existing key for inference until safely rotated and
+  verified against the credited organization**.
+- No new review container, Docker network, paid inference request, migration or
+  production Arvento deployment was executed at this checkpoint.

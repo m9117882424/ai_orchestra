@@ -19,6 +19,9 @@ services:
     tmpfs:
       - /tmp:size=64m,mode=1777
       - /root/.cache:size=128m,mode=0700
+      # OpenCode creates .gitignore in its config dir during session setup.
+      # Keep the config JSON bind-mounted read-only beneath this tmpfs.
+      - /root/.config/opencode:size=4m,mode=0700
     environment:
       OPENCODE_CONFIG: /root/.config/opencode/opencode.json
       OPENCODE_SERVER_USERNAME: ${OPENCODE_SERVER_USERNAME}

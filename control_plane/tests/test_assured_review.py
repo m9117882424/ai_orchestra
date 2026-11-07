@@ -29,7 +29,7 @@ def test_openai_only_review_profile_keeps_provider_credentials_outside_agent():
         "litellm_params": {
             "model": "openai/gpt-6.1-sol",
             "api_key": "os.environ/OPENAI_API_KEY",
-            "max_tokens": 3072,
+            "max_completion_tokens": 3072,
         },
     }]
     assert "AITUNNEL" not in json.dumps(router)
@@ -64,6 +64,7 @@ def test_optional_staging_networks_are_separate_and_never_reuse_prod_networks():
     assert overlay["services"]["opencode-review"]["image"] == (
         overlay["services"]["opencode"]["image"]
     )
+    assert overlay["services"]["workspace-manager"]["user"] == "10001:10001"
     networks = overlay["networks"]
     assert set(networks) == {
         "control-db", "control-access", "model-net", "router-backend",

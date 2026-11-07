@@ -7,6 +7,9 @@ model_list:
       model: openai/gpt-6.1-sol
       api_key: os.environ/OPENAI_API_KEY
       max_completion_tokens: 3072
+      # OpenCode's OpenAI-compatible SDK injects legacy max_tokens.
+      # This model accepts only max_completion_tokens; keep the server cap.
+      additional_drop_params: [max_tokens]
 
 general_settings:
   master_key: os.environ/MODEL_ROUTER_MASTER_KEY

@@ -51,6 +51,8 @@ def test_openai_only_review_profile_keeps_provider_credentials_outside_agent():
     assert review["cap_add"] == ["DAC_READ_SEARCH"]
     assert review["read_only"] is True
     assert "task-workspaces:/workspace/worktrees/managed:ro" in review["volumes"]
+    assert "/root/.config/opencode:size=4m,mode=0700" in review["tmpfs"]
+    assert "./config/opencode.assured-review.json:/root/.config/opencode/opencode.json:ro" in review["volumes"]
 
 
 def test_optional_staging_networks_are_separate_and_never_reuse_prod_networks():

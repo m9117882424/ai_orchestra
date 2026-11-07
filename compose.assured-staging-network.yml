@@ -1,0 +1,34 @@
+# Opt-in staging-only network addresses for hosts whose Docker default pools
+# are already exhausted. Never layer this over the production Compose project.
+# Before each deployment, confirm ALL six subnets are absent from `ip route`
+# and `docker network inspect` (and from private/VPN routing plans). Static
+# CIDRs do not grant permission to change PRIMARY networking without a GO.
+networks:
+  control-db:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.23.0.0/27
+  control-access:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.23.0.32/27
+  model-net:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.23.0.64/27
+  router-backend:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.23.0.96/27
+  provider-egress:
+    ipam:
+      config:
+        - subnet: 172.23.0.128/27
+  repository-egress:
+    ipam:
+      config:
+        - subnet: 172.23.0.160/27

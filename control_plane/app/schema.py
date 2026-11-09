@@ -261,6 +261,12 @@ def _schema_diff(
                 and columns == ("created_at", "id")
                 and not unique
                 and plain
+                # PostgreSQL reflection reports non-default DESC/NULLS ordering
+                # separately from dialect_options; the column pair alone is
+                # insufficient to recognize the exact approved index.
+                and not index.get("column_sorting")
+                and not index.get("include_columns")
+                and not index.get("expressions")
             ):
                 continue
             actual_indexes.add((columns, unique))

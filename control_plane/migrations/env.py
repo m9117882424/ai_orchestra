@@ -4,6 +4,7 @@ from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
+from sqlalchemy.engine import URL
 
 from app.database_base import Base
 from app.settings import get_settings
@@ -14,7 +15,12 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-config.set_main_option("sqlalchemy.url", str(get_settings().sqlalchemy_url()))
+database_url = get_settings().sqlalchemy_url()
+if isinstance(database_url, URL):
+    database_url = database_url.render_as_string(hide_password=False)
+# Alembic stores this option in ConfigParser, where a literal percent must be
+# escaped on write. ConfigParser restores it on read for both migration paths.
+config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 target_metadata = Base.metadata
 
 

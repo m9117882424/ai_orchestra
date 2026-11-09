@@ -34,7 +34,7 @@ jobs:
       - name: Install locked Control Plane test dependencies
         run: python3 -m pip install --require-hashes --requirement control_plane/requirements-dev.lock
       - name: Verify actual CHECK inspector output and migration refusals
-        run: python3 -m pytest -q control_plane/tests/test_postgres_check_matrix.py
+        run: python3 -m pytest -q control_plane/tests/test_migration_url_config.py control_plane/tests/test_postgres_check_matrix.py
 
   validate:
     runs-on: ubuntu-24.04

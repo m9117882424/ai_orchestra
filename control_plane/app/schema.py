@@ -241,11 +241,29 @@ def _schema_diff(
             if (table_name, tuple(column.name for column in index.columns), bool(index.unique))
             not in excluded_indexes
         }
-        actual_indexes = {
-            (tuple(index.get("column_names") or []), bool(index.get("unique")))
-            for index in inspector.get_indexes(table_name)
-            if not index.get("duplicates_constraint")
-        }
+        actual_indexes = set()
+        for index in inspector.get_indexes(table_name):
+            if index.get("duplicates_constraint"):
+                continue
+            columns = tuple(index.get("column_names") or [])
+            unique = bool(index.get("unique"))
+            # G5 notifier owns this *one* externally-managed read index.
+            # Do not weaken the schema guard for any other index, columns,
+            # uniqueness or a filtered/functional variant with this name.
+            opts = index.get("dialect_options") or {}
+            plain = not any(
+                value not in (None, "", (), [])
+                for value in opts.values()
+            )
+            if (
+                table_name == "audit_events"
+                and index.get("name") == "ix_ai_orchestra_audit_events_created_id"
+                and columns == ("created_at", "id")
+                and not unique
+                and plain
+            ):
+                continue
+            actual_indexes.add((columns, unique))
         if actual_indexes != expected_indexes:
             differences.append(
                 f"{table_name}: indexes {sorted(actual_indexes)} != {sorted(expected_indexes)}"

@@ -23,6 +23,7 @@ import control_plane.app.models  # noqa: F401
 from control_plane.app.schema import (
     CODEX_BACKEND_REVISION,
     _POSTGRES_BACKEND_CHECK_0012,
+    _POSTGRES_BACKEND_CHECK_0012_RESTORED,
     alembic_config,
     legacy_schema_diff,
     schema_diff_for_revision,
@@ -31,6 +32,7 @@ from control_plane.app.schema import (
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "app" / "check_constraints_postgresql.json"
+RESTORED_MANIFEST = ROOT / "app" / "check_constraints_postgresql_restored.json"
 BACKEND = "ck_execution_runs_backend"
 
 
@@ -117,6 +119,40 @@ def _replace_backend(engine, expression, *, suffix=""):
         )
 
 
+def _dump_restore_schema(engine, archive):
+    """Round-trip one random test schema through the real PostgreSQL tools."""
+    raw_url = make_url(os.environ["POSTGRES_CHECK_TEST_URL"])
+    with engine.connect() as connection:
+        schema = connection.execute(text("SELECT current_schema()")).scalar_one()
+    assert schema.startswith("check_matrix_")
+    env = os.environ.copy()
+    env["PGPASSWORD"] = raw_url.password or ""
+    connection_args = [
+        "--host", raw_url.host, "--port", str(raw_url.port or 5432),
+        "--username", raw_url.username, "--dbname", raw_url.database,
+    ]
+    dumped = subprocess.run(
+        ["pg_dump", *connection_args, "--schema", schema,
+         "--format=custom", "--file", str(archive)],
+        env=env, text=True, capture_output=True, check=False,
+    )
+    assert dumped.returncode == 0, dumped.stderr
+    assert archive.stat().st_size > 0
+    engine.dispose()
+    admin = create_engine(raw_url)
+    try:
+        with admin.begin() as connection:
+            connection.exec_driver_sql(f'DROP SCHEMA "{schema}" CASCADE')
+        restored = subprocess.run(
+            ["pg_restore", *connection_args, "--no-owner", "--no-privileges",
+             str(archive)],
+            env=env, text=True, capture_output=True, check=False,
+        )
+        assert restored.returncode == 0, restored.stderr
+    finally:
+        admin.dispose()
+
+
 def test_manifest_matches_orm_and_alembic_inspector_sqltext(pg_schema):
     engine, _, major = pg_schema
     from importlib.metadata import version
@@ -145,6 +181,64 @@ def test_manifest_matches_orm_and_alembic_inspector_sqltext(pg_schema):
     _assert_manifest({key: row["sqltext"] for key, row in migrated.items()},
                      committed, f"PostgreSQL {major} Alembic Inspector")
     assert all(not row.get("dialect_options") for row in migrated.values())
+    assert legacy_schema_diff(engine) == []
+
+
+def test_pg_dump_restore_head_inspector_and_migration_refusals(pg_schema, tmp_path):
+    engine, url, major = pg_schema
+    committed = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    alternatives = json.loads(RESTORED_MANIFEST.read_text(encoding="utf-8"))
+    assert len(alternatives) == 16
+    assert set(alternatives) < set(committed)
+    Base.metadata.create_all(engine)
+    _assert_manifest({key: row["sqltext"] for key, row in _checks(engine).items()},
+                     committed, f"PostgreSQL {major} source Inspector")
+
+    _dump_restore_schema(engine, tmp_path / "current-head.dump")
+    restored = _checks(engine)
+    assert set(restored) == set(committed)
+    _assert_manifest({key: row["sqltext"] for key, row in restored.items()},
+                     committed | alternatives,
+                     f"PostgreSQL {major} restored Inspector")
+    assert all(not row.get("dialect_options") for row in restored.values())
+    assert legacy_schema_diff(engine) == []
+    migrated = _cli(url, "migrate")
+    assert migrated.returncode == 0, migrated.stderr
+    assert "stamped at 20261107_0013" in migrated.stdout
+    assert _cli(url, "check").returncode == 0
+
+    canonical = "backend IN ('opencode', 'codex-subscription', 'opencode-review')"
+    for expression, suffix in [
+        ("backend IN ('opencode', 'codex-subscription', 'opencode-review', 'other')", ""),
+        (canonical + " AND backend IS NOT NULL", ""),
+        (canonical, "NOT VALID"),
+        (canonical, "NO INHERIT"),
+    ]:
+        _replace_backend(engine, expression, suffix=suffix)
+        actual = _backend(engine)
+        if suffix:
+            assert actual.get("dialect_options"), actual
+        else:
+            assert actual["sqltext"] not in {
+                committed[f"execution_runs.{BACKEND}"],
+                alternatives[f"execution_runs.{BACKEND}"],
+            }
+        assert legacy_schema_diff(engine)
+        checked = _cli(url, "check")
+        assert checked.returncode != 0
+        assert "schema shape mismatch" in checked.stderr
+
+
+def test_pg_dump_restore_0012_keeps_historical_backend_boundary(pg_schema, tmp_path):
+    engine, url, _ = pg_schema
+    _upgrade(engine, CODEX_BACKEND_REVISION)
+    _dump_restore_schema(engine, tmp_path / "revision-0012.dump")
+    assert _backend(engine)["sqltext"] == _POSTGRES_BACKEND_CHECK_0012_RESTORED
+    assert schema_diff_for_revision(engine, CODEX_BACKEND_REVISION) == []
+    assert legacy_schema_diff(engine)
+    migrated = _cli(url, "migrate")
+    assert migrated.returncode == 0, migrated.stderr
+    assert "opencode-review" in _backend(engine)["sqltext"]
     assert legacy_schema_diff(engine) == []
 
 

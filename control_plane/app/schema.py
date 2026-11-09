@@ -26,9 +26,20 @@ _BACKEND_CHECK_0012 = "backend IN ('opencode', 'codex-subscription')"
 _POSTGRES_CHECKS = json.loads(
     (Path(__file__).with_name("check_constraints_postgresql.json")).read_text(encoding="utf-8")
 )
+# Exact Inspector strings after pg_dump/pg_restore reparses the 16 ARRAY CHECKs.
+# Keep each alternative tied to its named constraint; never normalize SQL text.
+_POSTGRES_RESTORED_CHECKS = json.loads(
+    (Path(__file__).with_name("check_constraints_postgresql_restored.json")).read_text(
+        encoding="utf-8"
+    )
+)
 _POSTGRES_BACKEND_CHECK_0012 = (
     "backend::text = ANY (ARRAY['opencode'::character varying, "
     "'codex-subscription'::character varying]::text[])"
+)
+_POSTGRES_BACKEND_CHECK_0012_RESTORED = (
+    "backend::text = ANY (ARRAY['opencode'::character varying::text, "
+    "'codex-subscription'::character varying::text])"
 )
 
 _REVISION_EXCLUDED_COLUMNS = {
@@ -210,6 +221,10 @@ def _schema_diff(
         }
         if set(_POSTGRES_CHECKS) != all_declared_checks or not declared_checks <= set(_POSTGRES_CHECKS):
             raise RuntimeError("PostgreSQL CHECK manifest differs from ORM model names")
+        if (not set(_POSTGRES_RESTORED_CHECKS) <= set(_POSTGRES_CHECKS)
+                or any(_POSTGRES_RESTORED_CHECKS[key] == _POSTGRES_CHECKS[key]
+                       for key in _POSTGRES_RESTORED_CHECKS)):
+            raise RuntimeError("PostgreSQL restored CHECK manifest is invalid")
     for table_name in sorted(expected_tables):
         table = Base.metadata.tables[table_name]
         expected_columns = {
@@ -297,7 +312,20 @@ def _schema_diff(
                 table_name, expected_checks[name], dialect.name, revision
             )
             actual = actual_checks[name]
-            if (actual.get("sqltext") != expected_sql
+            allowed_sql = {expected_sql}
+            # Revision 0012 has its own narrower backend allowlist.  All
+            # other checks share the current-head rendering at that revision.
+            if dialect.name == "postgresql":
+                key = f"{table_name}.{name}"
+                if revision == CODEX_BACKEND_REVISION and key == (
+                    f"{_BACKEND_CHECK[0]}.{_BACKEND_CHECK[1]}"
+                ):
+                    allowed_sql.add(_POSTGRES_BACKEND_CHECK_0012_RESTORED)
+                else:
+                    restored_sql = _POSTGRES_RESTORED_CHECKS.get(key)
+                    if restored_sql is not None:
+                        allowed_sql.add(restored_sql)
+            if (actual.get("sqltext") not in allowed_sql
                     or actual.get("dialect_options")):
                 differences.append(f"{table_name}: CHECK {name} expression differs")
 

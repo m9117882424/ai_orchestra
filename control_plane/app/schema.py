@@ -167,6 +167,32 @@ WHERE t.oid = pg_catalog.to_regclass(:table_name) AND x.relname = :index_name
 """)
 
 
+# A reserved relation can be the backing index of a primary-key constraint.
+# PostgreSQL's Inspector.get_indexes() deliberately omits primary-key indexes,
+# so the reserved name must be checked independently of reflected indexes.
+_NOTIFIER_RESERVED_NAME_COUNT_SQL = text("""
+SELECT count(*)
+FROM pg_catalog.pg_class
+WHERE relname = :index_name
+""")
+
+
+def _postgres_reserved_notifier_name_is_safe(bind: Engine | Connection) -> bool:
+    try:
+        if isinstance(bind, Engine):
+            with bind.connect() as connection:
+                return _postgres_reserved_notifier_name_is_safe(connection)
+        count = bind.execute(
+            _NOTIFIER_RESERVED_NAME_COUNT_SQL, {"index_name": _NOTIFIER_INDEX}
+        ).scalar_one()
+        if count == 0:
+            return True  # Notifier has not been enabled; the index is optional.
+        return count == 1 and _postgres_notifier_index_is_exact(bind)
+    except SQLAlchemyError:
+        # Fail closed if catalog inspection is unavailable.
+        return False
+
+
 def _postgres_notifier_index_is_exact(bind: Engine | Connection) -> bool:
     try:
         if isinstance(bind, Engine):
@@ -221,6 +247,8 @@ def _schema_diff(
         return differences
 
     dialect = bind.dialect
+    if dialect.name == "postgresql" and not _postgres_reserved_notifier_name_is_safe(bind):
+        differences.append("audit_events: indexes: invalid reserved notifier catalog relation")
     for table_name in sorted(expected_tables):
         table = Base.metadata.tables[table_name]
         expected_columns = {

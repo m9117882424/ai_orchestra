@@ -70,6 +70,24 @@ class ReflectionTests(unittest.TestCase):
             connection.exec_driver_sql("CREATE INDEX extra_task_id ON execution_runs(task_id)")
         self.assertTrue(schema.legacy_schema_diff(self.engine))
 
+    def test_reserved_name_catalog_presence_must_be_validated_independently(self):
+        for count, should_accept in ((0, True), (1, False), (2, False)):
+            with self.subTest(count=count):
+                connection = Mock()
+                connection.execute.return_value.scalar_one.return_value = count
+                with patch.object(schema, "_postgres_notifier_index_is_exact", return_value=False):
+                    self.assertIs(
+                        schema._postgres_reserved_notifier_name_is_safe(connection),
+                        should_accept,
+                    )
+                connection.execute.assert_called_once_with(
+                    schema._NOTIFIER_RESERVED_NAME_COUNT_SQL,
+                    {"index_name": schema._NOTIFIER_INDEX},
+                )
+        connection = Mock()
+        connection.execute.side_effect = SQLAlchemyError("unavailable")
+        self.assertFalse(schema._postgres_reserved_notifier_name_is_safe(connection))
+
     def test_catalog_failure_is_closed_and_parameters_are_fixed(self):
         for value in (False, None, True):
             connection = Mock()
@@ -95,7 +113,7 @@ class IsolatedPostgresTests(unittest.TestCase):
         data = root / "data"
         def run(*args):
             subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        run(str(pg_bin / "initdb"), "-D", str(data), "-A", "trust", "--no-locale", "-U", "schema_test")
+        run(str(pg_bin / "initdb"), "-D", str(data), "-A", "trust", "--no-locale", "--encoding=UTF8", "-U", "schema_test")
         try:
             run(str(pg_bin / "pg_ctl"), "-D", str(data), "-l", str(root / "server.log"),
                 "-o", f"-c listen_addresses='' -c unix_socket_directories='{root}'", "-w", "start")
@@ -165,6 +183,15 @@ class IsolatedPostgresTests(unittest.TestCase):
                     self.connection.exec_driver_sql(f"ALTER TABLE audit_events ADD CONSTRAINT {name} UNIQUE ({keys})")
                     self.assertTrue(schema.legacy_schema_diff(self.connection))
                     savepoint.rollback()
+
+    def test_reserved_primary_key_name_collision_is_rejected(self):
+        # PostgreSQL get_indexes() excludes PK indexes; their names must still
+        # be checked before trusting an absent notifier index.
+        self.connection.exec_driver_sql(
+            f"ALTER INDEX public.audit_events_pkey RENAME TO {schema._NOTIFIER_INDEX}"
+        )
+        self.assertFalse(schema._postgres_reserved_notifier_name_is_safe(self.connection))
+        self.assertTrue(schema.legacy_schema_diff(self.connection))
 
     def test_catalog_validity_and_readiness(self):
         self.create_index()

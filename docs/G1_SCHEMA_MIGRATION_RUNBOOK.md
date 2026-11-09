@@ -7,7 +7,7 @@ Use this runbook to upgrade Control Plane PostgreSQL through the reviewed Alembi
 `schema_cli migrate` handles the following cases under the existing database lock.
 
 - For an empty database or a known versioned database, Alembic runs the applicable upgrades.
-- For an unversioned database, the tool checks the complete schema shape. An exact current schema can be stamped at the head. The explicitly supported historical shapes `20260904_0001` and `20260917_0011` are stamped at their matching revision and then upgraded.
+- For an unversioned database, the tool checks the complete schema shape, including each named CHECK expression. An exact current schema can be stamped at the head. The explicitly supported historical shapes `20260904_0001`, `20260917_0011`, and `20261010_0012` are stamped at their matching revision and then upgraded. The `0012` backend CHECK admits only `opencode` and `codex-subscription`; it must pass that exact check before the `0013` migration adds `opencode-review`.
 - Any unknown shape or drift stops migration. The tool verifies the resulting revision and schema before it commits.
 
 ## Invariants

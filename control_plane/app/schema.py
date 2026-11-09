@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from importlib.metadata import version as package_version
+import json
 from pathlib import Path
 
 from alembic.config import Config
@@ -15,8 +17,22 @@ from . import models as _models  # noqa: F401
 CONTROL_PLANE_ROOT = Path(__file__).resolve().parents[1]
 LEGACY_BASELINE_REVISION = "20260904_0001"
 PREVIOUS_HEAD_REVISION = "20260917_0011"
+CODEX_BACKEND_REVISION = "20261010_0012"
+_BACKEND_CHECK = ("execution_runs", "ck_execution_runs_backend")
+_BACKEND_CHECK_0012 = "backend IN ('opencode', 'codex-subscription')"
+# SQLAlchemy Inspector.get_check_constraints() sqltext, verified against ORM
+# and Alembic schemas by tests/test_postgres_check_matrix.py on PostgreSQL 14/16.
+# This is deliberately exact text: no expression normalization is permitted.
+_POSTGRES_CHECKS = json.loads(
+    (Path(__file__).with_name("check_constraints_postgresql.json")).read_text(encoding="utf-8")
+)
+_POSTGRES_BACKEND_CHECK_0012 = (
+    "backend::text = ANY (ARRAY['opencode'::character varying, "
+    "'codex-subscription'::character varying]::text[])"
+)
 
 _REVISION_EXCLUDED_COLUMNS = {
+    CODEX_BACKEND_REVISION: frozenset(),
     PREVIOUS_HEAD_REVISION: frozenset({("execution_runs", "backend")}),
     LEGACY_BASELINE_REVISION: frozenset(
         {
@@ -58,6 +74,7 @@ _REVISION_ABSENT_TABLES = {
     ),
 }
 _REVISION_EXCLUDED_INDEXES = {
+    CODEX_BACKEND_REVISION: frozenset(),
     PREVIOUS_HEAD_REVISION: frozenset(),
     LEGACY_BASELINE_REVISION: frozenset(
         {
@@ -73,6 +90,7 @@ _REVISION_EXCLUDED_INDEXES = {
     )
 }
 _REVISION_EXCLUDED_CHECKS = {
+    CODEX_BACKEND_REVISION: frozenset(),
     PREVIOUS_HEAD_REVISION: frozenset({("execution_runs", "ck_execution_runs_backend")}),
     LEGACY_BASELINE_REVISION: frozenset(
         {
@@ -127,6 +145,22 @@ def _compiled_type(column_type, dialect) -> str:
     return " ".join(column_type.compile(dialect=dialect).lower().split())
 
 
+def _expected_check_sql(table_name: str, constraint: CheckConstraint, dialect_name: str,
+                        revision: str | None) -> str:
+    key = (table_name, constraint.name)
+    if dialect_name == "sqlite":
+        if revision == CODEX_BACKEND_REVISION and key == _BACKEND_CHECK:
+            return _BACKEND_CHECK_0012
+        return str(constraint.sqltext)
+    if dialect_name == "postgresql":
+        if revision == CODEX_BACKEND_REVISION and key == _BACKEND_CHECK:
+            return _POSTGRES_BACKEND_CHECK_0012
+        # PostgreSQL deparses IN, casts, and parentheses differently from the
+        # model source. These are the exact PostgreSQL-rendered head expressions.
+        return _POSTGRES_CHECKS[f"{table_name}.{constraint.name}"]
+    raise RuntimeError(f"Unsupported dialect for CHECK verification: {dialect_name}")
+
+
 def _schema_diff(
     bind: Engine | Connection,
     *,
@@ -135,6 +169,7 @@ def _schema_diff(
     excluded_indexes: frozenset[tuple[str, tuple[str, ...], bool]] = frozenset(),
     excluded_checks: frozenset[tuple[str, str]] = frozenset(),
     nullable_overrides: dict[tuple[str, str], bool] | None = None,
+    revision: str | None = None,
 ) -> list[str]:
     """Compare a database with an exact declared schema shape.
 
@@ -155,6 +190,26 @@ def _schema_diff(
         return differences
 
     dialect = bind.dialect
+    if dialect.name == "postgresql":
+        server_major = dialect.server_version_info[0]
+        if server_major not in (14, 16):
+            raise RuntimeError(f"Unsupported PostgreSQL CHECK rendering: {server_major}")
+        if package_version("SQLAlchemy") != "2.0.52":
+            raise RuntimeError("PostgreSQL CHECK verification requires SQLAlchemy 2.0.52")
+        declared_checks = {
+            f"{name}.{constraint.name}"
+            for name in expected_tables
+            for constraint in Base.metadata.tables[name].constraints
+            if isinstance(constraint, CheckConstraint) and constraint.name
+        }
+        all_declared_checks = {
+            f"{name}.{constraint.name}"
+            for name, table in Base.metadata.tables.items()
+            for constraint in table.constraints
+            if isinstance(constraint, CheckConstraint) and constraint.name
+        }
+        if set(_POSTGRES_CHECKS) != all_declared_checks or not declared_checks <= set(_POSTGRES_CHECKS):
+            raise RuntimeError("PostgreSQL CHECK manifest differs from ORM model names")
     for table_name in sorted(expected_tables):
         table = Base.metadata.tables[table_name]
         expected_columns = {
@@ -219,21 +274,32 @@ def _schema_diff(
             differences.append(f"{table_name}: foreign keys differ")
 
         expected_checks = {
-            constraint.name
+            constraint.name: constraint
             for constraint in table.constraints
             if isinstance(constraint, CheckConstraint) and constraint.name
             and (table_name, constraint.name) not in excluded_checks
         }
+        actual_check_rows = inspector.get_check_constraints(table_name)
         actual_checks = {
-            constraint.get("name")
-            for constraint in inspector.get_check_constraints(table_name)
+            constraint.get("name"): constraint
+            for constraint in actual_check_rows
             if constraint.get("name")
         }
-        if actual_checks != expected_checks:
+        if actual_checks.keys() != expected_checks.keys():
             differences.append(
                 f"{table_name}: check constraints {sorted(actual_checks)} "
                 f"!= {sorted(expected_checks)}"
             )
+        if len(actual_check_rows) != len(actual_checks):
+            differences.append(f"{table_name}: unnamed or duplicate CHECK constraint")
+        for name in sorted(expected_checks.keys() & actual_checks.keys()):
+            expected_sql = _expected_check_sql(
+                table_name, expected_checks[name], dialect.name, revision
+            )
+            actual = actual_checks[name]
+            if (actual.get("sqltext") != expected_sql
+                    or actual.get("dialect_options")):
+                differences.append(f"{table_name}: CHECK {name} expression differs")
 
         expected_indexes = {
             (tuple(column.name for column in index.columns), bool(index.unique))
@@ -270,6 +336,7 @@ def schema_diff_for_revision(bind: Engine | Connection, revision: str) -> list[s
         excluded_indexes=_REVISION_EXCLUDED_INDEXES[revision],
         excluded_checks=_REVISION_EXCLUDED_CHECKS.get(revision, frozenset()),
         nullable_overrides=_REVISION_NULLABLE_OVERRIDES.get(revision),
+        revision=revision,
     )
 
 

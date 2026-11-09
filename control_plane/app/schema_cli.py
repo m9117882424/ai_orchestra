@@ -9,6 +9,7 @@ from sqlalchemy import text
 
 from .database_engine import create_configured_engine
 from .schema import (
+    CODEX_BACKEND_REVISION,
     LEGACY_BASELINE_REVISION,
     PREVIOUS_HEAD_REVISION,
     alembic_config,
@@ -80,7 +81,9 @@ def migrate_schema() -> None:
                 print(f"[OK] Existing schema verified and stamped at {expected}; data unchanged")
                 return
 
-            historical = (PREVIOUS_HEAD_REVISION, LEGACY_BASELINE_REVISION)
+            historical = (
+                CODEX_BACKEND_REVISION, PREVIOUS_HEAD_REVISION, LEGACY_BASELINE_REVISION
+            )
             matches = [revision for revision in historical
                        if not schema_diff_for_revision(connection, revision)]
             if not matches:
@@ -111,6 +114,12 @@ def migrate_schema() -> None:
                 f"migrated to {expected}; data unchanged"
             )
             return
+
+        if current == CODEX_BACKEND_REVISION:
+            differences = schema_diff_for_revision(connection, current)
+            if differences:
+                joined = "\n - ".join(differences)
+                raise RuntimeError("schema drift at revision 0012; refusing upgrade:\n - " + joined)
 
         command.upgrade(cfg, "head")
         final = _current_revision(connection)

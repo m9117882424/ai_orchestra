@@ -9,7 +9,12 @@ from sqlalchemy import create_engine, inspect, text
 
 from control_plane.app.database_base import Base
 import control_plane.app.models  # noqa: F401
-from control_plane.app.schema import head_revision, legacy_schema_diff
+from control_plane.app.schema import (
+    CODEX_BACKEND_REVISION,
+    head_revision,
+    legacy_schema_diff,
+    schema_diff_for_revision,
+)
 
 
 CONTROL_PLANE_ROOT = Path(__file__).resolve().parents[1]
@@ -337,6 +342,91 @@ def test_matching_current_unversioned_database_is_verified_then_stamped(tmp_path
     with engine.connect() as connection:
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
     assert revision == "20261107_0013"
+
+
+def _rewrite_sqlite_check(engine, old: str, new: str) -> None:
+    # A disposable fixture emulates a DBA-edited catalog without invoking the
+    # reviewed Alembic migration. Reopening the CLI reparses the changed schema.
+    with engine.begin() as connection:
+        before = connection.execute(text(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='execution_runs'"
+        )).scalar_one()
+        assert old in before
+        schema_version = connection.exec_driver_sql("PRAGMA schema_version").scalar_one()
+        connection.exec_driver_sql("PRAGMA writable_schema=ON")
+        connection.execute(text(
+            "UPDATE sqlite_master SET sql=:sql WHERE type='table' AND name='execution_runs'"
+        ), {"sql": before.replace(old, new)})
+        connection.exec_driver_sql("PRAGMA writable_schema=OFF")
+        connection.exec_driver_sql(f"PRAGMA schema_version={schema_version + 1}")
+
+
+def test_unversioned_0012_is_upgraded_instead_of_stamped_at_0013(tmp_path):
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'unversioned-0012.db'}"
+    created = _run_alembic_upgrade(database_url, CODEX_BACKEND_REVISION)
+    assert created.returncode == 0, created.stderr
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DROP TABLE alembic_version")
+    assert schema_diff_for_revision(engine, CODEX_BACKEND_REVISION) == []
+    assert any("CHECK ck_execution_runs_backend expression differs" in item
+               for item in legacy_schema_diff(engine))
+
+    migrated = _run_schema_cli(database_url, "migrate")
+    assert migrated.returncode == 0, migrated.stderr
+    assert "Historical baseline 20261010_0012 verified" in migrated.stdout
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "20261107_0013"
+        backend_check = next(check for check in inspect(connection).get_check_constraints(
+            "execution_runs") if check["name"] == "ck_execution_runs_backend")
+        assert "opencode-review" in backend_check["sqltext"]
+
+
+def test_stale_backend_check_cannot_stamp_0013(tmp_path):
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'stale-backend.db'}"
+    engine = create_engine(database_url)
+    Base.metadata.create_all(engine)
+    _rewrite_sqlite_check(
+        engine,
+        "backend IN ('opencode', 'codex-subscription', 'opencode-review')",
+        "backend IN ('opencode', 'codex-subscription')",
+    )
+    result = _run_schema_cli(database_url, "migrate")
+    assert result.returncode == 0, result.stderr
+    assert "Historical baseline 20261010_0012 verified" in result.stdout
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "20261107_0013"
+
+
+def test_weakened_named_backend_check_refuses_stamp_and_upgrade(tmp_path):
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'weakened-backend.db'}"
+    created = _run_alembic_upgrade(database_url, CODEX_BACKEND_REVISION)
+    assert created.returncode == 0, created.stderr
+    engine = create_engine(database_url)
+    _rewrite_sqlite_check(engine,
+                          "backend IN ('opencode', 'codex-subscription')", "1 = 1")
+    assert any("CHECK ck_execution_runs_backend expression differs" in item
+               for item in schema_diff_for_revision(engine, CODEX_BACKEND_REVISION))
+    result = _run_schema_cli(database_url, "migrate")
+    assert result.returncode != 0
+    assert "refusing upgrade" in result.stderr
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == CODEX_BACKEND_REVISION
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DROP TABLE alembic_version")
+    result = _run_schema_cli(database_url, "migrate")
+    assert result.returncode != 0
+    assert "refusing stamp" in result.stderr
+    assert "alembic_version" not in inspect(engine).get_table_names()
+
+
+def test_other_named_check_expression_drift_is_detected(tmp_path):
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'other-check.db'}")
+    Base.metadata.create_all(engine)
+    _rewrite_sqlite_check(engine, "contract_version IN (1, 2)", "1 = 1")
+    assert any("CHECK ck_execution_runs_contract_version expression differs" in item
+               for item in legacy_schema_diff(engine))
 
 
 def test_unversioned_historical_baseline_is_verified_then_migrated(tmp_path):

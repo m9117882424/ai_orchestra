@@ -735,6 +735,95 @@ def test_production_application_never_repairs_schema_drift(tmp_path):
     assert "missing table: audit_events" in started.stderr
 
 
+
+def test_notifier_owned_audit_index_is_only_exact_named_unfiltered_nonunique_pair(tmp_path):
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'notifier-index.db'}"
+    migrated = _run_schema_cli(database_url, "migrate")
+    assert migrated.returncode == 0, migrated.stderr
+
+    engine = create_engine(database_url)
+    assert legacy_schema_diff(engine) == []
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE INDEX ix_ai_orchestra_audit_events_created_id "
+            "ON audit_events (created_at, id)"
+        )
+    assert legacy_schema_diff(engine) == []
+
+    for definition in (
+        "CREATE INDEX ix_ai_orchestra_audit_events_created_id "
+        "ON audit_events (id, created_at)",
+        "CREATE UNIQUE INDEX ix_ai_orchestra_audit_events_created_id "
+        "ON audit_events (created_at, id)",
+        "CREATE INDEX ix_ai_orchestra_audit_events_created_id "
+        "ON audit_events (created_at, id) WHERE action IS NOT NULL",
+        "CREATE INDEX other_audit_events_created_id "
+        "ON audit_events (created_at, id)",
+    ):
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "DROP INDEX IF EXISTS ix_ai_orchestra_audit_events_created_id"
+            )
+            connection.exec_driver_sql(
+                "DROP INDEX IF EXISTS other_audit_events_created_id"
+            )
+            connection.exec_driver_sql(definition)
+        assert any(
+            "audit_events: indexes" in difference
+            for difference in legacy_schema_diff(engine)
+        ), definition
+
+def test_notifier_index_reflection_rejects_nondefault_postgresql_options(
+    tmp_path, monkeypatch
+):
+    """Reflective drift must fail closed even with approved name/columns."""
+    from control_plane.app import schema as schema_module
+
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'notifier-reflection.db'}"
+    migrated = _run_schema_cli(database_url, "migrate")
+    assert migrated.returncode == 0, migrated.stderr
+
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE INDEX ix_ai_orchestra_audit_events_created_id "
+            "ON audit_events (created_at, id)"
+        )
+    assert legacy_schema_diff(engine) == []
+
+    real_inspect = schema_module.inspect
+    variants = (
+        {"column_sorting": {"created_at": ("desc", "nulls_last")}},
+        {"column_sorting": {"id": ("nulls_first",)}},
+        {"include_columns": ["action"]},
+        {"expressions": ["created_at", "id"]},
+        {"dialect_options": {"postgresql_include": [], "postgresql_using": "hash"}},
+        {"dialect_options": {"postgresql_include": [], "postgresql_where": "action IS NOT NULL"}},
+    )
+    for variant in variants:
+        def inject_reflection(bind):
+            inspector = real_inspect(bind)
+            original_get_indexes = inspector.get_indexes
+
+            def reflected_indexes(table_name, **kwargs):
+                indexes = original_get_indexes(table_name, **kwargs)
+                if table_name != "audit_events":
+                    return indexes
+                return [
+                    {**index, **variant}
+                    if index.get("name") == "ix_ai_orchestra_audit_events_created_id"
+                    else index
+                    for index in indexes
+                ]
+
+            inspector.get_indexes = reflected_indexes
+            return inspector
+
+        monkeypatch.setattr(schema_module, "inspect", inject_reflection)
+        differences = legacy_schema_diff(engine)
+        assert any("audit_events: indexes" in diff for diff in differences), variant
+
+
 def test_production_application_detects_index_drift_with_valid_revision(tmp_path):
     database_path = tmp_path / "index-drift.db"
     database_url = f"sqlite+pysqlite:///{database_path}"

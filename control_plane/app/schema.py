@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import CheckConstraint, inspect
+from sqlalchemy import CheckConstraint, UniqueConstraint, inspect, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.engine import Connection, Engine
 
 from .database_base import Base
@@ -127,6 +129,85 @@ def _compiled_type(column_type, dialect) -> str:
     return " ".join(column_type.compile(dialect=dialect).lower().split())
 
 
+_NOTIFIER_INDEX = "ix_ai_orchestra_audit_events_created_id"
+
+# Reflection omits validity, readiness and collation. Resolve the same unqualified
+# table as Inspector, then require that it and its index actually belong to public.
+_NOTIFIER_INDEX_SQL = text("""
+SELECT i.indisvalid AND i.indisready AND i.indislive
+    AND NOT i.indisunique AND NOT i.indisprimary AND NOT i.indisexclusion
+    AND tn.nspname = :schema AND xn.nspname = :schema
+    AND am.amname = 'btree' AND i.indnkeyatts = 2 AND i.indnatts = 2
+    AND i.indexprs IS NULL AND i.indpred IS NULL
+    AND NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_constraint c WHERE c.conindid = x.oid
+    )
+    AND (
+        SELECT count(*) = 2
+        FROM pg_catalog.generate_series(0, 1) AS key_position(n)
+        JOIN pg_catalog.pg_attribute a
+          ON a.attrelid = t.oid AND a.attnum = i.indkey[n]
+        JOIN pg_catalog.pg_opclass opc ON opc.oid = i.indclass[n]
+        WHERE a.attname = CASE n WHEN 0 THEN 'created_at' ELSE 'id' END
+          AND NOT a.attisdropped AND i.indoption[n] = 0
+          AND i.indcollation[n] = a.attcollation
+          AND i.indcollation[n] = CASE n WHEN 0 THEN 0::oid
+              ELSE 'pg_catalog."default"'::regcollation::oid END
+          AND opc.opcdefault AND opc.opcmethod = am.oid
+          AND opc.opcnamespace = 'pg_catalog'::regnamespace
+          AND opc.opcname = CASE n WHEN 0 THEN 'timestamptz_ops' ELSE 'text_ops' END
+    ) AS exact_shape
+FROM pg_catalog.pg_index i
+JOIN pg_catalog.pg_class t ON t.oid = i.indrelid
+JOIN pg_catalog.pg_namespace tn ON tn.oid = t.relnamespace
+JOIN pg_catalog.pg_class x ON x.oid = i.indexrelid
+JOIN pg_catalog.pg_namespace xn ON xn.oid = x.relnamespace
+JOIN pg_catalog.pg_am am ON am.oid = x.relam
+WHERE t.oid = pg_catalog.to_regclass(:table_name) AND x.relname = :index_name
+""")
+
+
+# A reserved relation can be the backing index of a primary-key constraint.
+# PostgreSQL's Inspector.get_indexes() deliberately omits primary-key indexes,
+# so the reserved name must be checked independently of reflected indexes.
+_NOTIFIER_RESERVED_NAME_COUNT_SQL = text("""
+SELECT count(*)
+FROM pg_catalog.pg_class
+WHERE relname = :index_name
+""")
+
+
+def _postgres_reserved_notifier_name_is_safe(bind: Engine | Connection) -> bool:
+    try:
+        if isinstance(bind, Engine):
+            with bind.connect() as connection:
+                return _postgres_reserved_notifier_name_is_safe(connection)
+        count = bind.execute(
+            _NOTIFIER_RESERVED_NAME_COUNT_SQL, {"index_name": _NOTIFIER_INDEX}
+        ).scalar_one()
+        if count == 0:
+            return True  # Notifier has not been enabled; the index is optional.
+        return count == 1 and _postgres_notifier_index_is_exact(bind)
+    except SQLAlchemyError:
+        # Fail closed if catalog inspection is unavailable.
+        return False
+
+
+def _postgres_notifier_index_is_exact(bind: Engine | Connection) -> bool:
+    try:
+        if isinstance(bind, Engine):
+            with bind.connect() as connection:
+                return _postgres_notifier_index_is_exact(connection)
+        return bind.execute(
+            _NOTIFIER_INDEX_SQL,
+            {"schema": "public", "table_name": "audit_events", "index_name": _NOTIFIER_INDEX},
+        ).scalar_one_or_none() is True
+    except SQLAlchemyError:
+        # Missing catalog visibility or unsupported catalog layout cannot prove
+        # the exception safe. Do not expose database error details here.
+        return False
+
+
 def _schema_diff(
     bind: Engine | Connection,
     *,
@@ -141,6 +222,17 @@ def _schema_diff(
     Historical exclusions/overrides reconstruct only explicitly known Alembic
     baselines from today's ORM metadata. Partial or unknown drift still fails closed.
     """
+    if isinstance(bind, Engine):
+        # Reflection and catalog verification must use the same search_path/session.
+        with bind.connect() as connection:
+            return _schema_diff(
+                connection,
+                expected_absent_tables=expected_absent_tables,
+                excluded_columns=excluded_columns,
+                excluded_indexes=excluded_indexes,
+                excluded_checks=excluded_checks,
+                nullable_overrides=nullable_overrides,
+            )
     differences: list[str] = []
     nullable_overrides = nullable_overrides or {}
     inspector = inspect(bind)
@@ -155,6 +247,8 @@ def _schema_diff(
         return differences
 
     dialect = bind.dialect
+    if dialect.name == "postgresql" and not _postgres_reserved_notifier_name_is_safe(bind):
+        differences.append("audit_events: indexes: invalid reserved notifier catalog relation")
     for table_name in sorted(expected_tables):
         table = Base.metadata.tables[table_name]
         expected_columns = {
@@ -235,20 +329,64 @@ def _schema_diff(
                 f"!= {sorted(expected_checks)}"
             )
 
-        expected_indexes = {
+        expected_uniques = Counter(
+            tuple(column.name for column in constraint.columns)
+            for constraint in table.constraints
+            if isinstance(constraint, UniqueConstraint)
+            and not any((table_name, column.name) in excluded_columns
+                        for column in constraint.columns)
+        )
+        unique_constraints = inspector.get_unique_constraints(table_name)
+        actual_uniques = Counter(
+            tuple(constraint.get("column_names") or []) for constraint in unique_constraints
+        )
+        if actual_uniques != expected_uniques:
+            differences.append(f"{table_name}: unique constraints differ")
+        constraint_names = {constraint.get("name") for constraint in unique_constraints}
+
+        expected_indexes = Counter(
             (tuple(column.name for column in index.columns), bool(index.unique))
             for index in table.indexes
             if (table_name, tuple(column.name for column in index.columns), bool(index.unique))
             not in excluded_indexes
-        }
-        actual_indexes = {
-            (tuple(index.get("column_names") or []), bool(index.get("unique")))
-            for index in inspector.get_indexes(table_name)
-            if not index.get("duplicates_constraint")
-        }
+        )
+        actual_indexes = Counter()
+        for index in inspector.get_indexes(table_name):
+            columns = tuple(index.get("column_names") or [])
+            unique = bool(index.get("unique"))
+            # G5 notifier owns this *one* externally-managed read index.
+            # Do not weaken the schema guard for any other index, columns,
+            # uniqueness or a filtered/functional variant with this name.
+            opts = index.get("dialect_options") or {}
+            plain = not any(
+                value not in (None, "", (), [])
+                for value in opts.values()
+            )
+            reserved = index.get("name") == _NOTIFIER_INDEX
+            if (
+                table_name == "audit_events"
+                and reserved
+                and columns == ("created_at", "id")
+                and not unique
+                and plain
+                and not index.get("column_sorting")
+                and not index.get("include_columns")
+                and not index.get("expressions")
+                and not index.get("duplicates_constraint")
+                and (dialect.name != "postgresql" or _postgres_notifier_index_is_exact(bind))
+            ):
+                continue
+            if reserved:
+                differences.append(f"{table_name}: indexes: invalid reserved notifier index")
+            elif (index.get("duplicates_constraint")
+                  and index["duplicates_constraint"] in constraint_names):
+                # Its shape was checked above; do not double-count its backing index.
+                continue
+            actual_indexes[(columns, unique)] += 1
         if actual_indexes != expected_indexes:
             differences.append(
-                f"{table_name}: indexes {sorted(actual_indexes)} != {sorted(expected_indexes)}"
+                f"{table_name}: indexes {sorted(actual_indexes.items(), key=repr)} "
+                f"!= {sorted(expected_indexes.items(), key=repr)}"
             )
 
     return differences

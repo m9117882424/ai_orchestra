@@ -112,6 +112,17 @@ jobs:
       - name: Проверить PostgreSQL migration semantics
         run: bash ./scripts/postgres-schema-smoke.sh
 
+      - name: Проверить точную форму индекса notifier в изолированном PostgreSQL
+        run: |
+          set -Eeuo pipefail
+          if [[ ! -x /usr/lib/postgresql/16/bin/initdb ]]; then
+            sudo apt-get install -y postgresql-16
+          fi
+          test -x /usr/lib/postgresql/16/bin/initdb
+          test -x /usr/lib/postgresql/16/bin/pg_ctl
+          SCHEMA_TEST_PG_BIN=/usr/lib/postgresql/16/bin \
+            python3 -m unittest control_plane.tests.test_schema_notifier_index -v
+
       - name: Проверить базовый OpenCode toolchain
         run: |
           docker compose run --rm -T --no-deps --entrypoint sh opencode -lc '

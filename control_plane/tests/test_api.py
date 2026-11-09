@@ -334,6 +334,32 @@ def test_subscription_missing_token_setting_fails_before_queue(auth, mutation_he
         assert db.query(ExecutionRun).filter_by(task_id=task_id).count() == 0
 
 
+@pytest.mark.parametrize("tier", ["general-high-assurance", "regulated-critical"])
+def test_subscription_rejects_high_assurance_before_creating_workspace(
+    auth, mutation_headers, tier
+):
+    with TestClient(app) as client:
+        task_id = _create_development_task(client, auth, mutation_headers)
+        with SessionLocal() as db:
+            task = db.get(Task, task_id)
+            repository_id = task.repository_id
+            repository = db.get(Repository, repository_id)
+            repository.assurance_tier = tier
+            repository.assurance_profile = "test-regulated-profile" if tier == "regulated-critical" else None
+            db.commit()
+        rejected = client.post(
+            f"/api/tasks/{task_id}/execute", auth=auth, headers=mutation_headers
+        )
+        assert rejected.status_code == 409
+        assert "general-standard" in rejected.json()["detail"]
+        assert tier in rejected.json()["detail"]
+        with SessionLocal() as db:
+            assert db.query(ExecutionRun).filter_by(task_id=task_id).count() == 0
+            assert db.query(TaskWorkspace).filter_by(task_id=task_id).count() == 0
+            assert db.get(Task, task_id).status == "backlog"
+            assert db.get(Repository, repository_id).assurance_tier == tier
+
+
 def test_unknown_backend_rejected_without_fallback(auth, mutation_headers):
     with TestClient(app) as client:
         task_id = _create_development_task(client, auth, mutation_headers)

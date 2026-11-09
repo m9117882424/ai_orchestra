@@ -31,6 +31,7 @@ ROLES = ("architect", "qa", "reviewer")
 MAX_FINAL_CHARS = 100_000
 MAX_FINAL_BYTES = 400_000
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
+SUBSCRIPTION_ASSURANCE_TIER = "general-standard"
 Db = Annotated[Session, Depends(get_db)]
 
 
@@ -99,11 +100,18 @@ def binding(db: Session, run: ExecutionRun) -> WorkspaceBinding:
     )
 
 
-def repository_trusted(db: Session, run: ExecutionRun) -> bool:
+def repository_trust_error(db: Session, run: ExecutionRun) -> str | None:
     repository = db.get(Repository, run.repository_id)
-    return bool(repository and repository.enabled and repository.status == "ready"
-                and repository.last_known_commit == run.base_commit
-                and repository.assurance_tier == "general-standard")
+    if (not repository or not repository.enabled or repository.status != "ready"
+            or repository.last_known_commit != run.base_commit):
+        return "repository_trust_revoked"
+    if repository.assurance_tier != SUBSCRIPTION_ASSURANCE_TIER:
+        return "subscription_assurance_unsupported"
+    return None
+
+
+def repository_trusted(db: Session, run: ExecutionRun) -> bool:
+    return repository_trust_error(db, run) is None
 
 
 def terminal(db: Session, run: ExecutionRun, code: str, now: datetime, *, status: str = "failed"):
@@ -170,8 +178,9 @@ def claim(db: Db, _: Worker):
                  now, status="cancelled" if queued.cancel_requested_at else "failed")
         db.commit()
         return None
-    if not repository_trusted(db, queued):
-        terminal(db, queued, "repository_trust_revoked", now)
+    trust_error = repository_trust_error(db, queued)
+    if trust_error:
+        terminal(db, queued, trust_error, now)
         db.commit()
         return None
     try:
@@ -296,8 +305,9 @@ def phase(run_id: str, body: PhaseResult, db: Db, _: Worker):
     if body.outcome == "completed" and hashlib.sha256(body.final_text.encode("utf-8")).hexdigest() != body.final_sha256:
         raise HTTPException(422, "Final report checksum mismatch")
     now = now_utc()
-    if not repository_trusted(db, run):
-        terminal(db, run, "repository_trust_revoked", now)
+    trust_error = repository_trust_error(db, run)
+    if trust_error:
+        terminal(db, run, trust_error, now)
         db.commit()
         return {"status": "failed"}
     child = ExecutionChildRun(

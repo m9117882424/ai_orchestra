@@ -35,7 +35,7 @@ BACKEND = "ck_execution_runs_backend"
 
 
 @pytest.fixture
-def pg_schema():
+def pg_schema(monkeypatch):
     raw_url = os.environ.get("POSTGRES_CHECK_TEST_URL")
     if not raw_url:
         pytest.skip("UNVERIFIED locally: POSTGRES_CHECK_TEST_URL is unset")
@@ -54,6 +54,10 @@ def pg_schema():
     scoped_url = url.update_query_dict({"options": f"-csearch_path={name}"})
     engine = create_engine(scoped_url)
     try:
+        # Alembic env.py imports ``app`` as it does in the deployed Control
+        # Plane.  Programmatic command.upgrade() does not apply the CLI's
+        # prepend_sys_path setting, so expose that package for this fixture.
+        monkeypatch.syspath_prepend(str(ROOT))
         yield engine, scoped_url.render_as_string(hide_password=False), major
     finally:
         engine.dispose()
